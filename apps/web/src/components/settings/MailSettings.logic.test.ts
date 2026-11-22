@@ -1,6 +1,12 @@
 import { expect, it } from "vite-plus/test";
-import type { MailRule } from "@t3tools/contracts";
-import { insertToneNotes, normalizeRule } from "./MailSettings.logic";
+import {
+  EnvironmentId,
+  USAGE_CONTRACT_VERSION,
+  UsageDay,
+  type MailRule,
+  type UsageSummary,
+} from "@t3tools/contracts";
+import { insertToneNotes, mailUsageShare, normalizeRule } from "./MailSettings.logic";
 
 it("requires a match and drops empty fields before previewing or saving", () => {
   const rule: MailRule = {
@@ -32,4 +38,59 @@ it("adds voice notes within the existing tone section or creates one", () => {
     "## Tone\r\n- Hello\r\n- Keep it short.\r\n",
   );
   expect(insertToneNotes(original, "  ")).toBe(original);
+});
+
+it("compares Mail with recorded provider tokens only when the summary can support a share", () => {
+  const day = UsageDay.make("2026-11-16");
+  const source = {
+    fingerprint: {
+      hostId: "host",
+      provider: "codex",
+      resolvedHomePath: "/synthetic",
+      volumeId: "",
+    },
+    status: "ok",
+    scannedFiles: 1,
+    skippedFiles: 0,
+    malformedRecords: 0,
+    distinctSessions: 1,
+    message: null,
+  } as const;
+  const summary: UsageSummary = {
+    contractVersion: USAGE_CONTRACT_VERSION,
+    readAt: "2026-11-16T18:00:00Z",
+    sinceDay: day,
+    untilDay: day,
+    timeZone: "UTC",
+    sources: [source],
+    scanDurationMs: 0,
+    pricing: { status: "unavailable", source: "fixture", knownModels: 0, fetchedAt: null },
+    buckets: [
+      {
+        day,
+        provider: "codex",
+        model: "test",
+        records: 1,
+        sessions: 1,
+        unpricedRecords: 1,
+        costUsd: 0,
+        cacheSavingsUsd: 0,
+        costSource: "unpriced",
+        totals: {
+          uncachedInputTokens: 20,
+          cachedInputTokens: 30,
+          cacheCreationTokens: 10,
+          outputTokens: 40,
+          reasoningTokens: 25,
+        },
+      },
+    ],
+  };
+  const environment = EnvironmentId.make("test");
+  expect(mailUsageShare(environment, 25, summary)).toBe(0.25);
+  expect(mailUsageShare(environment, 120, summary)).toBeNull();
+  expect(mailUsageShare(environment, 0, { ...summary, buckets: [] })).toBeNull();
+  expect(
+    mailUsageShare(environment, 25, { ...summary, sources: [{ ...source, refreshing: true }] }),
+  ).toBeNull();
 });

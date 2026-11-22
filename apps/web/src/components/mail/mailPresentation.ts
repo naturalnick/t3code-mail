@@ -86,11 +86,18 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "unsnooze":
       return resolve(msg("Woke from snooze"));
     case "draft":
-      return resolve(msg("Left a draft"));
+      if (action.reason === "discard") return resolve(msg("Discard draft"));
+      return action.reason === "edit" ? resolve(msg("Edit draft")) : resolve(msg("Left a draft"));
+    case "mark_read":
+      return resolve(msg("Read"));
+    case "wait_for_reply":
+      return resolve(msg("Waiting for reply"));
     case "send":
       return resolve(msg("Sent a reply"));
     case "trust":
       return resolve(msg("Changed trust"));
+    case "nudge":
+      return nudgeLabel(action.reason, resolve) ?? resolve(msg("Returned to Active"));
     case "returned":
       return resolve(msg("Returned to Active"));
     case "propose":

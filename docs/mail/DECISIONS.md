@@ -2,7 +2,7 @@
 
 One line each. Made during the unattended v1 build; revisit any of them.
 
-- Mail data lives in its own SQLite file (`<state>/mail/mail.sqlite`) with its own migrations, so upstream migration numbers never collide with the fork and mail can be reset by deleting one folder.
+- Mail data lives in its own SQLite file (`<state>/mail/mail.sqlite`) with its own migrations. The orchestration database also indexes completed provider turns for the weekly usage meter.
 - Mail threads are not orchestration threads. A mailbox has thousands of threads; the shell stream would carry all of them. Mail keeps its own thread table and sidebar states.
 - A mail thread's chat session (L2) is a real T3 thread, created lazily the first time the user asks the AI about that email, in one hidden "Mail" project per environment rooted at `<state>/mail/workspace` (which holds EMAIL.md). This gives the model picker, subagents and the normal composer for free.
 - The coding sidebar, project pickers and command palette hide the Mail project; the Mail tab shows its sessions inside mail threads.
@@ -19,16 +19,16 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - Undo reverses only its own action's trust effect (one approval, one rejection, one level change) on the keys recorded at the time, so later approvals and a sender change on the thread are kept.
 - Guardrails (replied-to people, urgent wording, money/invoices, security alerts, legal) block auto-settle unless the sender key was explicitly promoted by the user in Settings. They read the whole cleaned message, not the model's 1,200-character cut, and a user "settle" rule that hits a guardrail becomes a suggestion.
 - Nothing auto-settles when the newest message's body could not be downloaded (after 3 tries), except "never show" senders; it stays a suggestion.
-- Graduated senders skip the model only when the message has no guardrail hit and looks like their previous mail (same bulk/list shape); otherwise L1 runs and low confidence falls back to suggest.
+- Graduated senders skip the model only when the message has no guardrail hit and looks like their previous mail (same bulk/list shape, an approved category and no direct question); otherwise L1 runs and low confidence falls back to suggest.
 - "Never show" is an explicit user rule: that sender settles immediately as noise, logged with undo.
 - Replying settles the thread with reason "replied". If the reply asks a question, the thread goes to Working (waiting on their reply) instead, and a nudge returns it to Active after the configured days.
 - Sidebar order is stable: Active is ordered by when a thread entered Active, not by its latest message, so rows do not reshuffle while you work.
-- Usage is measured as estimated tokens (characters / 4) for every mail model call. The weekly cap defaults to 300k estimated tokens; at the cap L1 pauses and only rules and settle-memory run. The meter shows mail tokens against the week's provider token total from T3's usage summary when available.
+- The weekly Mail budget adds character-based estimates for triage, escalation and voice notes to the input and output tokens providers report for finished Mail chat turns. Partial turns contribute their known counters. The default cap is 300k tokens. Mail Settings compares this amount with T3’s recorded provider usage for the same environment and local calendar week. Opening the meter requests the usage summary.
 - The daily recap is computed locally from the action log (no model call) and shown at the top of the Mail home once per day.
 - Mobile Mail is Later per the spec (iOS app); contracts and client-runtime state are shared so mobile can add the tab without server changes.
 - Mail chat sessions start in approval-required mode: the agent can read mail and leave drafts through MCP, but shell or file edits still ask first, since an email is untrusted input.
 - First sync fetches the newest 200 messages plus (on Gmail) the newest 200 inbox messages, and triages them, so the first run is a batch of settle proposals to approve (seeds memory). Backfill brings older mail in settled, except inbox mail from the last 30 days, which stays Active for triage.
-- EMAIL.md is loaded into prompts by section: Who matters and Standing preferences always, Tone and signature only for drafting sessions, compiled to at most 1,500 characters.
+- EMAIL.md is loaded into prompts by section: triage compiles preference bullets and skips tone and signature. Chats get tone, standing preferences, priorities and sections matching the sender. Each view is capped at 1,500 characters.
 - RPC scopes: reads use the orchestration read scope; acting on mail, drafts, send and sessions use operate; accounts, settings, trust and EMAIL.md writes use settings-write.
 - Nudges are stored as short codes (`waiting:N`, `unanswered:N`) and rendered by the client, so the server never stores translated copy.
 - A mail session that ends without leaving a draft returns its thread from Working to Active on the next minute tick.
@@ -37,6 +37,8 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - IMAP and SMTP require TLS (implicit or STARTTLS) except on loopback, where the local test server runs.
 - Model calls for mail run outside the lock that serializes user actions; a verdict is discarded if new mail reached the thread while the model ran, and failed or capped triage retries every 10 minutes.
 - Mail model calls run with an empty working folder (`<state>/mail/model`) because some harnesses (OpenCode) keep a read tool on for text generation.
-
 - Mail home offers up to 50 visible suggestions per approval batch so the user can review precisely what the button will settle.
 - Mail arrival notifications report only a count and skip initial sync and backfill. The coding view subscribes without downloading a mailbox snapshot.
+- Learned draft edits are retrieved by account and correspondent. Related-mail lookups use the same account boundary.
+- Archive and read operations capture the affected messages at the time of the action. Undo checks the current revision or field value before reversing a change.
+- Automatic mail generation uses the selected provider instance. When it is unavailable, mail content stays local until the selected provider can run.

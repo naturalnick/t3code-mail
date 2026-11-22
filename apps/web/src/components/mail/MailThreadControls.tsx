@@ -31,12 +31,11 @@ export function MailThreadControls({
   const readAt = useRef<string | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Opening unread mail acknowledges it on the server.
   useEffect(() => {
-    if (!thread.unread) readAt.current = null;
-    if (!disabled && thread.unread && readAt.current !== thread.lastMessageAt) {
-      readAt.current = thread.lastMessageAt;
-      markRead();
-    }
-  }, [disabled, thread.unread, thread.lastMessageAt]);
+    const opened = `${thread.id}/${thread.lastMessageAt}/${thread.messageCount}`;
+    if (disabled || readAt.current === opened) return;
+    readAt.current = opened;
+    if (thread.unread) markRead();
+  }, [disabled, thread.id, thread.lastMessageAt, thread.messageCount, thread.unread]);
 
   return (
     <div className="flex flex-wrap items-center gap-2">

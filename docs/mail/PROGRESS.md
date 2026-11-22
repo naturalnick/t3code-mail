@@ -1,32 +1,21 @@
 # T3 Code Mail progress
 
-Build log for the v1 described in [SPEC.md](SPEC.md). Choices made without a human are in [DECISIONS.md](DECISIONS.md).
+Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines the release scope. [DECISIONS.md](DECISIONS.md) records implementation choices.
 
-## Done
+## Implemented
 
-- Contracts: `packages/contracts/src/mail.ts` (wire types) and `mailRpc.ts` (`mail.*` RPCs and scopes).
-- Text generation: `generateMailTriage` and `generateMailNotes` operations, with a decision in every provider adapter.
-- Server (`apps/server/src/mail`):
-  - `MailStore`: `<state>/mail/mail.sqlite`, own migrations, FTS5 trigram search.
-  - `imapSession` / `MailSync`: imapflow, Gmail All Mail with X-GM-LABELS/THRID/RAW, IDLE, QRESYNC or UID-window tracking, recent-first sync then backfill, Gmail quota pause, sleep detection, server ops queue (archive mirror, seen, append to Sent).
-  - `MailEngine`: ingest and threading, state changes from mail (replies return threads, Gmail archive elsewhere settles), stream events, usage and recap.
-  - `mailPrefilter` (no-AI pass), `mailTrust` (trust ramp), `mailText` (cleaning for the model), `mailPrompts`.
-  - `MailService`: L1 triage worker, act/undo with trust updates, drafts and approve-to-send over SMTP, chat sessions in the hidden Mail project, accounts, settings, rules dry run, EMAIL.md, voice seeding, nudges, snoozes.
-  - Wired into `ws.ts` and `server.ts`.
-- Tests: trust ramp, prefilter, text cleaning, and an end-to-end ramp through `MailService` (`vp test run src/mail` in `apps/server`).
+- Web and desktop share the Mail tab, five sidebar sections, local search, Gmail server search, daily recap and action history. A mail thread opens one ordinary T3 chat with the existing model picker and subagent controls.
+- IMAP sync prioritizes recent mail and backfills older messages. Mailbox rebuilds preserve pins, snoozes and chat associations. Queued archive and read operations target the messages present when the user acted.
+- Triage checks rules before calling the selected provider, batches short summaries and checks the weekly budget before each automatic triage call. Users can adjust the default three-approval threshold, review automatic settles and undo them. Protected categories require explicit trust.
+- Draft editing and send approval check the revision the user reviewed. Outside agents can read, search, leave drafts and propose settles through the CLI or MCP. Sending requires approval in the app.
+- Settings cover accounts, provider models, trust, rules, EMAIL.md, notifications, server mirroring and usage. The web catalogs include all nine translated locales.
 
-- Outside agents can list, search, read, draft, propose settles and reopen mail over MCP and the CLI. Neither interface sends mail.
-- Web settings, shared client state, permission-aware RPC commands and Mail capability discovery are implemented.
-- Verified 32 server Mail tests, two settings logic tests and the client-runtime typecheck at takeover.
+## Verification and remaining coverage
 
-- Mail and Code tabs, inbox, search, settled filters, batch approvals, recap and action log are wired into web and desktop. A mail thread opens full messages, related conversations, editable drafts and its T3 chat.
-- Draft saves, discards and explicit sends check the reviewed revision. A server regression test reproduced and now rejects stale edits.
-- The user guide and initial set of 234 Mail catalog keys cover all nine web translations.
-
-## In progress
-
-- Verify isolated GreenMail sync and SMTP, desktop background behavior and the integrated web client.
-- Address milestone review findings on provider selection, usage accounting, resync, queued mailbox operations, account cleanup, guardrails, undo and concurrent session creation. Run focused checks and a final review.
+- A local GreenMail server delivered an explicitly approved synthetic reply to INBOX and Sent. A minimized Electron window received new mail and recovered from a simulated suspend and wake. The temporary Docker VM, containers and desktop profiles were removed.
+- An isolated web client showed batch approval moving a suggestion from Active to Settled with an undo action. Browser fixtures covered draft conflicts, explicit approval, action undo and chat navigation.
+- Focused server, settings, client type and translation checks passed. The final single-worker mail and chat-launch run passed 129 tests. The server regression suite covers trust graduation and demotion, weekly caps, account isolation, UIDVALIDITY changes, undo after later edits and concurrent send and chat operations.
+- Gmail extensions have no live Gmail verification. Physical sleep and switching macOS Spaces were not exercised. Model evals used synthetic dry runs because the eval runner lacked a configured live provider. The broad changed-package check was interrupted to relieve host memory pressure.
 
 ## How to try it
 
@@ -36,3 +25,7 @@ Build log for the v1 described in [SPEC.md](SPEC.md). Choices made without a hum
 4. Use **Settled by AI** to inspect or undo automatic settles. Open a thread to draft, review and explicitly approve a reply. Server archiving is opt-in.
 
 See [the Mail guide](../user/mail.md) for other providers, rules, MCP tools and CLI examples.
+
+## Verify with fake mail
+
+With Docker running, use `(cd apps/server && node scripts/mail-test-server.ts verify)` for an isolated loopback IMAP and SMTP round trip. On macOS, `(cd apps/desktop && node scripts/verify-mail-background.cjs)` exercises the minimized desktop path. Run these separately.

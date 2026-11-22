@@ -245,9 +245,12 @@ export function MailAccounts({
   const updateAllowed = useAtomValue(mailEnvironment.updateAccount.permissionAtom(environmentId));
   const date = (iso: string) => new Date(iso).toLocaleString(locale);
   async function removeAccount(account: MailAccount) {
-    const message = gt("Remove {email} and its synced mail from this computer?", {
-      email: account.email,
-    });
+    const message = gt(
+      "Remove {email}, its saved app password, and synced mail from the host? T3 chat histories, including mail chats, are kept.",
+      {
+        email: account.email,
+      },
+    );
     if (
       (await requestConfirmDialog(message, { variant: "destructive" })) ??
       window.confirm(message)
@@ -322,7 +325,7 @@ export function MailAccounts({
               })}
             </p>
           )}
-          {account.credentialStore === "file" && (
+          {account.credentialStore === "file" && account.status !== "error" && (
             <p className="text-xs text-muted-foreground">
               {gt("App password stored in a local file.")}
             </p>

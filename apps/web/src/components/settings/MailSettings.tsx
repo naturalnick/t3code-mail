@@ -5,6 +5,7 @@ import type {
   MailStatus,
   MailUsage,
 } from "@t3tools/contracts";
+import { AuthDiagnosticsReadScope } from "@t3tools/contracts";
 import { pickModelSelection } from "@t3tools/shared/model";
 import { msg, useGT, useLocale, useMessages } from "gt-react";
 import { memo, useState } from "react";
@@ -15,6 +16,7 @@ import { providerInstanceEntriesFor } from "../../providerInstances";
 import { mailEnvironment, useMailEnvironmentId, useMailStatus } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
+import { useEnvironmentScope } from "../../state/session";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -23,7 +25,7 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { MailAccounts } from "./MailSettings.accounts";
 import { useMailCommand } from "./MailSettings.commands";
-import { insertToneNotes } from "./MailSettings.logic";
+import { insertToneNotes, mailUsageShare } from "./MailSettings.logic";
 import { MailRules } from "./MailSettings.rules";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
@@ -321,7 +323,15 @@ function Usage({ environmentId, usage }: { environmentId: EnvironmentId; usage: 
     gt("Could not save weekly token cap"),
   );
   const capLabel = gt("Weekly token cap");
-  const tokens = usage.tokens.toLocaleString(locale);
+  const canReadUsage = useEnvironmentScope(environmentId, AuthDiagnosticsReadScope);
+  const summary = useEnvironmentQuery(
+    canReadUsage && usage.providerWindow
+      ? serverEnvironment.usageSummary({ environmentId, input: usage.providerWindow })
+      : null,
+  );
+  const fraction = mailUsageShare(environmentId, usage.tokens, summary.data);
+  const estimate = (usage.estimatedTokens ?? usage.tokens) > 0 ? "≈" : "";
+  const tokens = estimate + usage.tokens.toLocaleString(locale);
   const cap = usage.cap;
   return (
     <SettingsSection {...searchable("mail-usage")}>
@@ -346,13 +356,15 @@ function Usage({ environmentId, usage }: { environmentId: EnvironmentId; usage: 
             : gt("{tokens} of {cap} tokens this week", { tokens, cap: cap.toLocaleString(locale) })
         }
         description={
-          usage.providerTokens === null
+          fraction === null
             ? undefined
             : gt("Email used {percent} of your usage this week.", {
-                percent: new Intl.NumberFormat(locale, {
-                  style: "percent",
-                  maximumFractionDigits: 1,
-                }).format(usage.providerTokens > 0 ? usage.tokens / usage.providerTokens : 0),
+                percent:
+                  estimate +
+                  new Intl.NumberFormat(locale, {
+                    style: "percent",
+                    maximumFractionDigits: 1,
+                  }).format(fraction),
               })
         }
         status={usage.capped ? gt("Cap reached. Model triage is paused.") : undefined}
@@ -400,7 +412,17 @@ function Behavior({ environmentId, settings }: SettingsProps) {
               checked={settings[key]}
               aria-label={m(label)}
               disabled={save.disabled}
-              onCheckedChange={(checked) => void save.run({ [key]: checked })}
+              onCheckedChange={(checked) => {
+                if (
+                  key === "notificationsEnabled" &&
+                  checked &&
+                  typeof Notification !== "undefined" &&
+                  Notification.permission === "default"
+                ) {
+                  void Notification.requestPermission().catch(() => {});
+                }
+                void save.run({ [key]: checked });
+              }}
             />
           }
         />

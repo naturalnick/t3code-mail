@@ -1,4 +1,30 @@
-import type { MailRule } from "@t3tools/contracts";
+import {
+  USAGE_CONTRACT_VERSION,
+  type EnvironmentId,
+  type MailRule,
+  type UsageSummary,
+} from "@t3tools/contracts";
+import { mergeUsage } from "@t3tools/shared/usageMerge";
+
+export function mailUsageShare(
+  environmentId: EnvironmentId,
+  tokens: number,
+  summary: UsageSummary | null,
+) {
+  if (
+    !summary ||
+    summary.sources.some(
+      (source) => source.refreshing || source.status === "failed" || source.status === "partial",
+    )
+  )
+    return null;
+  const { totalTokens } = mergeUsage(
+    [{ environmentId, label: "", summary }],
+    USAGE_CONTRACT_VERSION,
+  );
+  // Text-generation estimates and incomplete provider coverage can exceed the recorded total.
+  return totalTokens > 0 && tokens <= totalTokens ? tokens / totalTokens : null;
+}
 
 export function normalizeRule(rule: MailRule): MailRule | null {
   const match = Object.fromEntries(
