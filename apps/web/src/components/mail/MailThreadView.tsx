@@ -193,10 +193,9 @@ export function MailThreadView({
   );
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   const detail = query.data;
-  const from = useAtomValue(
+  const accounts = useAtomValue(
     mailEnvironment.view(environmentId),
-    (view) =>
-      view?.status.accounts.find((entry) => entry.id === detail?.thread.accountId)?.email ?? "",
+    (view) => view?.status.accounts,
   );
   if (!detail) {
     return (
@@ -211,6 +210,8 @@ export function MailThreadView({
     );
   }
   const { thread } = detail;
+  const from = accounts?.find((account) => account.id === thread.accountId)?.email ?? "";
+  const showAccount = from && (accounts?.length ?? 0) > 1;
   const nudge = nudgeLabel(thread.nudge, resolve);
   return (
     <div
@@ -218,14 +219,12 @@ export function MailThreadView({
       className="mx-auto w-full max-w-3xl space-y-5 px-4 py-5 sm:px-8"
     >
       <header className="space-y-3">
-        {from && <p className="text-xs text-muted-foreground">{from}</p>}
         <h1 className="text-xl font-semibold wrap-anywhere">
           {thread.subject || gt("(No subject)")}
         </h1>
-        {thread.line && (
+        {thread.line && thread.line.trim() !== thread.subject.trim() && (
           <p className="text-sm wrap-anywhere text-muted-foreground">{thread.line}</p>
         )}
-        {thread.suggestedAction && <p className="text-sm">{thread.suggestedAction}</p>}
         {thread.state === "settled" && thread.settledReason && (
           <p className="text-xs text-muted-foreground">
             {gt("Settled as {reason}", {
@@ -248,11 +247,6 @@ export function MailThreadView({
           </p>
         )}
         {nudge && <p className="text-sm text-warning-foreground">{nudge}</p>}
-        {thread.guardrail && (
-          <p className="text-sm text-muted-foreground">
-            {guardrailLabel(thread.guardrail, resolve)}
-          </p>
-        )}
         {thread.injectionWarning && (
           <p className="flex items-center gap-2 text-sm text-warning-foreground">
             <TriangleAlertIcon className="size-4 shrink-0" />
@@ -302,6 +296,32 @@ export function MailThreadView({
             ))}
           </ul>
         </section>
+      )}
+      {(thread.guardrail || thread.suggestedAction || showAccount) && (
+        <details className="border-t border-border pt-3">
+          <summary className="cursor-pointer text-sm font-medium">{gt("Mail details")}</summary>
+          <div className="mt-2 space-y-2 text-sm wrap-anywhere">
+            {showAccount && (
+              <dl>
+                <dt className="text-xs text-muted-foreground">{gt("Account")}</dt>
+                <dd>{from}</dd>
+              </dl>
+            )}
+            {thread.suggestedAction && (
+              <dl>
+                <dt className="text-xs text-muted-foreground">{gt("Suggested next step")}</dt>
+                <dd>{thread.suggestedAction}</dd>
+              </dl>
+            )}
+            {thread.guardrail && (
+              <p>
+                {gt("Mail normally asks for review before settling messages marked “{reason}”.", {
+                  reason: guardrailLabel(thread.guardrail, resolve),
+                })}
+              </p>
+            )}
+          </div>
+        </details>
       )}
       <ActionLog
         environmentId={environmentId}
