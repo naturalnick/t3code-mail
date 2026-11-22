@@ -1,0 +1,558 @@
+// @effect-diagnostics globalDate:off -- imapflow hands envelope dates over as JS Dates.
+// @effect-diagnostics globalTimers:off -- the IDLE refresh timer lives inside imapflow's promise flow.
+// The IMAP adapter: imapflow is promise and event based, so this module stays plain async code
+// and MailSync drives it from Effect. Nothing here touches the mail store.
+import * as Schema from "effect/Schema";
+import type { MailAddress, MailAttachment } from "@t3tools/contracts";
+import {
+  ImapFlow,
+  type FetchMessageObject,
+  type ListResponse,
+  type MessageAddressObject,
+  type MessageStructureObject,
+} from "imapflow";
+
+import { htmlToText, normalizeWhitespace } from "./mailText.ts";
+
+export interface ImapConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly secure: boolean;
+  readonly user: string;
+  readonly password: string;
+}
+
+export const ImapFailureKind = Schema.Literals(["auth", "quota", "network", "other"]);
+export type ImapFailureKind = typeof ImapFailureKind.Type;
+
+export class ImapFailure extends Schema.TaggedError<ImapFailure>()("ImapFailure", {
+  kind: ImapFailureKind,
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/** Sorts imapflow errors into what the user must do: re-enter a password, wait, or nothing. */
+const isImapFailure = Schema.is(ImapFailure);
+
+export function classifyImapError(error: unknown): ImapFailure {
+  if (isImapFailure(error)) return error;
+  const record = (error ?? {}) as Record<string, unknown>;
+  const text = [record.responseText, record.message, record.serverResponseCode, record.code]
+    .filter((value) => typeof value === "string")
+    .join(" ");
+  const detail =
+    (typeof record.responseText === "string" && record.responseText) ||
+    (typeof record.message === "string" && record.message) ||
+    "The mail server did not respond.";
+  if (
+    record.authenticationFailed === true ||
+    /AUTHENTICATIONFAILED|AUTHORIZATIONFAILED|Invalid credentials|LOGIN failed|authentication failed|Application-specific password required|web login required/i.test(
+      text,
+    )
+  ) {
+    return new ImapFailure({ kind: "auth", detail, cause: error });
+  }
+  if (
+    /OVERQUOTA|bandwidth|download limit|exceeded|too many simultaneous|THROTTLED|LIMIT/i.test(text)
+  ) {
+    return new ImapFailure({ kind: "quota", detail, cause: error });
+  }
+  if (
+    /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EPIPE|socket|timeout|NoConnection|closed/i.test(
+      text,
+    )
+  ) {
+    return new ImapFailure({ kind: "network", detail, cause: error });
+  }
+  return new ImapFailure({ kind: "other", detail, cause: error });
+}
+
+export interface ParsedMessage {
+  readonly uid: number;
+  readonly messageId: string | null;
+  readonly gmailThreadId: string | null;
+  readonly labels: ReadonlyArray<string> | null;
+  readonly from: MailAddress;
+  readonly to: ReadonlyArray<MailAddress>;
+  readonly cc: ReadonlyArray<MailAddress>;
+  readonly subject: string;
+  readonly date: string;
+  readonly inReplyTo: string | null;
+  readonly references: ReadonlyArray<string>;
+  readonly seen: boolean;
+  readonly size: number;
+  readonly attachments: ReadonlyArray<MailAttachment>;
+  readonly textPart: { readonly part: string; readonly html: boolean } | null;
+  readonly listUnsubscribe: boolean;
+  readonly listId: string | null;
+  readonly precedence: string | null;
+  readonly autoSubmitted: string | null;
+  readonly calendar: boolean;
+}
+
+export interface MailboxSnapshot {
+  readonly uidValidity: string;
+  readonly uidNext: number;
+  readonly exists: number;
+  readonly highestModseq: string | null;
+}
+
+export interface FlagChange {
+  readonly uid: number;
+  readonly seen: boolean;
+  readonly labels: ReadonlyArray<string> | null;
+}
+
+export interface MailboxRoles {
+  readonly gmail: boolean;
+  /** Gmail: All Mail. Others: INBOX. Synced and watched with IDLE. */
+  readonly primary: string;
+  /** Sent mail, polled; null for Gmail, where All Mail already holds it. */
+  readonly sent: string | null;
+  readonly archive: string | null;
+}
+
+const HEADER_FIELDS = ["references", "list-unsubscribe", "list-id", "precedence", "auto-submitted"];
+const FETCH_QUERY = {
+  uid: true,
+  flags: true,
+  envelope: true,
+  bodyStructure: true,
+  size: true,
+  internalDate: true,
+  threadId: true,
+  labels: true,
+  headers: HEADER_FIELDS,
+} as const;
+const BODY_MAX_BYTES = 256 * 1024;
+const BODY_MAX_CHARS = 100_000;
+
+function parseHeaders(buffer: Buffer | undefined): Map<string, string> {
+  const headers = new Map<string, string>();
+  if (!buffer) return headers;
+  const unfolded = buffer.toString("utf8").replace(/\r?\n[ \t]+/g, " ");
+  for (const line of unfolded.split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const key = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    headers.set(key, headers.has(key) ? `${headers.get(key)} ${value}` : value);
+  }
+  return headers;
+}
+
+const toAddress = (value: MessageAddressObject | undefined): MailAddress => ({
+  name: value?.name?.trim() ?? "",
+  address: (value?.address ?? "").trim().toLowerCase(),
+});
+
+const messageIdsIn = (value: string | undefined): ReadonlyArray<string> =>
+  value ? [...value.matchAll(/<[^<>\s]+>/g)].map((match) => match[0]) : [];
+
+function walkStructure(
+  node: MessageStructureObject | undefined,
+  visit: (node: MessageStructureObject, part: string) => void,
+  path = "",
+) {
+  if (!node) return;
+  const children = node.childNodes ?? [];
+  if (children.length === 0) {
+    visit(node, node.part ?? (path || "1"));
+    return;
+  }
+  children.forEach((child, index) =>
+    walkStructure(child, visit, child.part ?? (path ? `${path}.${index + 1}` : String(index + 1))),
+  );
+}
+
+function describeStructure(structure: MessageStructureObject | undefined) {
+  const attachments: Array<MailAttachment> = [];
+  let plain: string | null = null;
+  let html: string | null = null;
+  let calendar = false;
+  walkStructure(structure, (node, part) => {
+    const type = node.type.toLowerCase();
+    const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
+    if (type === "text/calendar") calendar = true;
+    const isAttachment =
+      node.disposition === "attachment" || (filename !== null && !type.startsWith("text/"));
+    if (isAttachment) {
+      attachments.push({
+        filename: filename ?? "attachment",
+        contentType: type,
+        size: node.size ?? 0,
+      });
+      return;
+    }
+    if (type === "text/plain" && plain === null) plain = part;
+    else if (type === "text/html" && html === null) html = part;
+  });
+  const textPart =
+    plain !== null
+      ? { part: plain, html: false }
+      : html !== null
+        ? { part: html, html: true }
+        : null;
+  return { attachments, textPart, calendar };
+}
+
+function parseFetched(message: FetchMessageObject): ParsedMessage {
+  const envelope = message.envelope ?? {};
+  const headers = parseHeaders(message.headers);
+  const structure = describeStructure(message.bodyStructure);
+  const rawDate = envelope.date ?? message.internalDate;
+  const date = rawDate ? new Date(rawDate) : new Date(0);
+  const references = messageIdsIn(headers.get("references"));
+  return {
+    uid: message.uid,
+    messageId: envelope.messageId?.trim() || null,
+    gmailThreadId: message.threadId ?? null,
+    labels: message.labels ? [...message.labels] : null,
+    from: toAddress(envelope.from?.[0] ?? envelope.sender?.[0]),
+    to: (envelope.to ?? []).map(toAddress),
+    cc: (envelope.cc ?? []).map(toAddress),
+    subject: envelope.subject?.trim() ?? "",
+    date: Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString(),
+    inReplyTo: messageIdsIn(envelope.inReplyTo)[0] ?? null,
+    references,
+    seen: message.flags?.has("\\Seen") ?? false,
+    size: message.size ?? 0,
+    attachments: structure.attachments,
+    textPart: structure.textPart,
+    listUnsubscribe: headers.has("list-unsubscribe"),
+    listId: headers.get("list-id") ?? null,
+    precedence: headers.get("precedence") ?? null,
+    autoSubmitted:
+      headers.get("auto-submitted") && headers.get("auto-submitted") !== "no"
+        ? (headers.get("auto-submitted") ?? null)
+        : null,
+    calendar: structure.calendar,
+  };
+}
+
+function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): MailboxRoles {
+  const byUse = (use: string) => mailboxes.find((box) => box.specialUse === use)?.path ?? null;
+  const byName = (pattern: RegExp) => mailboxes.find((box) => pattern.test(box.path))?.path ?? null;
+  if (gmail) {
+    return {
+      gmail,
+      primary: byUse("\\All") ?? byName(/^\[Gmail\]\/All Mail$/i) ?? "INBOX",
+      sent: null,
+      archive: null,
+    };
+  }
+  return {
+    gmail,
+    primary: mailboxes.find((box) => box.path.toUpperCase() === "INBOX")?.path ?? "INBOX",
+    sent: byUse("\\Sent") ?? byName(/^(INBOX[./])?Sent( Items| Messages| Mail)?$/i),
+    archive: byUse("\\Archive") ?? byName(/^(INBOX[./])?Archive$/i),
+  };
+}
+
+async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Array<Buffer> = [];
+  for await (const chunk of stream)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+export interface SessionEvents {
+  readonly onExists: () => void;
+  readonly onFlags: (change: { uid: number | undefined; seq: number }) => void;
+  readonly onExpunge: (uid: number | undefined) => void;
+  readonly onClose: () => void;
+}
+
+export class ImapSession {
+  readonly client: ImapFlow;
+  roles: MailboxRoles | null = null;
+  /** Set once we have asked imapflow to enable QRESYNC and the server agreed. */
+  qresync = false;
+
+  constructor(config: ImapConfig, events: SessionEvents) {
+    this.client = new ImapFlow({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: { user: config.user, pass: config.password },
+      logger: false,
+      emitLogs: false,
+      disableAutoIdle: true,
+      qresync: true,
+      clientInfo: { name: "T3 Code Mail" },
+      tls: { rejectUnauthorized: config.host !== "127.0.0.1" && config.host !== "localhost" },
+    });
+    this.client.on("exists", () => events.onExists());
+    this.client.on("flags", (data) => events.onFlags({ uid: data.uid, seq: data.seq }));
+    this.client.on("expunge", (data) =>
+      events.onExpunge(data.vanished || this.qresync ? data.uid : undefined),
+    );
+    this.client.on("close", () => events.onClose());
+    // imapflow emits at most one error per connection and closes after it; close drives reconnects.
+    this.client.on("error", () => {});
+  }
+
+  get gmail(): boolean {
+    return this.client.capabilities.has("X-GM-EXT-1");
+  }
+
+  get condstore(): boolean {
+    return this.client.capabilities.has("CONDSTORE") || this.client.capabilities.has("QRESYNC");
+  }
+
+  get supportsIdle(): boolean {
+    return this.client.capabilities.has("IDLE");
+  }
+
+  async connect(): Promise<MailboxRoles> {
+    try {
+      await this.client.connect();
+      this.qresync = this.client.enabled.has("QRESYNC");
+      const mailboxes = await this.client.list();
+      this.roles = pickRoles(mailboxes, this.gmail);
+      return this.roles;
+    } catch (error) {
+      throw classifyImapError(error);
+    }
+  }
+
+  async close(): Promise<void> {
+    try {
+      await this.client.logout();
+    } catch {
+      this.client.close();
+    }
+  }
+
+  /** Selects a mailbox for a unit of work, handing QRESYNC our last known state. */
+  async withMailbox<A>(
+    path: string,
+    known: { readonly uidValidity: string; readonly highestModseq: string | null } | null,
+    work: (snapshot: MailboxSnapshot) => Promise<A>,
+  ): Promise<A> {
+    let lock;
+    try {
+      lock = await this.client.getMailboxLock(
+        path,
+        this.qresync && known?.highestModseq
+          ? { changedSince: known.highestModseq, uidValidity: known.uidValidity }
+          : {},
+      );
+    } catch (error) {
+      throw classifyImapError(error);
+    }
+    try {
+      const mailbox = this.client.mailbox;
+      if (!mailbox) {
+        throw new ImapFailure({
+          kind: "other",
+          detail: "The mailbox closed while it was being read.",
+        });
+      }
+      return await work({
+        uidValidity: String(mailbox.uidValidity),
+        uidNext: mailbox.uidNext,
+        exists: mailbox.exists,
+        highestModseq: mailbox.highestModseq === undefined ? null : String(mailbox.highestModseq),
+      });
+    } catch (error) {
+      throw classifyImapError(error);
+    } finally {
+      lock.release();
+    }
+  }
+
+  /** Messages with UID above `afterUid`, oldest first, at most `limit`. */
+  async fetchNewer(afterUid: number, limit: number): Promise<ReadonlyArray<ParsedMessage>> {
+    const messages: Array<ParsedMessage> = [];
+    for await (const message of this.client.fetch(`${afterUid + 1}:*`, FETCH_QUERY, {
+      uid: true,
+    })) {
+      // `n:*` always returns the newest message, even when its UID is below n.
+      if (message.uid > afterUid) messages.push(parseFetched(message));
+    }
+    messages.sort((a, b) => a.uid - b.uid);
+    return messages.slice(0, limit);
+  }
+
+  /** The newest `count` messages by sequence number: the recent-first start of a sync. */
+  async fetchNewest(exists: number, count: number): Promise<ReadonlyArray<ParsedMessage>> {
+    if (exists === 0) return [];
+    const from = Math.max(1, exists - count + 1);
+    const messages: Array<ParsedMessage> = [];
+    for await (const message of this.client.fetch(`${from}:*`, FETCH_QUERY)) {
+      messages.push(parseFetched(message));
+    }
+    return messages.sort((a, b) => a.uid - b.uid);
+  }
+
+  /** The next older page below `belowUid`, for the slow backfill. */
+  async fetchOlder(belowUid: number, count: number): Promise<ReadonlyArray<ParsedMessage>> {
+    if (belowUid <= 1) return [];
+    const uids = await this.client.search({ uid: `1:${belowUid - 1}` }, { uid: true });
+    if (!uids || uids.length === 0) return [];
+    const page = [...uids].sort((a, b) => a - b).slice(-count);
+    const messages: Array<ParsedMessage> = [];
+    for await (const message of this.client.fetch(page.join(","), FETCH_QUERY, { uid: true })) {
+      messages.push(parseFetched(message));
+    }
+    return messages.sort((a, b) => a.uid - b.uid);
+  }
+
+  /** Flag and label changes: CONDSTORE since a modseq, else a re-read of the recent window. */
+  async fetchFlagChanges(input: {
+    readonly sinceModseq: string | null;
+    readonly windowFromUid: number;
+  }): Promise<ReadonlyArray<FlagChange>> {
+    const changes: Array<FlagChange> = [];
+    const range =
+      input.sinceModseq !== null && this.condstore
+        ? "1:*"
+        : `${Math.max(1, input.windowFromUid)}:*`;
+    const options =
+      input.sinceModseq !== null && this.condstore
+        ? { uid: true, changedSince: BigInt(input.sinceModseq) }
+        : { uid: true };
+    for await (const message of this.client.fetch(
+      range,
+      { uid: true, flags: true, labels: true },
+      options,
+    )) {
+      changes.push({
+        uid: message.uid,
+        seen: message.flags?.has("\\Seen") ?? false,
+        labels: message.labels ? [...message.labels] : null,
+      });
+    }
+    return changes;
+  }
+
+  async allUids(fromUid: number): Promise<ReadonlySet<number>> {
+    const uids = await this.client.search({ uid: `${Math.max(1, fromUid)}:*` }, { uid: true });
+    return new Set(uids || []);
+  }
+
+  async fetchBody(
+    uid: number,
+    part: { readonly part: string; readonly html: boolean },
+  ): Promise<string | null> {
+    const download = await this.client.download(String(uid), part.part, {
+      uid: true,
+      maxBytes: BODY_MAX_BYTES,
+    });
+    if (!download.content) return null;
+    const raw = await streamToString(download.content);
+    const text = part.html ? htmlToText(raw) : normalizeWhitespace(raw);
+    return text.length > BODY_MAX_CHARS ? text.slice(0, BODY_MAX_CHARS) : text;
+  }
+
+  /** Gmail server-side search; returns All Mail UIDs. */
+  async searchGmailRaw(query: string): Promise<ReadonlyArray<number>> {
+    const uids = await this.client.search({ gmraw: query }, { uid: true });
+    return uids || [];
+  }
+
+  async setSeen(uids: ReadonlyArray<number>, seen: boolean): Promise<void> {
+    if (uids.length === 0) return;
+    if (seen)
+      await this.client.messageFlagsAdd(uids.join(","), ["\\Seen"], { uid: true, silent: true });
+    else
+      await this.client.messageFlagsRemove(uids.join(","), ["\\Seen"], { uid: true, silent: true });
+  }
+
+  /** Gmail archive: drop the Inbox label. Undo puts it back. */
+  async setInboxLabel(uids: ReadonlyArray<number>, inInbox: boolean): Promise<void> {
+    if (uids.length === 0) return;
+    if (inInbox) {
+      await this.client.messageFlagsAdd(uids.join(","), ["\\Inbox"], {
+        uid: true,
+        useLabels: true,
+      });
+    } else {
+      await this.client.messageFlagsRemove(uids.join(","), ["\\Inbox"], {
+        uid: true,
+        useLabels: true,
+      });
+    }
+  }
+
+  /** Moves messages and returns their new UIDs when the server reports them (UIDPLUS). */
+  async move(
+    uids: ReadonlyArray<number>,
+    destination: string,
+  ): Promise<ReadonlyMap<number, number>> {
+    if (uids.length === 0) return new Map();
+    const result = await this.client.messageMove(uids.join(","), destination, { uid: true });
+    return result && result.uidMap ? result.uidMap : new Map();
+  }
+
+  async ensureMailbox(path: string): Promise<void> {
+    try {
+      await this.client.mailboxCreate(path);
+    } catch (error) {
+      const record = (error ?? {}) as Record<string, unknown>;
+      if (
+        record.serverResponseCode !== "ALREADYEXISTS" &&
+        !/exists/i.test(String(record.responseText ?? ""))
+      ) {
+        throw classifyImapError(error);
+      }
+    }
+  }
+
+  async append(path: string, raw: Buffer): Promise<void> {
+    await this.client.append(path, raw, ["\\Seen"]);
+  }
+
+  /**
+   * IDLE on the open mailbox until the server reports something or `maxMs` passes.
+   * Servers without IDLE get a NOOP after a short wait instead.
+   */
+  async idle(maxMs: number): Promise<void> {
+    if (!this.supportsIdle) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(maxMs, 60_000)));
+      await this.client.noop();
+      return;
+    }
+    const timer = setTimeout(() => {
+      void this.client.noop().catch(() => {});
+    }, maxMs);
+    try {
+      await this.client.idle();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  get usable(): boolean {
+    return this.client.usable;
+  }
+}
+
+/** Logs in and out once: a cheap check of an app password before it is saved. */
+export async function verifyLogin(config: ImapConfig): Promise<{ readonly gmail: boolean }> {
+  const client = new ImapFlow({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: { user: config.user, pass: config.password },
+    logger: false,
+    emitLogs: false,
+    disableAutoIdle: true,
+    tls: { rejectUnauthorized: config.host !== "127.0.0.1" && config.host !== "localhost" },
+  });
+  client.on("error", () => {});
+  try {
+    await client.connect();
+    const gmail = client.capabilities.has("X-GM-EXT-1");
+    await client.logout();
+    return { gmail };
+  } catch (error) {
+    client.close();
+    throw classifyImapError(error);
+  }
+}

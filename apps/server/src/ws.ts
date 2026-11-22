@@ -133,6 +133,7 @@ import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
+import * as MailService from "./mail/MailService.ts";
 import {
   bufferShellLiveStream,
   coalesceShellApplicationEvents,
@@ -1495,6 +1496,7 @@ export const layerWsRpc = (
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const issues = yield* IssueService.IssueService;
+      const mail = yield* MailService.MailService;
       const threadIssues = yield* ThreadIssueService.ThreadIssueService;
       const issueTrackers = yield* IssueTrackerConnections.IssueTrackerConnections;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -1993,7 +1995,31 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      const mailUser = { actor: "user" } as const;
       const handlers = ServerWsRpcGroup.of({
+        [WS_METHODS.mailSubscribe]: () => mail.subscribe,
+        [WS_METHODS.mailGetThread]: (input) => mail.getThread(input.threadId),
+        [WS_METHODS.mailListSettled]: (input) => mail.listSettled(input),
+        [WS_METHODS.mailSearch]: (input) => mail.search(input),
+        [WS_METHODS.mailAct]: (input) => mail.act(input, mailUser),
+        [WS_METHODS.mailUndo]: (input) => mail.undo(input.actionId, mailUser),
+        [WS_METHODS.mailListActions]: (input) => mail.listActions(input),
+        [WS_METHODS.mailSaveDraft]: (input) => mail.saveDraft(input, mailUser),
+        [WS_METHODS.mailDiscardDraft]: (input) => mail.discardDraft(input.draftId),
+        [WS_METHODS.mailSendDraft]: (input) => mail.sendDraft(input),
+        [WS_METHODS.mailOpenSession]: (input) => mail.openSession(input),
+        [WS_METHODS.mailAddAccount]: (input) => mail.addAccount(input),
+        [WS_METHODS.mailUpdateAccount]: (input) => mail.updateAccount(input),
+        [WS_METHODS.mailRemoveAccount]: (input) => mail.removeAccount(input.accountId),
+        [WS_METHODS.mailSyncNow]: (input) => mail.syncNow(input.accountId),
+        [WS_METHODS.mailUpdateSettings]: (input) => mail.updateSettings(input),
+        [WS_METHODS.mailListTrust]: () => mail.listTrust,
+        [WS_METHODS.mailSetTrust]: (input) => mail.setTrust(input),
+        [WS_METHODS.mailReadEmailMd]: () => mail.readEmailMd,
+        [WS_METHODS.mailWriteEmailMd]: (input) => mail.writeEmailMd(input.content),
+        [WS_METHODS.mailDryRunRule]: (input) => mail.dryRunRule(input.rule),
+        [WS_METHODS.mailSeedVoice]: () => mail.seedVoice,
+        [WS_METHODS.mailDismissRecap]: (input) => mail.dismissRecap(input.date),
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
         [WS_METHODS.issuesComments]: (input) => issues.comments(input),
@@ -3693,6 +3719,7 @@ export const layer = Layer.unwrap(
     const npmRelease = yield* NpmRelease.NpmRelease;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const issues = yield* IssueService.IssueService;
+    const mail = yield* MailService.MailService;
     const threadIssues = yield* ThreadIssueService.ThreadIssueService;
     const issueTrackers = yield* IssueTrackerConnections.IssueTrackerConnections;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -3787,6 +3814,7 @@ export const layer = Layer.unwrap(
               // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
               Layer.provide(Layer.succeed(IssueService.IssueService, issues)),
+              Layer.provide(Layer.succeed(MailService.MailService, mail)),
               Layer.provide(Layer.succeed(ThreadIssueService.ThreadIssueService, threadIssues)),
               Layer.provide(
                 Layer.succeed(IssueTrackerConnections.IssueTrackerConnections, issueTrackers),

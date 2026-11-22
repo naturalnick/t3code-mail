@@ -1,4 +1,9 @@
-import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS, type WsRpcGroup } from "@t3tools/contracts";
+import {
+  MAIL_WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
+  WS_METHODS,
+  type WsRpcGroup,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -259,6 +264,29 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeServerConfig]: "server",
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",
+  [MAIL_WS_METHODS.mailSubscribe]: "mail",
+  [MAIL_WS_METHODS.mailGetThread]: "mail",
+  [MAIL_WS_METHODS.mailListSettled]: "mail",
+  [MAIL_WS_METHODS.mailSearch]: "mail",
+  [MAIL_WS_METHODS.mailAct]: "mail",
+  [MAIL_WS_METHODS.mailUndo]: "mail",
+  [MAIL_WS_METHODS.mailListActions]: "mail",
+  [MAIL_WS_METHODS.mailSaveDraft]: "mail",
+  [MAIL_WS_METHODS.mailDiscardDraft]: "mail",
+  [MAIL_WS_METHODS.mailSendDraft]: "mail",
+  [MAIL_WS_METHODS.mailOpenSession]: "mail",
+  [MAIL_WS_METHODS.mailAddAccount]: "mail",
+  [MAIL_WS_METHODS.mailUpdateAccount]: "mail",
+  [MAIL_WS_METHODS.mailRemoveAccount]: "mail",
+  [MAIL_WS_METHODS.mailSyncNow]: "mail",
+  [MAIL_WS_METHODS.mailUpdateSettings]: "mail",
+  [MAIL_WS_METHODS.mailListTrust]: "mail",
+  [MAIL_WS_METHODS.mailSetTrust]: "mail",
+  [MAIL_WS_METHODS.mailReadEmailMd]: "mail",
+  [MAIL_WS_METHODS.mailWriteEmailMd]: "mail",
+  [MAIL_WS_METHODS.mailDryRunRule]: "mail",
+  [MAIL_WS_METHODS.mailSeedVoice]: "mail",
+  [MAIL_WS_METHODS.mailDismissRecap]: "mail",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";
