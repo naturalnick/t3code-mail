@@ -7,7 +7,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { buildSessionPrompt, relevantEmailMd } from "./mailPrompts.ts";
+import { buildComposePrompt, buildSessionPrompt, relevantEmailMd } from "./mailPrompts.ts";
 import * as MailStore from "./MailStore.ts";
 import { cleanForModel, domainOf } from "./mailText.ts";
 
@@ -49,6 +49,32 @@ export const layer = Layer.effect(
       const isExcluded = (address: string) => mailSenderEntry(address, excluded) !== null;
       if (isExcluded(thread.fromAddress))
         return `Mail thread id: ${thread.id}. The user turned AI off for this sender, so its mail is not available to you. Say so if asked about it.`;
+      if (thread.messageCount === 0) {
+        const draft = (yield* store.draftsForThread(thread.id)).findLast(
+          (entry) => entry.status === "draft" || entry.status === "failed",
+        );
+        if (!full)
+          return `Mail thread id: ${thread.id}. The user is writing this new email. Use t3_mail_read for the current draft.`;
+        return buildComposePrompt({
+          mailThreadId: thread.id,
+          draft: draft
+            ? {
+                draftId: draft.id,
+                revision: draft.revision,
+                to: draft.to,
+                cc: draft.cc,
+                subject: draft.subject,
+                body: draft.body,
+              }
+            : null,
+          emailMd: relevantEmailMd(
+            yield* fs
+              .readFileString(path.join(store.workspaceDir, "EMAIL.md"))
+              .pipe(Effect.orElseSucceed(() => "")),
+            [thread.fromAddress, domainOf(thread.fromAddress)],
+          ),
+        });
+      }
       const note = yield* store.latestTriageNote(thread.id);
       // A continuing provider session already has the excerpts; its read tool sees later replies.
       if (!full)

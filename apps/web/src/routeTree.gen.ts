@@ -53,6 +53,7 @@ import { Route as ChatSettingsArchivedRouteImport } from './routes/_chat.setting
 import { Route as ChatSettingsAppearanceRouteImport } from './routes/_chat.settings.appearance'
 import { Route as ChatSettingsAccessRouteImport } from './routes/_chat.settings.access'
 import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.about'
+import { Route as ChatMailNewRouteImport } from './routes/_chat.mail.new'
 import { Route as ChatMailMailThreadIdRouteImport } from './routes/_chat.mail.$mailThreadId'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
@@ -282,6 +283,11 @@ const ChatSettingsAboutRoute = ChatSettingsAboutRouteImport.update({
   path: '/about',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
+const ChatMailNewRoute = ChatMailNewRouteImport.update({
+  id: '/mail/new',
+  path: '/mail/new',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatMailMailThreadIdRoute = ChatMailMailThreadIdRouteImport.update({
   id: '/mail/$mailThreadId',
   path: '/mail/$mailThreadId',
@@ -324,6 +330,7 @@ export interface FileRoutesByFullPath {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/mail/$mailThreadId': typeof ChatMailMailThreadIdRoute
+  '/mail/new': typeof ChatMailNewRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -373,6 +380,7 @@ export interface FileRoutesByTo {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/mail/$mailThreadId': typeof ChatMailMailThreadIdRoute
+  '/mail/new': typeof ChatMailNewRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -424,6 +432,7 @@ export interface FileRoutesById {
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/_chat/mail/$mailThreadId': typeof ChatMailMailThreadIdRoute
+  '/_chat/mail/new': typeof ChatMailNewRoute
   '/_chat/settings/about': typeof ChatSettingsAboutRoute
   '/_chat/settings/access': typeof ChatSettingsAccessRoute
   '/_chat/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -475,6 +484,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/mail/$mailThreadId'
+    | '/mail/new'
     | '/settings/about'
     | '/settings/access'
     | '/settings/appearance'
@@ -524,6 +534,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/mail/$mailThreadId'
+    | '/mail/new'
     | '/settings/about'
     | '/settings/access'
     | '/settings/appearance'
@@ -574,6 +585,7 @@ export interface FileRouteTypes {
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
     | '/_chat/mail/$mailThreadId'
+    | '/_chat/mail/new'
     | '/_chat/settings/about'
     | '/_chat/settings/access'
     | '/_chat/settings/appearance'
@@ -929,6 +941,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsAboutRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/mail/new': {
+      id: '/_chat/mail/new'
+      path: '/mail/new'
+      fullPath: '/mail/new'
+      preLoaderRoute: typeof ChatMailNewRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/mail/$mailThreadId': {
       id: '/_chat/mail/$mailThreadId'
       path: '/mail/$mailThreadId'
@@ -1036,6 +1055,7 @@ interface ChatRouteChildren {
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
   ChatMailMailThreadIdRoute: typeof ChatMailMailThreadIdRoute
+  ChatMailNewRoute: typeof ChatMailNewRoute
   ChatMailIndexRoute: typeof ChatMailIndexRoute
   ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute: typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
@@ -1050,6 +1070,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
   ChatMailMailThreadIdRoute: ChatMailMailThreadIdRoute,
+  ChatMailNewRoute: ChatMailNewRoute,
   ChatMailIndexRoute: ChatMailIndexRoute,
   ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute:
     ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute,

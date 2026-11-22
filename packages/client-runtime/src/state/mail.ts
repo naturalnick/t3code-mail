@@ -45,6 +45,8 @@ export interface MailSections {
   readonly working: ReadonlyArray<MailThreadRow>;
   readonly snoozed: ReadonlyArray<MailThreadRow>;
   readonly settled: ReadonlyArray<MailThreadRow>;
+  /** New emails not sent yet, and threads with a reply draft (also listed in their own section). */
+  readonly drafts: ReadonlyArray<MailThreadRow>;
 }
 
 const byEntry = (a: MailThreadRow, b: MailThreadRow) =>
@@ -60,7 +62,10 @@ export function groupMailThreads(threads: Iterable<MailThreadRow>): MailSections
   const working: Array<MailThreadRow> = [];
   const snoozed: Array<MailThreadRow> = [];
   const settled: Array<MailThreadRow> = [];
+  const drafts: Array<MailThreadRow> = [];
   for (const thread of threads) {
+    if (thread.hasDraft || thread.messageCount === 0) drafts.push(thread);
+    if (thread.messageCount === 0) continue;
     if (thread.pinnedAt !== null && thread.state !== "settled") pinned.push(thread);
     else if (thread.state === "active") active.push(thread);
     else if (thread.state === "working") working.push(thread);
@@ -72,6 +77,7 @@ export function groupMailThreads(threads: Iterable<MailThreadRow>): MailSections
   working.sort(byLatestMessage);
   snoozed.sort(bySnoozeEnd);
   settled.sort(byLatestMessage);
+  drafts.sort(byLatestMessage);
   return {
     pinned,
     proposals: active.filter((thread) => thread.suggestion !== null),
@@ -79,6 +85,7 @@ export function groupMailThreads(threads: Iterable<MailThreadRow>): MailSections
     working,
     snoozed,
     settled,
+    drafts,
   };
 }
 
@@ -138,6 +145,18 @@ export function createMailEnvironmentAtoms<R, E>(
       refreshTrigger: ({ environmentId }) =>
         Atom.make((get) => get(view(environmentId))?.status.settledCount ?? 0),
     }),
+    sent: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:mail:sent",
+      tag: WS_METHODS.mailListSent,
+      // Only queried while the shelf is open; any mail change can reorder it.
+      refreshTrigger: ({ environmentId }) => view(environmentId),
+    }),
+    trash: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:mail:trash",
+      tag: WS_METHODS.mailListTrash,
+      // Every delete publishes a removal, even for mail outside the live list.
+      refreshTrigger: ({ environmentId }) => view(environmentId),
+    }),
     search: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:search",
       tag: WS_METHODS.mailSearch,
@@ -162,6 +181,10 @@ export function createMailEnvironmentAtoms<R, E>(
     undo: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:undo",
       tag: WS_METHODS.mailUndo,
+    }),
+    compose: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:compose",
+      tag: WS_METHODS.mailCompose,
     }),
     saveDraft: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:save-draft",

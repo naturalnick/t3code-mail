@@ -95,6 +95,11 @@ export const MailThreadRow = Schema.Struct({
   from: MailAddress,
   suggestedAction: Schema.NullOr(Schema.String),
   lastMessageAt: IsoDateTime,
+  /** When the user last wrote in the thread; null when they never have. */
+  lastOutgoingAt: Schema.NullOr(IsoDateTime).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
+  /** Zero for a new email that is still a draft. */
   messageCount: NonNegativeInt,
   unread: Schema.Boolean,
   state: MailThreadState,
@@ -499,6 +504,17 @@ export const MailActResult = Schema.Struct({ actionIds: Schema.Array(NonNegative
 
 export const MailUndoInput = Schema.Struct({ actionId: NonNegativeInt });
 
+export const MailListSentInput = Schema.Struct({
+  before: Schema.optionalKey(Schema.Struct({ at: IsoDateTime, id: MailThreadId })),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+
+/** Email deleted here that can still be restored from the server's Trash. */
+export const MailListTrashInput = Schema.Struct({
+  beforeId: Schema.optionalKey(NonNegativeInt),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+
 export const MailListActionsInput = Schema.Struct({
   beforeId: Schema.optionalKey(NonNegativeInt),
   actor: Schema.optionalKey(MailActor),
@@ -520,10 +536,26 @@ export const MailSaveDraftInput = Schema.Struct({
   mode: Schema.optionalKey(MailDraftMode),
   targetMessageId: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
+/** Starts a new email: its own thread with one draft. */
+export const MailComposeInput = Schema.Struct({
+  /** Chosen by the client, so a retried first save reuses the email it created. */
+  id: Schema.optionalKey(
+    Schema.String.check(
+      Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+    ),
+  ),
+  accountId: MailAccountId,
+  to: Schema.Array(Schema.String),
+  cc: Schema.Array(Schema.String),
+  subject: Schema.String,
+  body: Schema.String,
+});
 export const MailDraftInput = Schema.Struct({
   draftId: MailDraftId,
   expectedRevision: Schema.optionalKey(NonNegativeInt),
 });
+/** The discard's action, for Undo; null when the draft was already gone. */
+export const MailDiscardDraftResult = Schema.Struct({ actionId: Schema.NullOr(NonNegativeInt) });
 export const MailSendDraftInput = Schema.Struct({
   draftId: MailDraftId,
   /** The revision the user reviewed; the send is refused if the draft changed since. */
@@ -622,6 +654,8 @@ export const MailSetSenderAiInput = Schema.Struct({
 
 export type MailThreadInput = typeof MailThreadInput.Type;
 export type MailListSettledInput = typeof MailListSettledInput.Type;
+export type MailListSentInput = typeof MailListSentInput.Type;
+export type MailListTrashInput = typeof MailListTrashInput.Type;
 export type MailThreadPage = typeof MailThreadPage.Type;
 export type MailSearchInput = typeof MailSearchInput.Type;
 export type MailSearchResult = typeof MailSearchResult.Type;
@@ -631,6 +665,7 @@ export type MailUndoInput = typeof MailUndoInput.Type;
 export type MailListActionsInput = typeof MailListActionsInput.Type;
 export type MailActionPage = typeof MailActionPage.Type;
 export type MailSaveDraftInput = typeof MailSaveDraftInput.Type;
+export type MailComposeInput = typeof MailComposeInput.Type;
 export type MailDraftInput = typeof MailDraftInput.Type;
 export type MailSendDraftInput = typeof MailSendDraftInput.Type;
 export type MailOpenSessionInput = typeof MailOpenSessionInput.Type;

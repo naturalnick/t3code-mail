@@ -50,7 +50,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 ## Sidebar states (T3-native)
 
-- Uses T3 Code's real sidebar sections: Pinned, Active, Working, Snoozed, Settled. Same names, so it reads like the coding view.
+- Uses T3 Code's real sidebar sections: Pinned, Active, Working, Snoozed, Settled. Same names, so it reads like the coding view. Drafts, Sent and Trash sit below them, as in other mail apps.
 - **Active:** needs you. The only thing shown by default.
 - **Working:** an agent is drafting, or you're waiting on someone's reply. Returns to Active when it needs you.
 - **Snoozed:** comes back at a time or on a reply. Follow-up nudges use this.

@@ -189,6 +189,7 @@ import {
   isMacPlatform,
   isWindowsPlatform,
   newProjectId,
+  randomUUID,
 } from "../lib/utils";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useAvailableSettingsSearchItems } from "./settings/useAvailableSettingsSearchItems";
@@ -1686,6 +1687,16 @@ function OpenCommandPaletteDialog(props: {
       icon: <MailIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         await navigate({ to: "/mail" });
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:mail-new",
+      searchTerms: ["new email", "compose", "write email", "mail"],
+      title: gt("New email"),
+      icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/mail/new", search: { email: randomUUID() } });
       },
     });
   }

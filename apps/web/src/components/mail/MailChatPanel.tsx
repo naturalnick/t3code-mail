@@ -7,11 +7,12 @@ import { ComposerHandleContext } from "../../composerHandleContext";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import ChatView from "../ChatView";
 import { BackgroundThreadContext } from "../chat/backgroundThread";
+import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 
 /** An email's chat beside the email, so reading and asking about it share one screen. */
-export function MailChatPanel({
+function MailChatPanel({
   environmentId,
   chatThreadId,
   onClose,
@@ -50,5 +51,33 @@ export function MailChatPanel({
         </ComposerHandleContext>
       </BackgroundThreadContext>
     </div>
+  );
+}
+
+/** The chat beside an email: a column on wide screens, a sheet over the email otherwise. */
+export function MailChatAside({
+  environmentId,
+  chatThreadId,
+  wide,
+  onClose,
+}: {
+  environmentId: EnvironmentId;
+  chatThreadId: ThreadId;
+  wide: boolean;
+  onClose: () => void;
+}) {
+  const gt = useGT();
+  return (
+    <aside
+      aria-label={gt("Mail chat")}
+      className={cn(
+        "min-h-0 overflow-hidden rounded-2xl border border-border/70 bg-background",
+        wide
+          ? "w-[clamp(22rem,40%,36rem)] shrink-0"
+          : "absolute inset-x-3 top-0 bottom-3 z-10 shadow-lg",
+      )}
+    >
+      <MailChatPanel environmentId={environmentId} chatThreadId={chatThreadId} onClose={onClose} />
+    </aside>
   );
 }

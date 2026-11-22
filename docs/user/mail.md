@@ -13,19 +13,25 @@ Choose **Add account** to start syncing. Select a **Default mail model** to get 
 
 ## Review mail and reply
 
-**Active** holds threads that need you. Your mail model reads each new email and decides whether it needs you, with a one-line reason: hover the badge on a sidebar row, or see it in the email's details. The badge shows the model's icon, or a filter icon when one of your rules decided. In **Mail home**, choose **Settle these** to accept the displayed suggestions or **Keep in Active** on a thread you still need. **Move back to Active** reopens a settled thread. To also archive settled mail in your provider’s inbox, enable **Archive on the mail server when settled**.
+**Active** holds threads that need you. Your mail model reads each new email and decides whether it needs you, with a one-line reason: hover the model's icon on a sidebar row (a filter icon when one of your rules decided), or see it in the email's details. Settled rows also name the reason, such as Receipt. In **Mail home**, choose **Settle these** to accept the displayed suggestions or **Keep in Active** on a thread you still need. **Move back to Active** reopens a settled thread. To also archive settled mail in your provider’s inbox, enable **Archive on the mail server when settled**.
 
 Until you've approved a sender's or category's settles a few times in a row, Mail only suggests. After that it settles them on its own when the model agrees; the model still reads each email and keeps one that differs, such as a delivery after shipping notices. The **Daily recap** at the top of **Mail home** lists what was settled for you since yesterday with each reason; choose **I wanted to see this** to bring an email back and have Mail ask about that sender again. Adjust the approval threshold or switch a sender back to **Suggest** under **Settings → Mail → Trust**. For an exact rule that skips the model, use **Rules → Add rule → Dry run** to preview matches before saving.
 
 To keep a sender's mail away from AI entirely, right-click it and choose **Turn off AI for this sender**, or add addresses and domains under **Settings → Mail → AI off**. Their mail stays in Active without a model reading it, and Mail chats and agents can't read it. When a domain covers the sender, **Turn on AI** names that domain and turns it back on for the whole domain.
 
-Formatted messages open in a simplified view that keeps the sender’s words, links and tables in your theme, without their layout or images. Choose **Show original** for the sender’s layout, such as a boarding pass or a coupon; emails that are mostly pictures open that way. In the original, **Load remote images** displays pictures hosted by the sender for that message.
+Formatted messages open in a simplified view that keeps the sender’s words, links and tables in your theme, without their layout or images. Choose **Show original** for the sender’s layout, such as a boarding pass or a coupon; emails that are mostly pictures open that way. In the original, **Load images** displays pictures hosted by the sender for that message.
 
 Choose **Chat** on an email to open its chat beside the email, with the saved triage history. Each entry shows what Mail decided, why, and whether the model or one of your rules made the decision. Opening the chat uses no model tokens. Ask a follow-up there to work with the email.
 
 A thread reads oldest first. The newest and unread messages are open; select a collapsed message to read it, and **•••** shows the earlier conversation quoted inside a message. Each open message has **Reply**, **Reply all** (when others were on it) and **Forward**; the toolbar buttons answer the newest message someone else sent. The editor opens under the message it answers and names it. A reply quotes that message below your text, as other mail apps do, and a forward includes its attachments. **Send** sends it; **Save draft** or closing the editor keeps it under that message, including drafts an agent left. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next send.
 
-Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Turn off AI for this sender**, **Never show this sender** and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation to restore it to your inbox.
+Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Turn off AI for this sender**, **Never show this sender** and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation, or **Restore** under **Trash** in the sidebar, to bring it back to your inbox. Trash lists what you deleted in Mail during the last 30 days.
+
+## Write a new email
+
+Choose **New email** at the top of the Mail sidebar, or use the **New thread** shortcut while in Mail. Mail saves it to **Drafts** as you type, so you can leave and come back to it. Choose **Chat** to have your mail model help write it; edits the chat makes appear in the email, and only you can send it. With more than one account, choose the sending address under **From**.
+
+**Sent** in the sidebar lists conversations you've written in, newest first. A sent email that asks a question waits in **Working** for the answer, and the reply brings it back to Active.
 
 ## Use the CLI or an MCP agent
 

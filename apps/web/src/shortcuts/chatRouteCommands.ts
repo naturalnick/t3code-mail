@@ -8,8 +8,9 @@ import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { dispatchPreviewAction, type PreviewAction } from "../components/preview/previewActionBus";
-import { isAppModalPage } from "../components/sidebar/mainAppLocation";
+import { isAppModalPage, isMailPath } from "../components/sidebar/mainAppLocation";
 import { isBrowserSurfaceFocused } from "../lib/previewFocus";
+import { randomUUID } from "../lib/utils";
 import { shouldCreateNewThreadInCurrentProject } from "../components/Sidebar.logic";
 import {
   createNewThreadHandler,
@@ -149,6 +150,12 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
         void scratch.startScratchThread(environmentId);
       },
       "chat.new": (event) => {
+        // In Mail, "new" means a new email.
+        if (isMailPath(router.state.location.pathname)) {
+          claim(event);
+          void router.navigate({ to: "/mail/new", search: { email: randomUUID() } });
+          return;
+        }
         const groups = readProjectGroups();
         if (
           !shouldCreateNewThreadInCurrentProject(

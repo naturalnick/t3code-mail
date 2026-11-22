@@ -154,7 +154,7 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold">{gt("Inbox")}</h1>
+        <h1 className="text-xl font-semibold">{gt("Mail review")}</h1>
         <Button render={<Link to="/settings/mail" />} variant="ghost" size="sm">
           {gt("Mail settings")}
         </Button>

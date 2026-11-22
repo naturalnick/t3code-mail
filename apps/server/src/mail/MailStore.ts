@@ -51,6 +51,14 @@ const workflowColumns = [
   "incoming_count",
 ];
 
+// A thread only the user wrote in is named by its first recipient (To, then Cc), as Sent mail is.
+const FIRST_RECIPIENT = `CASE WHEN json_extract(to_json, '$[0].address') IS NOT NULL THEN to_json
+    WHEN json_extract(cc_json, '$[0].address') IS NOT NULL THEN cc_json END`;
+const SENDER_COLUMNS = `CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NULL
+    THEN COALESCE(json_extract(${FIRST_RECIPIENT}, '$[0].name'), '') ELSE from_name END AS from_name,
+  CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NULL
+    THEN json_extract(${FIRST_RECIPIENT}, '$[0].address') ELSE from_address END AS from_address`;
+
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
 const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   [
@@ -332,6 +340,15 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `DROP INDEX mail_threads_triage`,
     `CREATE INDEX mail_threads_triage ON mail_threads (triage_state, last_message_at)`,
   ],
+  [
+    `CREATE INDEX mail_threads_sent ON mail_threads (last_outgoing_at DESC, id DESC)
+      WHERE last_outgoing_at IS NOT NULL`,
+    `UPDATE mail_threads SET (from_name, from_address) = (SELECT ${SENDER_COLUMNS}
+        FROM mail_messages WHERE thread_id = mail_threads.id AND removed = 0
+        ORDER BY date DESC, id DESC LIMIT 1)
+      WHERE incoming_count = 0 AND message_count > 0
+        AND EXISTS (SELECT 1 FROM mail_messages WHERE thread_id = mail_threads.id AND removed = 0)`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -507,6 +524,8 @@ export interface ActionRecord {
     readonly trust?: TrustUndo;
     readonly mirror?: MirrorUndo;
     readonly discardedDraft?: DraftRecord;
+    /** A new email's thread, removed with its only draft and put back by undo. */
+    readonly composed?: ThreadRecord;
     readonly draft?: {
       readonly id: MailDraftId;
       readonly revision: number;
@@ -522,6 +541,9 @@ export interface ActionRecord {
     readonly trash?: {
       readonly accountId: MailAccountId;
       readonly messageIds: ReadonlyArray<string>;
+      /** Kept so Trash can name the email after its thread is gone. */
+      readonly subject?: string;
+      readonly from?: string;
     };
   } | null;
   readonly undoneAt: string | null;
@@ -617,6 +639,7 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
     from: { name: thread.fromName, address: thread.fromAddress },
     suggestedAction: thread.suggestedAction,
     lastMessageAt: thread.lastMessageAt,
+    lastOutgoingAt: thread.lastOutgoingAt,
     messageCount: thread.messageCount,
     unread: thread.unread,
     state: thread.state,
@@ -733,8 +756,8 @@ export function actionEntry(
     actorLabel: action.actorLabel,
     kind: action.kind,
     threadId: action.threadId,
-    subject: thread?.subject ?? null,
-    from: thread ? thread.fromName || thread.fromAddress : null,
+    subject: thread?.subject ?? action.undo?.trash?.subject ?? null,
+    from: thread ? thread.fromName || thread.fromAddress : (action.undo?.trash?.from ?? null),
     reason: action.reason,
     undoable: action.undo !== null && action.undoneAt === null,
     undoneAt: action.undoneAt,
@@ -1259,13 +1282,13 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   /** Recomputes the thread's message-derived columns; state columns are left alone. */
   const refreshThreadAggregate = Effect.fnUntraced(function* (id: MailThreadId) {
     const rows = yield* sql<Row>`WITH ranked AS (
-        SELECT id, date, subject, from_name, from_address, outgoing, seen, in_inbox,
+        SELECT id, date, subject, from_name, from_address, to_json, cc_json, outgoing, seen, in_inbox,
           row_number() OVER (PARTITION BY COALESCE(message_id, id) ORDER BY date, id) AS copy
         FROM mail_messages WHERE thread_id = ${id} AND removed = 0
       ), messages AS (SELECT * FROM ranked WHERE copy = 1),
       first AS (SELECT subject FROM messages ORDER BY date, id LIMIT 1),
       last AS (SELECT subject FROM messages ORDER BY date DESC, id DESC LIMIT 1),
-      sender AS (SELECT from_name, from_address FROM messages ORDER BY outgoing, date DESC, id DESC LIMIT 1)
+      sender AS (SELECT ${sql.literal(SENDER_COLUMNS)} FROM messages ORDER BY outgoing, date DESC, id DESC LIMIT 1)
       UPDATE mail_threads SET
         (subject, from_name, from_address, last_message_at, last_incoming_at, last_outgoing_at,
          message_count, incoming_count, unread, in_inbox) = (
@@ -1410,11 +1433,13 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const requeueWaitingTriage = sql`UPDATE mail_threads SET triage_state = 'pending'
     WHERE triage_state IN ('waiting_model', 'capped')`.pipe(Effect.asVoid);
 
-  /** Every unsettled thread plus the newest settled ones: the sidebar's whole working set. */
+  /** Every unsettled thread, any with an unsent draft, and the newest settled ones. */
   const openThreads = (settledLimit: number) =>
-    sql<Row>`SELECT * FROM (SELECT * FROM mail_threads WHERE state != 'settled' OR pinned_at IS NOT NULL)
+    sql<Row>`SELECT * FROM (SELECT * FROM mail_threads WHERE state != 'settled' OR pinned_at IS NOT NULL
+        OR id IN (SELECT thread_id FROM mail_drafts WHERE status IN ('draft', 'failed')))
       UNION ALL
       SELECT * FROM (SELECT * FROM mail_threads WHERE state = 'settled' AND pinned_at IS NULL
+        AND id NOT IN (SELECT thread_id FROM mail_drafts WHERE status IN ('draft', 'failed'))
         ORDER BY last_message_at DESC, id DESC LIMIT ${settledLimit})`.pipe(
       Effect.map((rows) => rows.map(toThread)),
     );
@@ -1435,6 +1460,64 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         hasMore: rows.length > input.limit,
       })),
     );
+
+  /** Threads the user wrote in, newest sent first. */
+  const sentPage = (input: {
+    readonly before: { readonly at: string; readonly id: string } | undefined;
+    readonly limit: number;
+  }) =>
+    sql<Row>`SELECT * FROM mail_threads WHERE last_outgoing_at IS NOT NULL
+        ${input.before ? sql`AND (last_outgoing_at, id) < (${input.before.at}, ${input.before.id})` : sql``}
+      ORDER BY last_outgoing_at DESC, id DESC LIMIT ${input.limit + 1}`.pipe(
+      Effect.map((rows) => ({
+        threads: rows.slice(0, input.limit).map(toThread),
+        hasMore: rows.length > input.limit,
+      })),
+    );
+
+  /** Deletes made here and not undone since `since`, newest first. */
+  const trashPage = (input: {
+    readonly beforeId: number | undefined;
+    readonly since: string;
+    readonly limit: number;
+  }) =>
+    sql<Row>`SELECT * FROM mail_actions WHERE kind = 'delete' AND undone_at IS NULL
+        AND json_array_length(undo_json, '$.trash.messageIds') > 0 AND at >= ${input.since}
+        ${input.beforeId === undefined ? sql`` : sql`AND id < ${input.beforeId}`}
+      ORDER BY id DESC LIMIT ${input.limit + 1}`.pipe(
+      Effect.map((rows) => ({
+        actions: rows.slice(0, input.limit).map(toAction),
+        hasMore: rows.length > input.limit,
+      })),
+    );
+
+  /** A new email has no messages yet, so its row shows the draft's subject and recipient. */
+  const setComposedHeader = (
+    id: MailThreadId,
+    header: {
+      readonly subject: string;
+      readonly fromName: string;
+      readonly fromAddress: string;
+      readonly at: string;
+    },
+  ) =>
+    sql`UPDATE mail_threads SET subject = ${header.subject}, from_name = ${header.fromName},
+        from_address = ${header.fromAddress}, last_message_at = ${header.at}
+      WHERE id = ${id} AND message_count = 0`.pipe(Effect.asVoid);
+
+  /** The new email (written here) that one of these Message-IDs belongs to, if any. */
+  const findComposedThread = (accountId: MailAccountId, messageIds: ReadonlyArray<string>) =>
+    messageIds.length === 0
+      ? Effect.succeed(null)
+      : sql<{ thread_id: string }>`SELECT thread_id FROM mail_messages
+          WHERE account_id = ${accountId} AND message_id IN ${sql.in(messageIds)}
+            AND instr(thread_id, ${`${accountId}:n:`}) = 1
+          UNION ALL SELECT thread_id FROM mail_reset_messages
+          WHERE account_id = ${accountId} AND message_id IN ${sql.in(messageIds)}
+            AND instr(thread_id, ${`${accountId}:n:`}) = 1
+          LIMIT 1`.pipe(
+          Effect.map((rows) => (rows[0] ? MailThreadId.make(rows[0].thread_id) : null)),
+        );
 
   const countSettled = sql<{
     count: number;
@@ -1837,6 +1920,10 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     requeueWaitingTriage,
     openThreads,
     settledPage,
+    sentPage,
+    trashPage,
+    setComposedHeader,
+    findComposedThread,
     countSettled,
     dueSnoozes,
     threadsByState,

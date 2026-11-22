@@ -23,7 +23,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import { formatDateTimeTimestamp } from "../../timestampFormat";
 import { useMailCommand } from "../settings/MailSettings.commands";
 import { Button } from "../ui/button";
-import { MailChatPanel } from "./MailChatPanel";
+import { MailChatAside } from "./MailChatPanel";
 import { type ComposeTask, MailComposer } from "./MailComposer";
 import { MailConversation } from "./MailConversation";
 import { MailDecider } from "./MailDecider";
@@ -43,6 +43,7 @@ import {
   senderName,
   settleReasonLabel,
 } from "./mailPresentation";
+import { MailNewEmail } from "./MailNewEmail";
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
 import { useMailActions } from "./useMailActions";
@@ -380,6 +381,17 @@ export function MailThreadView({
       </MailPage>
     );
   }
+  if (thread.messageCount === 0) {
+    return (
+      <MailNewEmail
+        environmentId={environmentId}
+        thread={thread}
+        detail={detail}
+        chatOpen={chatOpen}
+        onChatOpenChange={onChatOpenChange}
+      />
+    );
+  }
   const from = accounts?.find((account) => account.id === thread.accountId)?.email ?? "";
   const account = from && (accounts?.length ?? 0) > 1 ? from : null;
   const chatThreadId = thread.chatThreadId ?? openedChatId;
@@ -498,21 +510,12 @@ export function MailThreadView({
           </div>
         </section>
         {showChat ? (
-          <aside
-            aria-label={gt("Mail chat")}
-            className={cn(
-              "min-h-0 overflow-hidden rounded-2xl border border-border/70 bg-background",
-              wide
-                ? "w-[clamp(22rem,40%,36rem)] shrink-0"
-                : "absolute inset-x-3 top-0 bottom-3 z-10 shadow-lg",
-            )}
-          >
-            <MailChatPanel
-              environmentId={environmentId}
-              chatThreadId={chatThreadId}
-              onClose={() => onChatOpenChange(false)}
-            />
-          </aside>
+          <MailChatAside
+            environmentId={environmentId}
+            chatThreadId={chatThreadId}
+            wide={wide}
+            onClose={() => onChatOpenChange(false)}
+          />
         ) : detailsOpen ? (
           <aside
             aria-label={gt("Mail details")}

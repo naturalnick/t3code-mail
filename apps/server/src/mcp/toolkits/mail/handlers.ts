@@ -104,6 +104,8 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
             mode: draft.mode,
             targetMessageId: draft.targetMessageId,
             to: draft.to,
+            cc: draft.cc,
+            subject: draft.subject,
             body: draft.body,
             status: draft.status,
           })),
@@ -146,7 +148,8 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
               subject:
                 subject ??
                 (mode === undefined ? existing?.subject : undefined) ??
-                (prefix.test(subjectLine)
+                // A new email has nothing to answer, so its subject is its own.
+                (target === undefined || prefix.test(subjectLine)
                   ? subjectLine
                   : `${forward ? "Fwd" : "Re"}: ${subjectLine}`),
               body,

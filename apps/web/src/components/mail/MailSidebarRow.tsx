@@ -42,30 +42,40 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   readonly thread: MailThreadRow;
   readonly isActive: boolean;
   readonly actions: ReturnType<typeof useMailActions>;
+  /** The time to show instead of the latest message's, such as when it was sent. */
+  readonly timestamp?: string;
   readonly onIntent?: ((thread: MailThreadRow | null) => void) | undefined;
   readonly onContextMenu?: ((thread: MailThreadRow, event: MouseEvent) => void) | undefined;
 }) {
-  const { environmentId, thread, isActive, actions, onIntent, onContextMenu } = props;
+  const { environmentId, thread, isActive, actions, timestamp, onIntent, onContextMenu } = props;
   const gt = useGT();
   const resolve = useMessages();
   const { isMobile, setOpenMobile } = useSidebar();
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
   const stop = (event: MouseEvent) => event.stopPropagation();
-  const sender = senderName(thread.from);
+  // A new email not sent yet: named by who it goes to.
+  const isNew = thread.messageCount === 0;
+  const sender = isNew
+    ? thread.from.address
+      ? gt("To {recipient}", { recipient: senderName(thread.from) })
+      : gt("New email")
+    : senderName(thread.from);
   const subject = thread.subject || gt("(No subject)");
   const nudge = nudgeLabel(thread.nudge, resolve);
   const settled = thread.state === "settled";
   const recede = settled && !isActive;
   const unread = thread.unread && !settled;
-  // Who sorted it, for suggestions and for settles nobody made by hand.
   const suggestion = thread.state === "active" ? thread.suggestion : null;
-  const decision = suggestion !== null || settled ? mailDecision(thread) : null;
+  // Who sorted it. A suggestion shows only who; the reason word is for settled rows.
+  const sorted = suggestion !== null || settled ? mailDecision(thread) : null;
+  // Suggestions from before the model gave reasons have nothing to show on hover.
+  const decision = settled || sorted?.why || sorted?.actor === "rule" ? sorted : null;
   const decider = decision?.actor ?? null;
   // A settle suggestion already says what to do, so its next-step text would repeat it.
   const metaText =
     nudge ?? (thread.state === "active" && suggestion === null ? thread.suggestedAction : null);
-  const metaReason = suggestion?.reason ?? (settled ? thread.settledReason : null);
+  const metaReason = settled ? thread.settledReason : null;
   const badgeNote =
     decider === "rule"
       ? suggestion
@@ -90,101 +100,76 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
     );
   };
 
-  const controls =
-    thread.state === "settled" ? (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              type="button"
-              disabled={actions.disabled}
-              aria-label={gt("Move back to Active")}
-              className={rowActionClassName}
-              onClick={(event) => {
-                stop(event);
-                void actions.act([thread.id], { type: "unsettle" }, gt("Moved back to Active"));
-              }}
-            />
-          }
-        >
-          <Undo2Icon className="size-3.5" />
-        </TooltipTrigger>
-        <TooltipPopup side="top">
-          <T>Move back to Active</T>
-        </TooltipPopup>
-      </Tooltip>
-    ) : thread.state === "snoozed" ? (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              type="button"
-              disabled={actions.disabled}
-              aria-label={gt("Wake now")}
-              className={rowActionClassName}
-              onClick={(event) => {
-                stop(event);
-                void actions.act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"));
-              }}
-            />
-          }
-        >
-          <AlarmClockOffIcon className="size-3.5" />
-        </TooltipTrigger>
-        <TooltipPopup side="top">
-          <T>Wake now</T>
-        </TooltipPopup>
-      </Tooltip>
-    ) : actions.disabled ? null : (
-      <>
-        <SnoozeMenuButton
-          open={snoozeMenuOpen}
-          onOpenChange={setSnoozeMenuOpen}
-          onSnooze={(preset) => snooze(preset.snoozedUntil)}
-          timestampFormat={timestampFormat}
-          environmentId={environmentId}
-          label={gt("Snooze")}
-          extraItems={
-            <MenuItem
-              onClick={(event) => {
-                event.stopPropagation();
-                snooze(null);
-              }}
-            >
-              <T>Until reply</T>
-            </MenuItem>
-          }
-        />
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                aria-label={
-                  suggestion
-                    ? gt("Settle as {reason}", {
-                        reason: settleReasonLabel(suggestion.reason, resolve),
-                      })
-                    : gt("Settle")
-                }
-                className={cn(rowActionClassName, "-mr-1")}
-                onClick={settle}
-              />
-            }
+  const controls = isNew ? null : thread.state === "settled" ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            disabled={actions.disabled}
+            aria-label={gt("Move back to Active")}
+            className={rowActionClassName}
+            onClick={(event) => {
+              stop(event);
+              void actions.act([thread.id], { type: "unsettle" }, gt("Moved back to Active"));
+            }}
+          />
+        }
+      >
+        <Undo2Icon className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">
+        <T>Move back to Active</T>
+      </TooltipPopup>
+    </Tooltip>
+  ) : thread.state === "snoozed" ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            disabled={actions.disabled}
+            aria-label={gt("Wake now")}
+            className={rowActionClassName}
+            onClick={(event) => {
+              stop(event);
+              void actions.act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"));
+            }}
+          />
+        }
+      >
+        <AlarmClockOffIcon className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">
+        <T>Wake now</T>
+      </TooltipPopup>
+    </Tooltip>
+  ) : actions.disabled ? null : (
+    <>
+      <SnoozeMenuButton
+        open={snoozeMenuOpen}
+        onOpenChange={setSnoozeMenuOpen}
+        onSnooze={(preset) => snooze(preset.snoozedUntil)}
+        timestampFormat={timestampFormat}
+        environmentId={environmentId}
+        label={gt("Snooze")}
+        extraItems={
+          <MenuItem
+            onClick={(event) => {
+              event.stopPropagation();
+              snooze(null);
+            }}
           >
-            <CheckIcon className="size-3.5" />
-            <T>Settle</T>
-          </TooltipTrigger>
-          <TooltipPopup side="top">
-            {suggestion ? (
-              gt("Settle as {reason}", { reason: settleReasonLabel(suggestion.reason, resolve) })
-            ) : (
-              <T>Settle</T>
-            )}
-          </TooltipPopup>
-        </Tooltip>
-      </>
-    );
+            <T>Until reply</T>
+          </MenuItem>
+        }
+      />
+      <button type="button" className={cn(rowActionClassName, "-mr-1")} onClick={settle}>
+        <CheckIcon className="size-3.5" />
+        <T>Settle</T>
+      </button>
+    </>
+  );
 
   return (
     <li className="list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_60px]">
@@ -249,7 +234,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
                   {formatShortTimestamp(thread.snoozedUntil, timestampFormat)}
                 </span>
               ) : (
-                <MailTime timestamp={thread.lastMessageAt} />
+                <MailTime timestamp={timestamp ?? thread.lastMessageAt} />
               )}
             </span>
             {controls === null ? null : (
@@ -282,7 +267,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             />
           ) : null}
         </div>
-        {metaText !== null || metaReason !== null ? (
+        {metaText !== null || metaReason !== null || decider !== null ? (
           <div className="mt-0.5 flex h-4 min-w-0 items-center gap-1.5 text-xs">
             <span
               className={cn(
@@ -292,8 +277,10 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             >
               {metaText}
             </span>
-            {metaReason === null ? null : badgeNote === null ? (
-              <span className={badgeClassName}>{settleReasonLabel(metaReason, resolve)}</span>
+            {metaReason === null && decider === null ? null : badgeNote === null ? (
+              <span className={badgeClassName}>
+                {metaReason === null ? null : settleReasonLabel(metaReason, resolve)}
+              </span>
             ) : (
               <Tooltip>
                 <TooltipTrigger
@@ -307,7 +294,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
                       decidedBy={thread.decidedBy}
                     />
                   ) : null}
-                  {settleReasonLabel(metaReason, resolve)}
+                  {metaReason === null ? null : settleReasonLabel(metaReason, resolve)}
                 </TooltipTrigger>
                 <TooltipPopup side="top">{badgeNote}</TooltipPopup>
               </Tooltip>

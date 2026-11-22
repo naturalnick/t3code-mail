@@ -24,7 +24,6 @@ import { Menu, MenuItem, MenuItemDetail, MenuPopup, MenuSeparator, MenuTrigger }
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposeMode } from "./mailCompose.logic";
-import { settleReasonLabel } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 import { useSenderAi } from "./useSenderAi";
 
@@ -131,7 +130,6 @@ export function MailThreadToolbar({
   onChatOpenChange: (open: boolean) => void;
 }) {
   const gt = useGT();
-  const resolve = useMessages();
   const { act, disabled } = useMailActions(environmentId);
   const senderAi = useSenderAi(environmentId);
   const navigate = useNavigate();
@@ -223,11 +221,7 @@ export function MailThreadToolbar({
           }
         >
           <CheckIcon />
-          {thread.suggestion
-            ? gt("Settle as {reason}", {
-                reason: settleReasonLabel(thread.suggestion.reason, resolve),
-              })
-            : gt("Settle")}
+          {gt("Settle")}
         </Button>
       )}
       <Menu>

@@ -2,6 +2,8 @@ import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } fr
 import type { ReactNode } from "react";
 import { T, useGT } from "gt-react";
 import { memo } from "react";
+import { Toggle as TogglePrimitive } from "@base-ui/react/toggle";
+import { ToggleGroup as ToggleGroupPrimitive } from "@base-ui/react/toggle-group";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useAtomValue } from "@effect/atom-react";
@@ -24,7 +26,6 @@ import {
 } from "../SidebarStageBackdrop";
 import { useMailEnvironmentId } from "../../state/mail";
 import { useInMailTab } from "../mail/useInMailTab";
-import { ToggleGroup, Toggle } from "../ui/toggle-group";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -53,23 +54,42 @@ function useHasWorkspaceTabs() {
   return { shown: connected !== null || inMail, inMail };
 }
 
-function WorkspaceTabs({ inMail }: { inMail: boolean }) {
+/** A two-position switch: the thumb slides to the active side, and clicking the active side flips it. */
+function WorkspaceTabs({ inMail, onBackdrop }: { inMail: boolean; onBackdrop: boolean }) {
   const switchTab = useSwitchAppTab();
+  const side = cn(
+    "relative z-10 flex h-6 cursor-pointer select-none items-center justify-center rounded-full px-3 font-medium text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+    // On a backdrop image both labels stay white so neither gets lost in the glare.
+    onBackdrop
+      ? "text-white not-data-pressed:hover:bg-white/10"
+      : "text-muted-foreground hover:text-foreground data-pressed:text-foreground",
+  );
   return (
-    <ToggleGroup
-      className="[-webkit-app-region:no-drag]"
+    <ToggleGroupPrimitive
+      className={cn(
+        "relative inline-grid grid-cols-2 rounded-full p-0.5 [-webkit-app-region:no-drag]",
+        onBackdrop ? "bg-black/25 ring-1 ring-white/20 ring-inset" : "bg-input/50",
+      )}
       value={[inMail ? "mail" : "code"]}
       onValueChange={([tab]) => {
-        if (tab === "mail" || tab === "code") void switchTab(tab);
+        void switchTab(tab === "mail" || tab === "code" ? tab : inMail ? "code" : "mail");
       }}
     >
-      <Toggle value="code">
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-y-0.5 left-0.5 w-[calc(50%-2px)] rounded-full transition-transform duration-200 ease-out motion-reduce:transition-none",
+          onBackdrop ? "bg-white/30" : "bg-background shadow-xs/10 dark:bg-input",
+          inMail && "translate-x-full",
+        )}
+      />
+      <TogglePrimitive value="code" className={side}>
         <T>Code</T>
-      </Toggle>
-      <Toggle value="mail">
+      </TogglePrimitive>
+      <TogglePrimitive value="mail" className={side}>
         <T>Mail</T>
-      </Toggle>
-    </ToggleGroup>
+      </TogglePrimitive>
+    </ToggleGroupPrimitive>
   );
 }
 
@@ -110,7 +130,9 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         <div className="relative z-10 flex h-8 min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden py-0.5">
           <div className="flex shrink-0 items-center gap-1">
             <SidebarBrand onBackdrop={backdropVariant !== null} product={!tabs.shown} />
-            {tabs.shown ? <WorkspaceTabs inMail={tabs.inMail} /> : null}
+            {tabs.shown ? (
+              <WorkspaceTabs inMail={tabs.inMail} onBackdrop={backdropVariant !== null} />
+            ) : null}
             {isElectron ? (
               <div className="hidden items-center md:flex">
                 <HistoryNavigationButton direction="back" onBackdrop={backdropVariant !== null} />
@@ -156,7 +178,7 @@ export function SidebarBrandWidthProbe({
     >
       <div className="ml-[var(--workspace-titlebar-content-left)] flex gap-1">
         <SidebarBrandMark onBackdrop={false} product={!tabs.shown} />
-        {tabs.shown ? <WorkspaceTabs inMail={tabs.inMail} /> : null}
+        {tabs.shown ? <WorkspaceTabs inMail={tabs.inMail} onBackdrop={false} /> : null}
         {isElectron ? <div className="w-[calc(2*var(--workspace-titlebar-control-size))]" /> : null}
       </div>
     </div>

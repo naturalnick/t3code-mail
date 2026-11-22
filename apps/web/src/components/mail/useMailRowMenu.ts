@@ -9,8 +9,11 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { readLocalApi } from "../../localApi";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
 import { pickSnoozePreset, resolveSnoozePresets } from "../Sidebar.snooze";
-import { settleReasonLabel } from "./mailPresentation";
 import type { useMailActions } from "./useMailActions";
+import { mailEnvironment } from "../../state/mail";
+import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
+import { toastManager } from "../ui/toast";
+import { useDiscardDraft } from "./useDiscardDraft";
 import { useSenderAi } from "./useSenderAi";
 
 /** The right-click menu for an email row: everything the email's own toolbar offers. */
@@ -27,11 +30,36 @@ export function useMailRowMenu(
   });
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   const senderAi = useSenderAi(environmentId);
+  const discardDraft = useDiscardDraft(environmentId);
+  const readThread = useAtomQueryRunner(mailEnvironment.thread, { refresh: true });
 
   return useStableCallback(async (thread: MailThreadRow, event: MouseEvent) => {
     event.preventDefault();
     const api = readLocalApi();
     if (!api || actions.disabled) return;
+    if (thread.messageCount === 0) {
+      const clicked = await api.contextMenu
+        .show(
+          [{ id: "discard", label: gt("Discard draft"), destructive: true }],
+          { x: event.clientX, y: event.clientY },
+          contextMenuSourceOf(event),
+        )
+        .catch(() => null);
+      if (clicked !== "discard") return;
+      // The row can be stale: another device may have sent this email since.
+      const read = await readThread({ environmentId, input: { threadId: thread.id } });
+      if (read._tag !== "Success") return;
+      if (read.value.thread.messageCount > 0) {
+        toastManager.add({ type: "info", title: gt("This email was already sent.") });
+        return;
+      }
+      const draft = read.value.drafts.findLast(
+        (entry) => entry.status === "draft" || entry.status === "failed",
+      );
+      if (draft && (await discardDraft(draft)) && openMailThreadId === thread.id)
+        void navigate({ to: "/mail" });
+      return;
+    }
     const settled = thread.state === "settled";
     const presets = resolveSnoozePresets(new Date(), timestampFormat, environmentId, resolve);
     const items: Array<ContextMenuItem> = [
@@ -63,14 +91,7 @@ export function useMailRowMenu(
             ]),
       settled
         ? { id: "unsettle", label: gt("Move back to Active") }
-        : {
-            id: "settle",
-            label: thread.suggestion
-              ? gt("Settle as {reason}", {
-                  reason: settleReasonLabel(thread.suggestion.reason, resolve),
-                })
-              : gt("Settle"),
-          },
+        : { id: "settle", label: gt("Settle") },
       ...(settled || thread.workingReason === "waiting"
         ? []
         : [{ id: "wait_for_reply", label: gt("Wait for reply") }]),

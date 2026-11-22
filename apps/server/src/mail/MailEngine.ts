@@ -319,12 +319,18 @@ const make = Effect.gen(function* () {
     context: IngestContext,
     message: ParsedMessage,
   ) {
-    if (context.gmail && message.gmailThreadId) {
-      return MailThreadId.make(`${context.accountId}:g:${message.gmailThreadId}`);
-    }
     const related = [message.inReplyTo, ...message.references].filter(
       (value): value is string => value !== null,
     );
+    // A new email written here keeps its own thread: the server's copy of it and replies join it.
+    const composed = yield* store.findComposedThread(
+      context.accountId,
+      message.messageId === null ? related : [message.messageId, ...related],
+    );
+    if (composed !== null) return composed;
+    if (context.gmail && message.gmailThreadId) {
+      return MailThreadId.make(`${context.accountId}:g:${message.gmailThreadId}`);
+    }
     const existing = yield* store.findThreadIdByMessageIds(
       context.accountId,
       related,

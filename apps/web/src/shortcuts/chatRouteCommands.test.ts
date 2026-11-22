@@ -36,6 +36,7 @@ describe("new thread commands", () => {
     { mode: "boring", count: 2, command: "chat.new", picker: true },
     { mode: "boring", count: 1, command: "chat.new", picker: false },
     { mode: "boring", count: 2, command: "chat.newLocal", picker: false },
+    { mode: "normal", count: 2, command: "chat.new", picker: false, path: "/mail/thread-1" },
   ] as const)("$mode sidebar, $count projects, $command: picker=$picker", (scenario) => {
     using _settings = vi.spyOn(settings, "getClientSettings").mockReturnValue({
       ...DEFAULT_CLIENT_SETTINGS,
@@ -51,7 +52,12 @@ describe("new thread commands", () => {
     using openPicker = vi.spyOn(commandPalette, "openCommandPalette").mockImplementation(() => {});
     using startLocal = vi.spyOn(threadActions, "startNewThreadFromContext").mockResolvedValue(true);
     using register = vi.spyOn(dispatcher, "registerCommands").mockReturnValue(() => {});
-    const router = { state: { matches: [] } } as unknown as AnyRouter;
+    const navigate = vi.fn();
+    const path = "path" in scenario ? scenario.path : "/";
+    const router = {
+      state: { matches: [], location: { pathname: path } },
+      navigate,
+    } as unknown as AnyRouter;
     using stack = new DisposableStack();
     stack.defer(installChatRouteCommands(router));
     const commands = register.mock.calls[0]![0];
@@ -63,7 +69,14 @@ describe("new thread commands", () => {
     storedProject.mockReturnValue("local:idle");
     commands[scenario.command]!(event);
 
-    if (scenario.picker) {
+    if (path.startsWith("/mail")) {
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/mail/new",
+        search: { email: expect.any(String) },
+      });
+      expect(openPicker).not.toHaveBeenCalled();
+      expect(startLocal).not.toHaveBeenCalled();
+    } else if (scenario.picker) {
       expect(openPicker).toHaveBeenCalledWith({ open: "new-thread-in" });
       expect(startLocal).not.toHaveBeenCalled();
     } else {

@@ -180,7 +180,7 @@ export function MailFormattedMessage({
         <div className="mb-2 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs">
           {offerImages ? (
             <InlineButton tone="muted" onClick={() => setLoadImages(true)}>
-              {gt("Load remote images")}
+              {gt("Load images")}
             </InlineButton>
           ) : null}
           {reader.hasText ? (

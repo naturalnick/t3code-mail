@@ -20,7 +20,7 @@ import {
   type MailMessageBodyInput,
   type MailFormattedBody,
   type MailThreadDetail,
-  type MailThreadId,
+  MailThreadId,
   type MailThreadRow,
   type MailTrustRecord,
   MessageId,
@@ -33,10 +33,13 @@ import type {
   MailActionPage,
   MailActResult,
   MailAddAccountInput,
+  MailComposeInput,
   MailDryRunRuleResult,
   MailEmailMd,
   MailListActionsInput,
+  MailListSentInput,
   MailListSettledInput,
+  MailListTrashInput,
   MailOpenSessionInput,
   MailOpenSessionResult,
   MailSaveDraftInput,
@@ -102,6 +105,7 @@ import {
   estimateTokens,
   firstLine,
   looksLikeInstructionsToAi,
+  parseMailbox,
 } from "./mailText.ts";
 import {
   categoryKey,
@@ -129,6 +133,7 @@ const L1_TEXT_CHARS = 1_200;
 const GUARDRAIL_TEXT_CHARS = 200_000;
 const TRIAGE_RETRY_MINUTES = 10;
 const SEND_DEDUPE_MS = 10 * 60_000;
+const TRASH_DAYS = 30;
 /** The model's reason travels with every sidebar row, so it stays one short line. */
 const WHY_CHARS = 140;
 /** An address, or a domain with an optional leading @. */
@@ -280,6 +285,8 @@ export class MailService extends Context.Service<
     ) => Effect.Effect<MailFormattedBody | null, MailError>;
     readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
+    readonly listSent: (input: MailListSentInput) => Effect.Effect<MailThreadPage, MailError>;
+    readonly listTrash: (input: MailListTrashInput) => Effect.Effect<MailActionPage, MailError>;
     /** Sidebar order: oldest entry first, except Settled, newest first. */
     readonly listThreads: (
       state: MailThreadState,
@@ -297,6 +304,10 @@ export class MailService extends Context.Service<
       actor: MailActorInfo,
     ) => Effect.Effect<MailActResult, MailError>;
     readonly listActions: (input: MailListActionsInput) => Effect.Effect<MailActionPage, MailError>;
+    readonly compose: (
+      input: MailComposeInput,
+      actor: MailActorInfo,
+    ) => Effect.Effect<MailDraft, MailError>;
     readonly saveDraft: (
       input: MailSaveDraftInput,
       actor: MailActorInfo,
@@ -304,7 +315,7 @@ export class MailService extends Context.Service<
     readonly discardDraft: (
       draftId: MailDraftId,
       expectedRevision?: number,
-    ) => Effect.Effect<void, MailError>;
+    ) => Effect.Effect<{ readonly actionId: number | null }, MailError>;
     readonly sendDraft: (input: MailSendDraftInput) => Effect.Effect<MailDraft, MailError>;
     readonly openSession: (
       input: MailOpenSessionInput,
@@ -658,6 +669,8 @@ const make = Effect.gen(function* () {
         trash = {
           accountId: thread.accountId,
           messageIds: locations.flatMap(({ messageId }) => (messageId ? [messageId] : [])),
+          subject: thread.subject,
+          from: thread.fromName || thread.fromAddress,
         };
         patch = {};
         kind = "delete";
@@ -704,6 +717,16 @@ const make = Effect.gen(function* () {
       const actionIds: Array<number> = [];
       const removed: Array<MailThreadId> = [];
       for (const thread of threads) {
+        if (input.action.type === "delete" && thread.messageCount === 0) {
+          // A new email has nothing on the server yet; deleting it discards its draft.
+          for (const draft of yield* store.draftsForThread(thread.id)) {
+            if (draft.status !== "draft" && draft.status !== "failed") continue;
+            const discarded = yield* discardOne(draft, thread, now);
+            actionIds.push(discarded.actionId);
+            removed.push(...discarded.removed);
+          }
+          continue;
+        }
         const id = yield* actOne(thread, input.action, actor, now);
         if (id !== null) actionIds.push(id);
         if (input.action.type === "delete") removed.push(...(yield* store.removeThread(thread.id)));
@@ -743,9 +766,14 @@ const make = Effect.gen(function* () {
           messageIds: history.trash.messageIds,
         });
         yield* store.markActionUndone(actionId, now);
-        return null;
+        return { threadId: null, removed: [] };
       }
-      const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
+      const removed: Array<MailThreadId> = [];
+      let thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
+      if (thread === null && history.composed && history.discardedDraft) {
+        yield* store.insertThread(history.composed);
+        thread = yield* store.getThread(history.composed.id);
+      }
       if (action.threadId !== null && thread === null) return yield* staleUndo();
       if (history.thread && thread) {
         const { before, after, version } = history.thread;
@@ -764,7 +792,19 @@ const make = Effect.gen(function* () {
         const draft = yield* store.getDraft(id);
         if (draft?.status !== "draft" || draft.revision !== revision) return yield* staleUndo();
         if (before === null) yield* store.deleteDraft(id);
-        else yield* store.saveDraftContent({ ...draft, ...before, updatedAt: now });
+        else {
+          const restored = yield* store.saveDraftContent({ ...draft, ...before, updatedAt: now });
+          if (restored && thread?.messageCount === 0)
+            yield* setComposedHeader(thread.id, restored, now);
+        }
+        // Undoing the only draft of a new email takes the email away too.
+        if (
+          before === null &&
+          thread?.messageCount === 0 &&
+          (yield* store.draftsForThread(thread.id)).length === 0
+        ) {
+          removed.push(...(yield* store.deleteExpungedThreads([thread.id])));
+        }
       }
       if (history.discardedDraft) {
         const draft = history.discardedDraft;
@@ -821,11 +861,17 @@ const make = Effect.gen(function* () {
         yield* sync.enqueue(thread.accountId, { ...history.mirror, threadId: thread.id });
       }
       yield* store.markActionUndone(actionId, now);
-      return action.threadId;
+      return { threadId: action.threadId, removed };
     },
     store.transaction,
     commit,
-    Effect.tap((id) => (id === null ? Effect.void : engine.publishThreads([id]))),
+    Effect.tap(({ threadId, removed }) =>
+      removed.length > 0
+        ? engine.publishRemoved(removed)
+        : threadId === null
+          ? Effect.void
+          : engine.publishThreads([threadId]),
+    ),
     Effect.tap(() => engine.publishStatus),
     Effect.asVoid,
     sqlSafe,
@@ -942,6 +988,30 @@ const make = Effect.gen(function* () {
       });
       return {
         threads: yield* rowsWithDrafts(page.threads),
+        hasMore: page.hasMore,
+      };
+    },
+    sqlSafe,
+  );
+
+  const listSent: MailService["Service"]["listSent"] = Effect.fn("MailService.listSent")(function* (
+    input,
+  ) {
+    const page = yield* store.sentPage({ before: input.before, limit: input.limit ?? 50 });
+    return { threads: yield* rowsWithDrafts(page.threads), hasMore: page.hasMore };
+  }, sqlSafe);
+
+  const listTrash: MailService["Service"]["listTrash"] = Effect.fn("MailService.listTrash")(
+    function* (input) {
+      const now = yield* DateTime.now;
+      const page = yield* store.trashPage({
+        beforeId: input.beforeId,
+        // Mail servers empty Trash after about 30 days; older mail can't be restored.
+        since: DateTime.formatIso(DateTime.subtract(now, { days: TRASH_DAYS })),
+        limit: input.limit ?? 50,
+      });
+      return {
+        actions: page.actions.map((action) => MailStore.actionEntry(action, null)),
         hasMore: page.hasMore,
       };
     },
@@ -1544,7 +1614,13 @@ const make = Effect.gen(function* () {
           }
         }
         for (const thread of yield* store.threadsByState("working")) {
-          if (thread.workingReason !== "drafting" || thread.chatThreadId === null) continue;
+          // A new email waits in Drafts for the user, even after its chat goes quiet.
+          if (
+            thread.workingReason !== "drafting" ||
+            thread.chatThreadId === null ||
+            thread.messageCount === 0
+          )
+            continue;
           const shell = yield* threadManagement
             .getThreadShell(ThreadId.make(thread.chatThreadId))
             .pipe(Effect.option);
@@ -1587,89 +1663,204 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const saveDraft: MailService["Service"]["saveDraft"] = Effect.fn("MailService.saveDraft")(
+  /** A new email has no messages yet, so its row shows the draft's subject and recipient. */
+  const setComposedHeader = (
+    threadId: MailThreadId,
+    draft: Pick<MailStore.DraftRecord, "subject" | "to" | "cc">,
+    at: string,
+  ) => {
+    const recipient = parseMailbox(draft.to[0] ?? draft.cc[0] ?? "");
+    return store.setComposedHeader(threadId, {
+      subject: draft.subject,
+      fromName: recipient.name,
+      fromAddress: recipient.address,
+      at,
+    });
+  };
+
+  /** Discards one draft. A new email goes with its last draft, and undo brings both back. */
+  const discardOne = Effect.fn("MailService.discardOne")(function* (
+    draft: MailStore.DraftRecord,
+    thread: MailStore.ThreadRecord | null,
+    now: string,
+  ) {
+    yield* store.deleteDraft(draft.id);
+    const composed =
+      thread !== null &&
+      thread.messageCount === 0 &&
+      (yield* store.draftsForThread(thread.id)).length === 0
+        ? thread
+        : null;
+    const removed = composed ? yield* store.deleteExpungedThreads([composed.id]) : [];
+    const actionId = yield* store.insertAction({
+      at: now,
+      actor: "user",
+      actorLabel: null,
+      kind: "draft",
+      reason: "discard",
+      threadId: draft.threadId,
+      undo: {
+        discardedDraft: draft,
+        ...(composed && removed.length > 0 ? { composed } : {}),
+      },
+    });
+    return { actionId, removed };
+  });
+
+  const compose: MailService["Service"]["compose"] = Effect.fn("MailService.compose")(
     function* (input, actor) {
-      const thread = yield* store.getThread(input.threadId);
-      if (thread === null) return yield* notFound("email");
+      const account = yield* store.getAccount(input.accountId);
+      if (account === null) return yield* notFound("account");
       const now = yield* nowIso;
-      const existing = input.draftId ? yield* store.getDraft(input.draftId) : null;
-      if (input.draftId && (existing === null || existing.threadId !== thread.id))
-        return yield* notFound("draft");
-      if (existing !== null && (existing.status === "sending" || existing.status === "sent")) {
-        return yield* invalid("That draft was already sent.");
+      const threadId = MailThreadId.make(`${account.id}:n:${input.id ?? (yield* uuid)}`);
+      const { id: _id, accountId: _accountId, ...content } = input;
+      // A retry after a lost reply saves into the email the first attempt created.
+      const existing = yield* store.getThread(threadId);
+      if (existing !== null) {
+        if (existing.messageCount > 0) return yield* invalid("That email was already sent.");
+        const open = (yield* store.draftsForThread(threadId)).findLast(
+          (draft) => draft.status === "draft" || draft.status === "failed",
+        );
+        return yield* writeDraft(
+          { ...content, threadId, ...(open ? { draftId: open.id } : {}) },
+          actor,
+        );
       }
-      if (existing && actor.actor !== "user" && input.expectedRevision === undefined) {
-        return yield* invalid("Read the draft and pass its current expectedRevision to edit it.");
-      }
-      if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision) {
-        return yield* invalid("The draft changed. Review the current version before editing.");
-      }
-      const id = existing?.id ?? MailDraftId.make(`draft-${yield* uuid}`);
-      const targetMessageId =
-        input.targetMessageId !== undefined
-          ? input.targetMessageId
-          : (existing?.targetMessageId ?? null);
-      if (
-        targetMessageId !== null &&
-        !(yield* store.threadMessages(thread.id)).some(
-          (message) => String(message.id) === targetMessageId && !message.removed,
-        )
-      ) {
-        return yield* notFound("message");
-      }
-      const saved = yield* store.saveDraftContent({
-        id,
-        threadId: thread.id,
-        accountId: thread.accountId,
-        to: input.to,
-        cc: input.cc,
+      const recipient = parseMailbox(input.to[0] ?? input.cc[0] ?? "");
+      yield* store.insertThread({
+        id: threadId,
+        accountId: account.id,
         subject: input.subject,
-        body: input.body,
-        mode: input.mode ?? existing?.mode ?? "reply",
-        targetMessageId,
-        origin: existing?.origin ?? actor.actor,
-        status: "draft",
-        error: null,
-        updatedAt: now,
-        sentAt: null,
-        // What an agent wrote first, so the user's edits can teach later drafts.
-        originalBody: existing?.originalBody ?? (actor.actor === "user" ? null : input.body),
-        messageId: null,
-        revision: 0,
+        fromName: recipient.name,
+        fromAddress: recipient.address,
+        suggestedAction: null,
+        lastMessageAt: now,
+        lastIncomingAt: null,
+        lastOutgoingAt: null,
+        messageCount: 0,
+        incomingCount: 0,
+        unread: false,
+        inInbox: false,
+        // Out of Active while it is written; sending settles it like any reply.
+        state: "working",
+        stateAt: now,
+        pinnedAt: null,
+        workingReason: "drafting",
+        settledReason: null,
+        settledBy: null,
+        snoozedUntil: null,
+        snoozeOnReply: false,
+        suggestionReason: null,
+        suggestionConfidence: null,
+        category: null,
+        guardrail: null,
+        bulk: false,
+        verdict: null,
+        triageState: "done",
+        triagedCount: 0,
+        nudge: null,
+        chatThreadId: null,
+        injection: false,
+        createdAt: now,
       });
-      if (saved === null) return yield* invalid("That draft was already sent.");
-      const before =
-        existing === null
-          ? null
-          : {
-              ...(existing.status !== saved.status ? { status: existing.status } : {}),
-              ...(existing.messageId !== saved.messageId ? { messageId: existing.messageId } : {}),
-              ...(existing.error !== saved.error ? { error: existing.error } : {}),
-              ...(existing.subject !== saved.subject ? { subject: existing.subject } : {}),
-              ...(existing.body !== saved.body ? { body: existing.body } : {}),
-              ...(toJson(existing.to) !== toJson(saved.to) ? { to: existing.to } : {}),
-              ...(toJson(existing.cc) !== toJson(saved.cc) ? { cc: existing.cc } : {}),
-              ...(existing.mode !== saved.mode ? { mode: existing.mode } : {}),
-              ...(existing.targetMessageId !== saved.targetMessageId
-                ? { targetMessageId: existing.targetMessageId }
-                : {}),
-            };
-      const handBack =
-        actor.actor !== "user" && thread.state === "working" && thread.workingReason === "drafting";
-      yield* recordThreadAction(
-        thread,
-        handBack ? { ...activePatch(now), stateAt: thread.stateAt } : {},
-        {
-          at: now,
-          actor: actor.actor,
-          actorLabel: actor.label ?? null,
-          kind: "draft",
-          reason: existing ? "edit" : null,
-        },
-        { draft: { id, revision: saved.revision, before } },
-      );
-      return MailStore.draftView(saved);
+      return yield* writeDraft({ ...content, threadId }, actor);
     },
+    store.transaction,
+    Effect.tap((draft) => engine.publishThreads([draft.threadId])),
+    sqlSafe,
+  );
+
+  // Traced by saveDraft and compose, which wrap it in their transaction.
+  const writeDraft = Effect.fnUntraced(function* (input: MailSaveDraftInput, actor: MailActorInfo) {
+    const thread = yield* store.getThread(input.threadId);
+    if (thread === null) return yield* notFound("email");
+    const now = yield* nowIso;
+    const existing = input.draftId ? yield* store.getDraft(input.draftId) : null;
+    if (input.draftId && (existing === null || existing.threadId !== thread.id))
+      return yield* notFound("draft");
+    if (existing !== null && (existing.status === "sending" || existing.status === "sent")) {
+      return yield* invalid("That draft was already sent.");
+    }
+    if (existing && actor.actor !== "user" && input.expectedRevision === undefined) {
+      return yield* invalid("Read the draft and pass its current expectedRevision to edit it.");
+    }
+    if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision) {
+      return yield* invalid("The draft changed. Review the current version before editing.");
+    }
+    const id = existing?.id ?? MailDraftId.make(`draft-${yield* uuid}`);
+    const targetMessageId =
+      input.targetMessageId !== undefined
+        ? input.targetMessageId
+        : (existing?.targetMessageId ?? null);
+    if (
+      targetMessageId !== null &&
+      !(yield* store.threadMessages(thread.id)).some(
+        (message) => String(message.id) === targetMessageId && !message.removed,
+      )
+    ) {
+      return yield* notFound("message");
+    }
+    const saved = yield* store.saveDraftContent({
+      id,
+      threadId: thread.id,
+      accountId: thread.accountId,
+      to: input.to,
+      cc: input.cc,
+      subject: input.subject,
+      body: input.body,
+      mode: input.mode ?? existing?.mode ?? "reply",
+      targetMessageId,
+      origin: existing?.origin ?? actor.actor,
+      status: "draft",
+      error: null,
+      updatedAt: now,
+      sentAt: null,
+      // What an agent wrote first, so the user's edits can teach later drafts.
+      originalBody: existing?.originalBody ?? (actor.actor === "user" ? null : input.body),
+      messageId: null,
+      revision: 0,
+    });
+    if (saved === null) return yield* invalid("That draft was already sent.");
+    const before =
+      existing === null
+        ? null
+        : {
+            ...(existing.status !== saved.status ? { status: existing.status } : {}),
+            ...(existing.messageId !== saved.messageId ? { messageId: existing.messageId } : {}),
+            ...(existing.error !== saved.error ? { error: existing.error } : {}),
+            ...(existing.subject !== saved.subject ? { subject: existing.subject } : {}),
+            ...(existing.body !== saved.body ? { body: existing.body } : {}),
+            ...(toJson(existing.to) !== toJson(saved.to) ? { to: existing.to } : {}),
+            ...(toJson(existing.cc) !== toJson(saved.cc) ? { cc: existing.cc } : {}),
+            ...(existing.mode !== saved.mode ? { mode: existing.mode } : {}),
+            ...(existing.targetMessageId !== saved.targetMessageId
+              ? { targetMessageId: existing.targetMessageId }
+              : {}),
+          };
+    // A new email stays in Drafts while an agent helps write it.
+    const handBack =
+      actor.actor !== "user" &&
+      thread.state === "working" &&
+      thread.workingReason === "drafting" &&
+      thread.messageCount > 0;
+    if (thread.messageCount === 0) yield* setComposedHeader(thread.id, saved, now);
+    yield* recordThreadAction(
+      thread,
+      handBack ? { ...activePatch(now), stateAt: thread.stateAt } : {},
+      {
+        at: now,
+        actor: actor.actor,
+        actorLabel: actor.label ?? null,
+        kind: "draft",
+        reason: existing ? "edit" : null,
+      },
+      { draft: { id, revision: saved.revision, before } },
+    );
+    return MailStore.draftView(saved);
+  });
+
+  const saveDraft: MailService["Service"]["saveDraft"] = Effect.fn("MailService.saveDraft")(
+    (input, actor) => writeDraft(input, actor),
     store.transaction,
     Effect.tap((draft) => engine.publishThreads([draft.threadId])),
     sqlSafe,
@@ -1686,20 +1877,19 @@ const make = Effect.gen(function* () {
       if (expectedRevision !== undefined && expectedRevision !== draft.revision) {
         return yield* invalid("The draft changed. Review the current version before discarding.");
       }
-      yield* store.deleteDraft(draftId);
-      yield* store.insertAction({
-        at: yield* nowIso,
-        actor: "user",
-        actorLabel: null,
-        kind: "draft",
-        reason: "discard",
-        threadId: draft.threadId,
-        undo: { discardedDraft: draft },
-      });
-      return draft.threadId;
+      const thread = yield* store.getThread(draft.threadId);
+      const { actionId, removed } = yield* discardOne(draft, thread, yield* nowIso);
+      return { threadId: draft.threadId, removed, actionId };
     },
     store.transaction,
-    Effect.flatMap((id) => (id === null ? Effect.void : engine.publishThreads([id]))),
+    Effect.tap((result) =>
+      result === null
+        ? Effect.void
+        : result.removed.length > 0
+          ? engine.publishRemoved(result.removed)
+          : engine.publishThreads([result.threadId]),
+    ),
+    Effect.map((result) => ({ actionId: result?.actionId ?? null })),
     sqlSafe,
   );
 
@@ -2544,12 +2734,15 @@ const make = Effect.gen(function* () {
     getMessageBody: Effect.fn("MailService.getMessageBody")(sync.getMessageBody, sqlSafe),
     getThread,
     listSettled,
+    listSent,
+    listTrash,
     listThreads,
     search,
     act,
     undo,
     propose,
     listActions,
+    compose,
     saveDraft,
     discardDraft,
     sendDraft,

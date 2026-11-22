@@ -132,3 +132,32 @@ ${input.related ? `Other recent mail from this sender:\n${fence(input.related)}\
 ${fence(input.transcript)}
 </thread>`;
 }
+
+/** A new email has no thread yet; the agent helps the user write the draft they are editing. */
+export function buildComposePrompt(input: {
+  readonly mailThreadId: string;
+  readonly draft: {
+    readonly draftId: string;
+    readonly revision: number;
+    readonly to: ReadonlyArray<string>;
+    readonly cc: ReadonlyArray<string>;
+    readonly subject: string;
+    readonly body: string;
+  } | null;
+  readonly emailMd: string;
+}): string {
+  return `Mail session context (from T3 Code Mail):
+- The user is writing a new email. Mail thread id: ${input.mailThreadId}
+- Help them write it. To change the email, use \`t3_mail_draft\` with this mail thread id and pass \`to\`, \`subject\` and the whole \`body\`. Pass the draft's \`draftId\` and current \`expectedRevision\` (read them with \`t3_mail_read\` first, since the user may have edited it). Only the user can send it.
+${input.emailMd ? `\nThe user's EMAIL.md notes (also in EMAIL.md in this folder):\n${input.emailMd}\n` : ""}
+${
+  input.draft
+    ? `<draft id="${input.draft.draftId}" revision="${input.draft.revision}">
+To: ${fence(input.draft.to.join(", "))}
+${input.draft.cc.length > 0 ? `Cc: ${fence(input.draft.cc.join(", "))}\n` : ""}Subject: ${fence(input.draft.subject)}
+
+${fence(input.draft.body)}
+</draft>`
+    : "The draft is empty."
+}`;
+}

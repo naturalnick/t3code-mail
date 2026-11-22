@@ -177,3 +177,9 @@ export function domainOf(address: string): string {
 export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4);
 }
+
+/** "Sam <sam@example.org>" or a bare address, as a recipient is typed. */
+export function parseMailbox(raw: string): { readonly name: string; readonly address: string } {
+  const match = /^\s*"?([^"<]*?)"?\s*<([^<>\s]+)>\s*$/.exec(raw);
+  return match ? { name: match[1]!.trim(), address: match[2]! } : { name: "", address: raw.trim() };
+}

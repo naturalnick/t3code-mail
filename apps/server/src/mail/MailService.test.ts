@@ -1249,6 +1249,129 @@ describe("MailService model usage and replies", () => {
     ),
   );
 
+  it.effect(
+    "writes a new email: drafts it, discards and restores it, sends it and keeps replies with it",
+    () =>
+      withMail(
+        Effect.gen(function* () {
+          const mail = yield* MailService.MailService;
+          const engine = yield* MailEngine.MailEngine;
+          yield* addSendingAccount;
+          const first = {
+            id: "0a1b2c3d-0000-4000-8000-000000000001",
+            accountId,
+            to: ["Sam <sam@example.org>"],
+            cc: [],
+            subject: "Lunch?",
+            body: "Free?",
+          };
+          yield* mail.compose(first, { actor: "user" });
+          // A retry after a lost reply saves into the same email instead of starting another.
+          const draft = yield* mail.compose({ ...first, body: "Free Friday?" }, { actor: "user" });
+          const threadId = draft.threadId;
+          expect(draft.body).toBe("Free Friday?");
+          expect((yield* mail.getThread(threadId)).drafts).toHaveLength(1);
+          expect(yield* rowOf(threadId)).toMatchObject({
+            state: "working",
+            messageCount: 0,
+            subject: "Lunch?",
+            from: { name: "Sam", address: "sam@example.org" },
+            hasDraft: true,
+          });
+
+          // Undoing the only draft of a new email removes the email.
+          const other = yield* mail.compose(
+            { accountId, to: [], cc: [], subject: "Note", body: "x" },
+            { actor: "user" },
+          );
+          const created = (yield* mail.listActions({})).actions.find(
+            (action) => action.threadId === other.threadId,
+          )!;
+          yield* mail.undo(created.id);
+          expect(yield* Effect.flip(mail.getThread(other.threadId))).toMatchObject({
+            code: "not_found",
+          });
+
+          // An agent helping with the email edits it without moving it to Active.
+          const edited = yield* mail.saveDraft(
+            {
+              threadId,
+              draftId: draft.id,
+              expectedRevision: draft.revision,
+              to: ["alex@example.org"],
+              cc: [],
+              subject: "Lunch on Friday?",
+              body: "Are you free for lunch on Friday?",
+            },
+            { actor: "agent" },
+          );
+          expect(yield* rowOf(threadId)).toMatchObject({
+            state: "working",
+            subject: "Lunch on Friday?",
+            from: { address: "alex@example.org" },
+          });
+
+          const deleted = yield* mail.act(
+            { threadIds: [threadId], action: { type: "delete" } },
+            { actor: "user" },
+          );
+          expect(yield* Effect.flip(mail.getThread(threadId))).toMatchObject({ code: "not_found" });
+          yield* mail.undo(deleted.actionIds[0]!);
+          expect((yield* mail.getThread(threadId)).drafts).toMatchObject([
+            { id: draft.id, subject: "Lunch on Friday?" },
+          ]);
+
+          const sent: Array<Parameters<typeof Smtp.sendRaw>[1]> = [];
+          using _send = vi.spyOn(Smtp, "sendRaw").mockImplementation(async (_config, message) => {
+            sent.push(message);
+            return { accepted: [...message.to, ...message.cc], rejected: [] };
+          });
+          const restored = (yield* mail.getThread(threadId)).drafts[0]!;
+          yield* mail.sendDraft({ draftId: restored.id, revision: restored.revision });
+          expect(sent[0]).toMatchObject({ subject: "Lunch on Friday?", inReplyTo: null });
+          expect(edited.revision).toBeLessThan(restored.revision);
+          // It asks a question, so it waits for the answer.
+          expect(yield* rowOf(threadId)).toMatchObject({
+            state: "working",
+            workingReason: "waiting",
+            messageCount: 1,
+            from: { address: "alex@example.org" },
+          });
+          expect((yield* mail.listSent({})).threads.map((thread) => thread.id)).toEqual([threadId]);
+
+          // Gmail files the sent copy and the reply under its own thread id; both stay here.
+          const reply = message({ subject: "Re: Lunch on Friday?", from: "alex@example.org", at });
+          const gmail = {
+            accountId,
+            accountEmail: me,
+            gmail: true,
+            mailbox: "[Gmail]/All Mail",
+            role: "primary" as const,
+            initial: false,
+            backfill: false,
+          };
+          const result = yield* engine.ingest(gmail, [
+            {
+              ...message({ subject: "Lunch on Friday?", from: me, at }),
+              messageId: sent[0]!.messageId,
+              gmailThreadId: "1801",
+              labels: ["\\Sent"],
+            },
+            {
+              ...reply,
+              date: "2026-11-02T10:00:00.000Z",
+              gmailThreadId: "1801",
+              labels: ["\\Inbox"],
+              inReplyTo: sent[0]!.messageId,
+              references: [sent[0]!.messageId],
+            },
+          ]);
+          expect(result.threads).toEqual([threadId]);
+          expect(yield* rowOf(threadId)).toMatchObject({ state: "active", messageCount: 2 });
+        }),
+      ),
+  );
+
   it.effect("requires fresh approval for only the rejected recipients of a partial delivery", () =>
     withMail(
       Effect.gen(function* () {
@@ -1848,7 +1971,11 @@ it.effect("delete moves the thread to Trash and undo restores it by Message-ID",
         { actor: "user" },
       );
       expect(yield* store.getThread(threadId)).toBeNull();
+      expect((yield* mail.listTrash({})).actions).toMatchObject([
+        { id: deleted.actionIds[0], subject: "Delete me", from: "Acme Builds", undoable: true },
+      ]);
       yield* mail.undo(deleted.actionIds[0]!);
+      expect((yield* mail.listTrash({})).actions).toEqual([]);
       const ops = (yield* store.pendingOps(accountId)).filter(
         (op) => op.kind === "trash" || op.kind === "untrash",
       );

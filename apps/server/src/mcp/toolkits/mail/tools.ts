@@ -77,6 +77,8 @@ const MailReadTool = Tool.make("t3_mail_read", {
         mode: MailDraftMode,
         targetMessageId: Schema.NullOr(Schema.String),
         to: Schema.Array(Schema.String),
+        cc: Schema.Array(Schema.String),
+        subject: Schema.String,
         body: Schema.String,
         status: Schema.String,
       }),
