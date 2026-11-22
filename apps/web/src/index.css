@@ -1866,6 +1866,60 @@ code {
   background: var(--app-scrollbar-thumb-hover);
 }
 
+/* Mail layout tables become reading groups. Keep value/caption pairs tighter than separate rows. */
+.mail-reader :where(div, p, dl) + :where(div, p, dl) {
+  margin-block-start: 0.65rem;
+}
+
+.mail-reader .mail-reader-callout {
+  border-inline-start: 2px solid var(--info-foreground);
+  padding-inline-start: 0.9rem;
+  margin-block: 1rem;
+}
+
+.mail-reader .mail-reader-callout > :first-child,
+.mail-reader .mail-reader-detail > :first-child {
+  margin-block-start: 0;
+}
+
+.mail-reader :is(.mail-reader-caption, .mail-reader-account, dt) {
+  color: var(--contrast-muted-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  margin-block: 0.1rem 0;
+}
+
+.mail-reader .mail-reader-masthead,
+.mail-reader .mail-reader-masthead p {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-block: 0;
+}
+
+.mail-reader .mail-reader-action {
+  display: inline-block;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.mail-reader .mail-reader-footer {
+  color: var(--contrast-muted-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin-block: 0.2rem;
+}
+
+.mail-reader .mail-reader-footer-start {
+  border-block-start: 1px solid var(--border);
+  margin-block-start: 1rem;
+  padding-block-start: 0.65rem;
+}
+
+.mail-reader [data-line] > div {
+  margin-block: 0;
+}
+
 /* Chat markdown rendering */
 
 .chat-markdown > :first-child {

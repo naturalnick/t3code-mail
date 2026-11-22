@@ -132,6 +132,41 @@ describe("readerView", () => {
     ]);
   });
 
+  it("keeps a notice, its details and its action distinct from subscription copy", () => {
+    const { view } = read(`
+      <div style="font-size:20px;text-align:center"><p>Account activity</p></div>
+      <div>alex@example.org</div>
+      <table style="background-color:#def;border-radius:12px"><tr><td>
+        <p>You’re receiving this email because you signed in on <span style="font-weight:700">Friday</span>.</p>
+        <p>No action is needed.</p>
+      </td></tr></table>
+      <table><tr><td style="font-size:16px">Alex</td></tr>
+        <tr><td style="font-size:12px">Profile name</td></tr></table>
+      <footer><p>To revoke access, <a href="https://example.org/account" style="display:inline-block;background-color:blue">manage access</a>.</p>
+        <p style="font-size:10px">You're receiving this email because you used a new device.</p>
+        <p>Manage your <a href="https://example.org/prefs">email preferences</a>.</p>
+        <p>© 2026 Example</p></footer>`);
+    expect(view.querySelector(".mail-reader-account")?.textContent).toBe("alex@example.org");
+    expect(view.querySelector(".mail-reader-callout strong")?.textContent).toBe("Friday");
+    expect(view.querySelector(".mail-reader-detail .mail-reader-caption")?.textContent).toBe(
+      "Profile name",
+    );
+    expect(view.querySelector(".mail-reader-action")?.getAttribute("href")).toBe(
+      "https://example.org/account",
+    );
+    expect(
+      [...view.querySelectorAll(".mail-reader-footer")].map((part) => part.textContent),
+    ).toEqual(["Manage your email preferences.", "© 2026 Example"]);
+  });
+
+  it("leaves standalone notices and ordinary table rows at normal emphasis", () => {
+    const { view } =
+      read(`<table><tr><td>Delivery delayed</td></tr><tr><td>Arrives Friday</td></tr></table>
+      <div style="font-size:11px">You can unsubscribe after payment. <a href="https://example.org/pay">Pay invoice</a></div>`);
+    expect(view.querySelector(".mail-reader-caption,.mail-reader-footer")).toBeNull();
+    expect(read("<p>© 2026 Example</p>").view.querySelector(".mail-reader-footer")).toBeNull();
+  });
+
   it("keeps quoted history marked so it folds", () => {
     const { view } = read(`<p>Sounds good.</p><div data-t3-quote><p>Earlier message</p></div>`);
     expect(view.querySelector("[data-t3-quote]")?.textContent).toBe("Earlier message");

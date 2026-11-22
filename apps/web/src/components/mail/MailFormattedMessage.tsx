@@ -196,7 +196,7 @@ export function MailFormattedMessage({
       {original === null ? (
         <div
           className={cn(
-            "chat-markdown text-sm leading-relaxed wrap-anywhere",
+            "mail-reader chat-markdown text-sm leading-relaxed wrap-anywhere",
             !showQuoted && "[&_[data-t3-quote]]:hidden",
           )}
           // Built only from the reader's own elements and checked link destinations.

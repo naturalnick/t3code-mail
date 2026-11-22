@@ -24,6 +24,9 @@ const INLINE: Record<string, string> = {
 const BLOCK: Record<string, string> = {
   p: "p",
   blockquote: "blockquote",
+  dl: "dl",
+  dt: "dt",
+  dd: "dd",
   pre: "pre",
   ul: "ul",
   ol: "ol",
@@ -40,7 +43,7 @@ const BLOCK_TAGS = new Set(
     " ",
   ),
 );
-const OUTPUT_BLOCKS = "div,p,h2,h3,ul,ol,li,blockquote,pre,table";
+const OUTPUT_BLOCKS = "div,p,h2,h3,ul,ol,li,dl,dt,dd,blockquote,pre,table";
 
 const LINE_CLASS = "flex flex-wrap items-baseline justify-between gap-x-4";
 /** Text a two-column row can carry and still read as one line, like an item and its price. */
@@ -147,6 +150,26 @@ function linkLabel(source: Element, href: string) {
   }
 }
 
+const fontPixels = (element: Element) => {
+  const size = (element as HTMLElement).style.fontSize;
+  return size.endsWith("px") ? Number.parseFloat(size) : 0;
+};
+
+function isCaptionPair(rows: ReadonlyArray<{ row: Element }>) {
+  if (rows.length !== 2) return false;
+  const [value, caption] = rows.map(({ row }) =>
+    row.children.length === 1 ? row.firstElementChild : null,
+  );
+  if (!value || !caption || caption.querySelector("table,a") || value.querySelector("table"))
+    return false;
+  return (
+    text(value).length <= LINE_CHARS &&
+    text(caption).length <= LINE_CHARS &&
+    ((fontPixels(caption) > 0 && fontPixels(caption) < fontPixels(value)) ||
+      caption.firstElementChild?.tagName === "SMALL")
+  );
+}
+
 class Builder {
   images = 0;
   constructor(private readonly doc: Document) {}
@@ -196,7 +219,11 @@ class Builder {
     }
     if (tag === "a") return this.link(element, out, context);
     if (tag === "table") return this.table(element, out, context);
-    const inline = INLINE[tag];
+    const inline =
+      INLINE[tag] ??
+      (tag === "span" && /^(bold|[7-9]00)$/.test((element as HTMLElement).style.fontWeight)
+        ? "strong"
+        : undefined);
     if (inline) {
       const target = this.doc.createElement(inline);
       this.children(element, target, context);
@@ -206,6 +233,15 @@ class Builder {
     const block = BLOCK[tag];
     if (block || BLOCK_TAGS.has(tag)) {
       const target = this.doc.createElement(block ?? "div");
+      const size = fontPixels(element);
+      if (
+        tag === "footer" ||
+        element.getAttribute("role") === "contentinfo" ||
+        (size > 0 && size <= 12)
+      )
+        target.setAttribute("data-reader-small", "");
+      if (tag === "header" || (size >= 18 && (element as HTMLElement).style.textAlign === "center"))
+        target.setAttribute("data-reader-heading", "");
       this.children(element, target, context);
       this.keep(target, out);
       return;
@@ -222,6 +258,13 @@ class Builder {
     link.setAttribute("href", href);
     link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noopener noreferrer");
+    const style = (element as HTMLElement).style;
+    if (
+      style.display === "inline-block" &&
+      style.backgroundColor &&
+      style.backgroundColor !== "transparent"
+    )
+      link.className = "mail-reader-action";
     this.children(element, link, context);
     // Block content inside a link is flattened: a link is read as one phrase.
     if (link.querySelector(OUTPUT_BLOCKS)) link.textContent = flatText(link);
@@ -245,11 +288,19 @@ class Builder {
       )
     )
       return this.dataTable(rows, caption, out, context);
-    if (caption) this.node(caption, out, context);
+    const paired = isCaptionPair(rows);
+    const style = (element as HTMLElement).style;
+    const callout = Boolean(
+      style.backgroundColor &&
+      style.backgroundColor !== "transparent" &&
+      Number.parseFloat(style.borderRadius) > 0,
+    );
+    const group = paired || callout ? this.doc.createElement("div") : out;
+    if (caption) this.node(caption, group, context);
     for (const { row, context: rowContext } of rows) {
       // A quoted row folds with the rest of the history.
       const quoted = row.hasAttribute("data-t3-quote") && !rowContext.quoted;
-      const target = quoted ? this.doc.createElement("div") : out;
+      const target = quoted ? this.doc.createElement("div") : group;
       if (quoted) target.setAttribute("data-t3-quote", "");
       const cellContext = quoted ? { ...rowContext, quoted: true } : rowContext;
       const cells = cellsOf(row).flatMap((cell) => {
@@ -285,7 +336,24 @@ class Builder {
       } else {
         for (const cell of cells) target.append(cell);
       }
-      if (quoted) this.keep(target, out);
+      if (quoted) this.keep(target, group);
+    }
+    if (group !== out) {
+      if (paired && group.children.length === 2) {
+        group.className = "mail-reader-detail";
+        group.lastElementChild!.classList.add("mail-reader-caption");
+      } else if (callout) {
+        let panel = group as Element;
+        for (let only = onlyBlock(panel); only; only = onlyBlock(panel)) panel = only;
+        if (
+          panel.tagName === "P" ||
+          (panel.children.length >= 2 &&
+            panel.children.length <= 3 &&
+            [...panel.childNodes].every((node) => (node as Element).tagName === "P" || !text(node)))
+        )
+          group.className = "mail-reader-callout";
+      }
+      this.keep(group, out);
     }
   }
 
@@ -348,11 +416,20 @@ function isGrid(rows: ReadonlyArray<Element>, table: Element) {
   );
 }
 
+function onlyBlock(element: Element) {
+  const child = element.firstElementChild;
+  return element.childElementCount === 1 &&
+    child?.matches(OUTPUT_BLOCKS) &&
+    [...element.childNodes].every((node) => node === child || !text(node))
+    ? child
+    : null;
+}
+
 /** Collapses wrapper divs that hold a single block, which layout emails nest many levels deep. */
 function unwrap(root: Element) {
   for (const div of [...root.querySelectorAll("div:not([class]):not([data-t3-quote])")].reverse()) {
-    const only = div.childNodes.length === 1 ? div.firstElementChild : null;
-    if (only?.matches(OUTPUT_BLOCKS)) div.replaceWith(only);
+    const only = onlyBlock(div);
+    if (only) div.replaceWith(only);
   }
   // Runs of line breaks are spacing in the original layout.
   for (const br of root.querySelectorAll("br")) {
@@ -360,6 +437,83 @@ function unwrap(root: Element) {
     while (before?.nodeType === Node.TEXT_NODE && !before.textContent?.trim())
       before = before.previousSibling;
     if (before === null || (before as Element).tagName === "BR") br.remove();
+  }
+}
+
+function footerPart(block: Element, besideFooter: boolean) {
+  const words = text(block);
+  const links = [...block.querySelectorAll("a")];
+  const preferenceLink =
+    /^(?:unsubscribe\b|(?:manage|update|change|edit)?\s*(?:your )?(?:email|subscription) preferences\b)/i;
+  if (links.some((link) => !preferenceLink.test(text(link)))) return null;
+  if (/^(?:©|copyright\s+©?)\s*(?:\d{4}|[a-z])/iu.test(words)) return block;
+  if (links.length && (block.closest("[data-reader-small]") || preferenceLink.test(words)))
+    return block;
+  if (!besideFooter) return null;
+  const pair = block.closest(".mail-reader-detail");
+  if (
+    pair &&
+    !pair.querySelector("a") &&
+    /^(?:powered by|safer with|sent (?:with|via))\s/i.test(text(pair))
+  )
+    return pair;
+  if (
+    block.closest("[data-reader-small]") &&
+    /\bunsubscribe\b|\bbecause you (?:subscribed|signed up|opted in)\b|\bto let you know about (?:important )?(?:updates|changes) to\b/i.test(
+      words,
+    )
+  )
+    return block;
+  return null;
+}
+
+/** Only the opening title/account pair and the trailing administrative copy get quieter. */
+function formatEdges(root: Element) {
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let heading: Element | null = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!text(node)) continue;
+    if (!heading) {
+      heading = node.parentElement?.closest("[data-reader-heading]") ?? null;
+      if (!heading || text(heading).length > LINE_CHARS) break;
+    } else if (!heading.contains(node)) {
+      const account = node.parentElement?.closest("div,p");
+      if (account && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text(account))) {
+        heading.classList.add("mail-reader-masthead");
+        account.classList.add("mail-reader-account");
+      }
+      break;
+    }
+  }
+
+  const footer: Element[] = [];
+  let last: Node = root;
+  while (last.lastChild) last = last.lastChild;
+  walker.currentNode = last;
+  let node: Node | null = last;
+  for (; node; node = walker.previousNode()) {
+    if (node.nodeType !== Node.TEXT_NODE || !text(node)) continue;
+    const block = node.parentElement?.closest("div,p");
+    if (
+      !block ||
+      block === root ||
+      block.querySelector(OUTPUT_BLOCKS) ||
+      block.closest("[data-t3-quote],table,blockquote")
+    )
+      break;
+    const part = footerPart(block, footer.length > 0);
+    if (!part) break;
+    footer.push(part);
+    walker.currentNode = part;
+  }
+  // A whole message in small print still needs a normal-contrast body.
+  if (node && footer.length) {
+    for (const block of footer) block.classList.add("mail-reader-footer");
+    footer.at(-1)!.classList.add("mail-reader-footer-start");
+  }
+  for (const el of root.querySelectorAll("[data-reader-small],[data-reader-heading]")) {
+    el.removeAttribute("data-reader-small");
+    el.removeAttribute("data-reader-heading");
   }
 }
 
@@ -372,6 +526,7 @@ export function readerView(content: Element): ReaderView {
   const root = doc.createElement("div");
   const builder = new Builder(doc);
   builder.children(content, root, { invisible: false, tiny: false, quoted: false });
+  formatEdges(root);
   unwrap(root);
   // Folded history is not what this message says, so it doesn't count toward its text.
   const current = root.cloneNode(true) as Element;
