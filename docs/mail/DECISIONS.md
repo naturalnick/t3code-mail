@@ -10,6 +10,8 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - Gmail syncs `[Gmail]/All Mail` only and reads `\Inbox`/`\Sent` from X-GM-LABELS, so one connection and one IDLE cover incoming and sent mail. Other providers sync INBOX (IDLE) plus the Sent folder (polled).
 - A Gmail message that loses `\Inbox` outside T3 (archived on the phone, or a filter skipped the inbox) settles its thread with reason "archived". We follow the user's Gmail, never fight it.
 - Server mirroring (archive on settle) defaults to off so a first run cannot rearrange a real mailbox; it is one switch in Mail settings.
+- Delete always moves the thread to the server Trash, because the user asked for it directly; mirroring governs only settle. The thread leaves the local store at once, and undo finds the messages in Trash by Message-ID (their UIDs change there) and moves them back to the inbox, where sync ingests them again.
+- The reader shows only the formatted or full message. The cleaned text still feeds triage and chat context, but it was not readable enough to offer as a view.
 - App passwords go in the OS keychain through `@napi-rs/keyring` (already a server dependency). If no keychain is available (headless Linux), they fall back to T3's 0700 secrets directory and the account shows that.
 - L1 runs through a new `generateMailTriage` text-generation operation so every provider adapter makes an explicit decision; fx, Kiro and ACP-registry report it unsupported like other text operations.
 - L1 batches up to 12 threads per call, debounced 2 s after a sync burst; the newest message of each thread is cleaned and cut to 1,200 characters; older messages contribute only their sender and first line.

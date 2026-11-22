@@ -1442,8 +1442,15 @@ it.effect("undo mirrors only messages that settle found in the inbox", () =>
         },
         ensureMailbox: () => Promise.resolve(),
         append: () => Promise.resolve(),
+        searchMessageIds: () => Promise.resolve([]),
       };
-      const roles = { primary: "INBOX", sent: null, archive: "Archive", gmail: true };
+      const roles = {
+        primary: "INBOX",
+        sent: null,
+        archive: "Archive",
+        trash: "Trash",
+        gmail: true,
+      };
       const replay = (gmail: boolean) =>
         Effect.forEach(ops, (op) => replayOp(accountId, op.payload, { ...roles, gmail }, session));
       yield* replay(true);
@@ -1478,6 +1485,86 @@ it.effect("undo mirrors only messages that settle found in the inbox", () =>
       yield* replay(true);
       yield* replayOp(accountId, `{"kind":"archive","threadId":"${threadId}"}`, roles, session);
       expect(calls).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("delete moves the thread to Trash and undo restores it by Message-ID", () =>
+  withMail(
+    Effect.gen(function* () {
+      const store = yield* MailStore.MailStore;
+      const mail = yield* MailService.MailService;
+      yield* store.putMailbox({
+        accountId,
+        path: "INBOX",
+        role: "primary",
+        uidValidity: "101",
+        maxUid: 4,
+        minUid: 1,
+        highestModseq: null,
+        backfillDone: true,
+      });
+      const threadId = yield* deliver({ subject: "Delete me", body: "Hello", at });
+      const original = (yield* store.threadMessages(threadId))[0]!;
+      const read = yield* mail.act(
+        { threadIds: [threadId], action: { type: "mark_read" } },
+        { actor: "user" },
+      );
+      const marked = yield* mail.act(
+        { threadIds: [threadId], action: { type: "mark_unread" } },
+        { actor: "user" },
+      );
+      expect(marked.actionIds).toHaveLength(1);
+      expect((yield* store.getThread(threadId))?.unread).toBe(true);
+      yield* mail.undo(marked.actionIds[0]!);
+      expect((yield* store.getThread(threadId))?.unread).toBe(false);
+      expect(read.actionIds).toHaveLength(1);
+
+      const deleted = yield* mail.act(
+        { threadIds: [threadId], action: { type: "delete" } },
+        { actor: "user" },
+      );
+      expect(yield* store.getThread(threadId)).toBeNull();
+      yield* mail.undo(deleted.actionIds[0]!);
+      const ops = (yield* store.pendingOps(accountId)).filter(
+        (op) => op.kind === "trash" || op.kind === "untrash",
+      );
+      expect(ops.map((op) => op.kind)).toEqual(["trash", "untrash"]);
+
+      const calls: Array<readonly [string, ReadonlyArray<number> | ReadonlyArray<string>]> = [];
+      const session: Parameters<typeof replayOp>[3] = {
+        withMailbox: (path, _known, work) =>
+          work({
+            uidValidity: path === "INBOX" ? "101" : "202",
+            exists: 1,
+            uidNext: 90,
+            highestModseq: null,
+          }),
+        setSeen: () => Promise.resolve(),
+        setInboxLabel: () => Promise.resolve(),
+        move: async (uids, to) => {
+          calls.push([to, uids]);
+          return null;
+        },
+        ensureMailbox: () => Promise.resolve(),
+        append: () => Promise.resolve(),
+        searchMessageIds: async (messageIds) => {
+          calls.push(["search", messageIds]);
+          return [77];
+        },
+      };
+      for (const gmail of [false, true]) {
+        const roles = { primary: "INBOX", sent: null, archive: null, trash: "Trash", gmail };
+        yield* Effect.forEach(ops, (op) => replayOp(accountId, op.payload, roles, session));
+      }
+      expect(calls).toEqual([
+        ["Trash", [original.uid]],
+        ["search", [original.messageId]],
+        ["INBOX", [77]],
+        ["Trash", [original.uid]],
+        ["search", [original.messageId]],
+        ["INBOX", [77]],
+      ]);
     }),
   ),
 );

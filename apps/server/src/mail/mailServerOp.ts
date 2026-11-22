@@ -20,6 +20,14 @@ const ServerOp = Schema.Union([
     targets,
   }),
   Schema.Struct({ kind: Schema.Literal("append_sent"), raw: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("trash"),
+    locations: Schema.Array(
+      Schema.Struct({ mailbox: Schema.String, uid: Schema.Int, uidValidity: Schema.String }),
+    ),
+  }),
+  /** Messages in Trash get new UIDs, so restore finds them by Message-ID. */
+  Schema.Struct({ kind: Schema.Literal("untrash"), messageIds: Schema.Array(Schema.String) }),
 ]);
 type ServerOp = typeof ServerOp.Type;
 export type EnqueueOp =
@@ -51,13 +59,24 @@ export const enqueueOp = Effect.fn("MailSync.enqueueOp")(function* (
   } else {
     op = input;
   }
-  if (op.kind === "append_sent" || op.targets.length > 0)
-    yield* store.enqueueOp(accountId, op.kind, op, now);
+  const empty =
+    op.kind === "trash"
+      ? op.locations.length === 0
+      : op.kind === "untrash"
+        ? op.messageIds.length === 0
+        : op.kind !== "append_sent" && op.targets.length === 0;
+  if (!empty) yield* store.enqueueOp(accountId, op.kind, op, now);
 });
 
 type MirrorSession = Pick<
   ImapSession,
-  "withMailbox" | "append" | "setSeen" | "setInboxLabel" | "ensureMailbox" | "move"
+  | "withMailbox"
+  | "append"
+  | "setSeen"
+  | "setInboxLabel"
+  | "ensureMailbox"
+  | "move"
+  | "searchMessageIds"
 >;
 
 export const replayOp = Effect.fn("MailSync.runOp")(function* (
@@ -74,6 +93,31 @@ export const replayOp = Effect.fn("MailSync.runOp")(function* (
   if (op.kind === "append_sent") {
     const sent = roles.sent;
     if (sent !== null) yield* request(() => imap.append(sent, Buffer.from(op.raw, "base64")));
+    return;
+  }
+  if (op.kind === "trash" || op.kind === "untrash") {
+    const trash = roles.trash ?? (roles.gmail ? "[Gmail]/Trash" : "Trash");
+    if (op.kind === "untrash") {
+      // Gmail files a message restored to INBOX under All Mail again, where sync finds it.
+      const destination = roles.gmail ? "INBOX" : roles.primary;
+      yield* request(() =>
+        imap.withMailbox(trash, null, async () =>
+          imap.move(await imap.searchMessageIds(op.messageIds), destination),
+        ),
+      );
+      return;
+    }
+    if (roles.trash === null && !roles.gmail) yield* request(() => imap.ensureMailbox(trash));
+    for (const [path, rows] of Map.groupBy(op.locations, (row) => row.mailbox)) {
+      yield* request(() =>
+        imap.withMailbox(path, null, (snapshot) =>
+          imap.move(
+            rows.filter((row) => row.uidValidity === snapshot.uidValidity).map((row) => row.uid),
+            trash,
+          ),
+        ),
+      );
+    }
     return;
   }
   const store = yield* MailStore.MailStore;

@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
   MailAddress,
+  MailDraft,
   MailMessage,
   MailThreadDetail,
   MailThreadId,
@@ -25,7 +26,7 @@ import { mailEnvironment } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
 import { formatDateTimeTimestamp } from "../../timestampFormat";
 import { useMailCommand } from "../settings/MailSettings.commands";
-import { Button, InlineButton } from "../ui/button";
+import { Button } from "../ui/button";
 import { MailChatPanel } from "./MailChatPanel";
 import { MailFormattedMessage, rememberedMessageHeight } from "./MailFormattedMessage";
 import {
@@ -38,7 +39,7 @@ import {
 } from "./mailPresentation";
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
-import { MailDraftDialog, MailThreadDrafts, type DraftTask } from "./MailThreadDrafts";
+import { MailComposer, MailThreadDrafts, type ComposeTask } from "./MailThreadDrafts";
 import { useMailActions } from "./useMailActions";
 
 const DETAILS_PANEL_KEY = "t3code:mail-details-panel";
@@ -63,7 +64,6 @@ function ThreadMessage({
   eager: boolean;
 }) {
   const gt = useGT();
-  const [showCleaned, setShowCleaned] = useState(false);
   const [visible, setVisible] = useState(eager);
   const observe = (node: HTMLElement | null) => {
     if (node === null || visible) return;
@@ -86,28 +86,14 @@ function ThreadMessage({
   const formatted = display.data;
   // Plain text shows only once the formatted body is known to be missing, never as a placeholder.
   const settled = display.isSuccess || display.error !== null;
-  const body = showCleaned ? message.text : message.fullText || message.text;
-  const hasAlternate =
-    message.text !== null &&
-    (formatted !== null || (message.fullText !== null && message.fullText !== message.text));
+  const body = message.fullText || message.text;
   return (
     <article ref={observe} className="min-w-0 py-5 first:pt-0 [content-visibility:auto]">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <span className="min-w-0 text-sm font-semibold wrap-anywhere">{address(message.from)}</span>
-        <span className="flex items-baseline gap-3 text-xs">
-          {hasAlternate && settled ? (
-            <InlineButton
-              tone="muted"
-              aria-pressed={showCleaned}
-              onClick={() => setShowCleaned(!showCleaned)}
-            >
-              {showCleaned ? gt("Show original") : gt("Show cleaned")}
-            </InlineButton>
-          ) : null}
-          <time dateTime={message.date} className="text-xs text-muted-foreground">
-            {formatDateTimeTimestamp(message.date, timestampFormat)}
-          </time>
-        </span>
+        <time dateTime={message.date} className="text-xs text-muted-foreground">
+          {formatDateTimeTimestamp(message.date, timestampFormat)}
+        </time>
       </header>
       <div className="mb-3 text-xs wrap-anywhere text-muted-foreground">
         {message.to.length > 0 && (
@@ -119,7 +105,7 @@ function ThreadMessage({
       </div>
       {!settled ? (
         <div aria-hidden style={{ height: rememberedMessageHeight(message.id) ?? 0 }} />
-      ) : formatted && !showCleaned ? (
+      ) : formatted ? (
         <MailFormattedMessage
           id={message.id}
           body={formatted}
@@ -215,7 +201,7 @@ function MailThreadDetails({
   account,
   timestampFormat,
   refresh,
-  onDraftTask,
+  onOpenDraft,
 }: {
   environmentId: EnvironmentId;
   thread: MailThreadRow;
@@ -223,7 +209,7 @@ function MailThreadDetails({
   account: string | null;
   timestampFormat: TimestampFormat;
   refresh: () => void;
-  onDraftTask: (task: DraftTask) => void;
+  onOpenDraft: (draft: MailDraft) => void;
 }) {
   const gt = useGT();
   const resolve = useMessages();
@@ -316,7 +302,7 @@ function MailThreadDetails({
           <MailThreadDrafts
             environmentId={environmentId}
             drafts={detail.drafts}
-            onTask={onDraftTask}
+            onOpen={onOpenDraft}
           />
         </DetailsSection>
       ) : null}
@@ -377,11 +363,16 @@ export function MailThreadView({
   threadId,
   chatOpen,
   onChatOpenChange,
+  requestedCompose,
+  onComposeHandled,
 }: {
   environmentId: EnvironmentId;
   threadId: MailThreadId;
   chatOpen: boolean;
   onChatOpenChange: (open: boolean) => void;
+  /** Reply or Forward chosen from the sidebar menu before the email opened. */
+  requestedCompose: ComposeTask["mode"] | null;
+  onComposeHandled: () => void;
 }) {
   const gt = useGT();
   const resolve = useMessages();
@@ -394,7 +385,16 @@ export function MailThreadView({
   const wide = useMediaQuery("lg");
   const [widePanel, setWidePanel] = useLocalStorage(DETAILS_PANEL_KEY, true, Schema.Boolean);
   const [narrowPanel, setNarrowPanel] = useState(false);
-  const [draftTask, setDraftTask] = useState<DraftTask | null>(null);
+  const [compose, setCompose] = useState<ComposeTask | null>(null);
+  const [seenRequest, setSeenRequest] = useState<ComposeTask["mode"] | null>(null);
+  if (requestedCompose !== seenRequest) {
+    setSeenRequest(requestedCompose);
+    if (requestedCompose !== null) setCompose({ mode: requestedCompose, draft: null });
+  }
+  const closeCompose = () => {
+    setCompose(null);
+    if (requestedCompose !== null) onComposeHandled();
+  };
   // The row learns its chat id on the next snapshot; the reply to opening one knows it now.
   const [openedChatId, setOpenedChatId] = useState<ThreadId | null>(null);
   const openSession = useMailCommand(
@@ -450,7 +450,9 @@ export function MailThreadView({
       account={account}
       timestampFormat={timestampFormat}
       refresh={query.refresh}
-      onDraftTask={setDraftTask}
+      onOpenDraft={(draft) =>
+        setCompose({ mode: draft.subject.match(/^(fwd?|fw):/i) ? "forward" : "reply", draft })
+      }
     />
   );
   const messages = detail?.messages.toReversed() ?? [];
@@ -462,7 +464,7 @@ export function MailThreadView({
           environmentId={environmentId}
           thread={thread}
           canReply={canSaveDraft && detail !== null}
-          onReply={() => setDraftTask({ kind: "edit", draft: null })}
+          onCompose={(mode) => setCompose({ mode, draft: null })}
           detailsOpen={detailsOpen}
           onToggleDetails={showDetails ? toggleDetails : null}
           chatOpen={showChat}
@@ -477,7 +479,7 @@ export function MailThreadView({
           aria-label={gt("Email")}
           className="scrollbar-gutter-both min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-2xl border border-border/70 bg-card"
         >
-          <div className="mx-auto w-full max-w-3xl px-5 py-5 sm:px-8">
+          <div className="px-4 py-4 sm:px-5">
             <h1 className="mb-5 text-xl font-semibold wrap-anywhere">
               {thread.subject || gt("(No subject)")}
             </h1>
@@ -495,6 +497,18 @@ export function MailThreadView({
                 ))}
               </div>
             )}
+            {compose && detail ? (
+              <MailComposer
+                key={compose.draft?.id ?? compose.mode}
+                environmentId={environmentId}
+                detail={detail}
+                from={from}
+                timestampFormat={timestampFormat}
+                refresh={query.refresh}
+                task={compose}
+                close={closeCompose}
+              />
+            ) : null}
             {query.error && (
               <div
                 role="alert"
@@ -537,17 +551,6 @@ export function MailThreadView({
             {details}
           </aside>
         ) : null}
-        {draftTask && detail && (
-          <MailDraftDialog
-            environmentId={environmentId}
-            detail={detail}
-            from={from}
-            refreshing={query.isPending || !!query.error}
-            refresh={query.refresh}
-            task={draftTask}
-            close={() => setDraftTask(null)}
-          />
-        )}
       </div>
     </MailPage>
   );

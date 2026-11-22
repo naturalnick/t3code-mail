@@ -114,6 +114,7 @@ export interface MailboxRoles {
   /** Sent mail, polled; null for Gmail, where All Mail already holds it. */
   readonly sent: string | null;
   readonly archive: string | null;
+  readonly trash: string | null;
 }
 
 const HEADER_FIELDS = ["references", "list-unsubscribe", "list-id", "precedence", "auto-submitted"];
@@ -247,6 +248,7 @@ function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): Mail
       primary: byUse("\\All") ?? byName(/^\[Gmail\]\/All Mail$/i) ?? "INBOX",
       sent: null,
       archive: null,
+      trash: byUse("\\Trash") ?? byName(/^\[Gmail\]\/(Trash|Bin)$/i),
     };
   }
   return {
@@ -254,6 +256,7 @@ function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): Mail
     primary: mailboxes.find((box) => box.path.toUpperCase() === "INBOX")?.path ?? "INBOX",
     sent: byUse("\\Sent") ?? byName(/^(INBOX[./])?Sent( Items| Messages| Mail)?$/i),
     archive: byUse("\\Archive") ?? byName(/^(INBOX[./])?Archive$/i),
+    trash: byUse("\\Trash") ?? byName(/^(INBOX[./])?(Trash|Deleted( Items| Messages)?)$/i),
   };
 }
 
@@ -528,6 +531,16 @@ export class ImapSession {
     return result && result.uidMap && result.uidValidity !== undefined
       ? { uidMap: result.uidMap, uidValidity: String(result.uidValidity) }
       : null;
+  }
+
+  /** UIDs in the selected mailbox whose Message-ID header is one of `messageIds`. */
+  async searchMessageIds(messageIds: ReadonlyArray<string>): Promise<ReadonlyArray<number>> {
+    const found = new Set<number>();
+    for (const messageId of messageIds) {
+      const uids = await this.client.search({ header: { "message-id": messageId } }, { uid: true });
+      for (const uid of uids || []) found.add(uid);
+    }
+    return [...found];
   }
 
   async ensureMailbox(path: string): Promise<void> {

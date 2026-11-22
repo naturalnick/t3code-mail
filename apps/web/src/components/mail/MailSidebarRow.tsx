@@ -40,8 +40,9 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   readonly isActive: boolean;
   readonly actions: ReturnType<typeof useMailActions>;
   readonly onIntent?: ((thread: MailThreadRow | null) => void) | undefined;
+  readonly onContextMenu?: ((thread: MailThreadRow, event: MouseEvent) => void) | undefined;
 }) {
-  const { environmentId, thread, isActive, actions, onIntent } = props;
+  const { environmentId, thread, isActive, actions, onIntent, onContextMenu } = props;
   const gt = useGT();
   const resolve = useMessages();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -177,6 +178,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
         onPointerEnter={() => onIntent?.(thread)}
         onPointerLeave={() => onIntent?.(null)}
         onFocus={() => onIntent?.(thread)}
+        onContextMenu={onContextMenu ? (event) => onContextMenu(thread, event) : undefined}
         className={cn(
           "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md px-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none",
           isActive

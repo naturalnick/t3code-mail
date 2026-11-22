@@ -90,6 +90,10 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
       return action.reason === "edit" ? resolve(msg("Edit draft")) : resolve(msg("Left a draft"));
     case "mark_read":
       return resolve(msg("Read"));
+    case "mark_unread":
+      return resolve(msg("Marked as unread"));
+    case "delete":
+      return resolve(msg("Moved to Trash"));
     case "wait_for_reply":
       return resolve(msg("Waiting for reply"));
     case "send":
@@ -132,6 +136,11 @@ function isSettleReason(value: string): value is MailSettleReason {
 export function replySubject(subject: string): string {
   // oxlint-disable-next-line t3code/no-untranslated-copy -- Re: is the outgoing email's reply prefix.
   return /^re:/i.test(subject.trim()) ? subject : `Re: ${subject}`;
+}
+
+export function forwardSubject(subject: string): string {
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- Fwd: is the outgoing email's forward prefix.
+  return /^(fwd?|fw):/i.test(subject.trim()) ? subject : `Fwd: ${subject}`;
 }
 
 /** Splits a comma or semicolon separated recipient field. */

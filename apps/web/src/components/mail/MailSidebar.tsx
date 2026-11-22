@@ -38,6 +38,7 @@ import { settleReasonLabel } from "./mailPresentation";
 import { MailSidebarRow } from "./MailSidebarRow";
 import { useMailActions } from "./useMailActions";
 import { useMailIntentPrefetch } from "./useMailIntentPrefetch";
+import { useMailRowMenu } from "./useMailRowMenu";
 
 type SettledFilter = "all" | "ai" | MailSettleReason;
 const SETTLED_FILTER_REASONS: ReadonlyArray<MailSettleReason> = [
@@ -77,6 +78,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   const sections = useMailSections(environmentId);
   const actions = useMailActions(environmentId);
   const prefetch = useMailIntentPrefetch(environmentId);
+  const openRowMenu = useMailRowMenu(environmentId, actions);
   const routeMailThreadId = useParams({
     strict: false,
     select: (params) => ("mailThreadId" in params ? String(params.mailThreadId) : null),
@@ -101,6 +103,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       isActive={isActive(thread)}
       actions={actions}
       onIntent={prefetch}
+      onContextMenu={openRowMenu}
     />
   );
 

@@ -184,6 +184,8 @@ export const MailActionKind = Schema.Literals([
   "trust",
   "returned",
   "mark_read",
+  "mark_unread",
+  "delete",
   "wait_for_reply",
   "nudge",
   "propose",
@@ -435,6 +437,10 @@ export const MailThreadAction = Schema.Union([
   Schema.Struct({ type: Schema.Literal("keep") }),
   Schema.Struct({ type: Schema.Literal("never_show") }),
   Schema.Struct({ type: Schema.Literal("mark_read") }),
+  /** The newest incoming message becomes unread again. */
+  Schema.Struct({ type: Schema.Literal("mark_unread") }),
+  /** Moves every message to the mail server's Trash and removes the email here. */
+  Schema.Struct({ type: Schema.Literal("delete") }),
   Schema.Struct({ type: Schema.Literal("wait_for_reply") }),
 ]);
 export type MailThreadAction = typeof MailThreadAction.Type;

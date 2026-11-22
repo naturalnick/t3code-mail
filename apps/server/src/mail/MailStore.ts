@@ -494,6 +494,12 @@ export interface ActionRecord {
       readonly token: string;
       readonly count: number;
       readonly targets: ReadonlyArray<MessageTarget>;
+      /** Set when the action marked mail unread, so undo reads it again. */
+      readonly unread?: boolean;
+    };
+    readonly trash?: {
+      readonly accountId: MailAccountId;
+      readonly messageIds: ReadonlyArray<string>;
     };
   } | null;
   readonly undoneAt: string | null;
@@ -1283,6 +1289,29 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const undoMessagesRead = (id: MailThreadId, token: string) =>
     sql<{ id: number }>`UPDATE mail_messages SET seen = 0, read_action = NULL
       WHERE thread_id = ${id} AND removed = 0 AND read_action = ${token} AND seen = 1 RETURNING id`;
+  const markNewestUnread = (id: MailThreadId, token: string) =>
+    sql<{ id: number }>`UPDATE mail_messages SET seen = 0, read_action = ${token}
+      WHERE id = (SELECT id FROM mail_messages WHERE thread_id = ${id} AND removed = 0
+        AND outgoing = 0 ORDER BY date DESC, id DESC LIMIT 1) AND seen = 1 RETURNING id`;
+  const undoMessagesUnread = (id: MailThreadId, token: string) =>
+    sql<{ id: number }>`UPDATE mail_messages SET seen = 1, read_action = NULL
+      WHERE thread_id = ${id} AND removed = 0 AND read_action = ${token} AND seen = 0 RETURNING id`;
+
+  /** Where each server copy of the thread lives now, for moving it to Trash. */
+  const serverLocations = (threadId: MailThreadId) =>
+    sql<{ mailbox: string; uid: number; uidValidity: string; messageId: string | null }>`
+      SELECT m.mailbox, m.uid, CAST(COALESCE(m.moved_uid_validity, b.uid_validity) AS TEXT) AS uidValidity,
+        m.message_id AS messageId
+      FROM mail_messages m LEFT JOIN mail_mailboxes b ON b.account_id = m.account_id AND b.path = m.mailbox
+      WHERE m.thread_id = ${threadId} AND m.removed = 0 AND m.mailbox != '__local'
+        AND COALESCE(m.moved_uid_validity, b.uid_validity) IS NOT NULL`;
+
+  /** Removes the thread here at once; messages restored later arrive as new mail. */
+  const removeThread = Effect.fn("MailStore.removeThread")(function* (threadId: MailThreadId) {
+    yield* sql`UPDATE mail_messages SET removed = 1, in_inbox = 0
+      WHERE thread_id = ${threadId} AND removed = 0`;
+    return yield* deleteExpungedThreads([threadId]);
+  });
 
   const setTriage = (
     id: MailThreadId,
@@ -1672,6 +1701,10 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     refreshUnread,
     markMessagesRead,
     undoMessagesRead,
+    markNewestUnread,
+    undoMessagesUnread,
+    serverLocations,
+    removeThread,
     setTriage,
     setChatThread,
     pendingTriage,

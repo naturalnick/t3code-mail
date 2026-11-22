@@ -47,11 +47,12 @@ function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
     link.rel = "noopener noreferrer";
   }
   const policy = `default-src 'none'; img-src data:${loadImages ? " https: http:" : ""}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html{color-scheme:light;background:white;color:#171717;font:15px/1.5 system-ui,sans-serif;overflow-x:hidden}body{display:flow-root;margin:0;padding:8px;overflow-wrap:anywhere}*,*::before,*::after{box-sizing:border-box}table,div,img,td,th,pre{max-width:100%!important}img{object-fit:contain;height:auto}pre{white-space:pre-wrap}@media(max-width:640px){table{table-layout:fixed}td,th{min-width:0!important;white-space:normal!important}}</style></head><body>${content.innerHTML}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html{color-scheme:light;background:white;color:#171717;font:15px/1.5 system-ui,sans-serif;overflow:hidden}html,body{height:auto!important;min-height:0!important}body{display:flow-root;margin:0;padding:8px;overflow-wrap:anywhere}*,*::before,*::after{box-sizing:border-box}table,div,img,td,th,pre{max-width:100%!important}img{object-fit:contain;height:auto}pre{white-space:pre-wrap}@media(max-width:640px){table{table-layout:fixed}td,th{min-width:0!important;white-space:normal!important}}</style></head><body>${content.innerHTML}</body></html>`;
   return { srcDoc, remoteImages };
 }
 
 const MAX_REMEMBERED_HEIGHTS = 200;
+const MAX_FRAME_HEIGHT = 40_000;
 // Each message's last measured height, so reopening an email lays it out once instead of growing.
 const measuredHeights = new Map<string, number>();
 
@@ -107,11 +108,16 @@ export function MailFormattedMessage({
           const frame = event.currentTarget;
           const element = frame.contentDocument?.body;
           if (!element) return;
-          // Viewport-relative email styles can otherwise grow the frame every time it resizes.
           const resize = () => {
+            // Fixed-width layouts shrink to the panel instead of scrolling inside it.
+            element.style.zoom = "";
+            const width = frame.clientWidth;
+            const natural = element.scrollWidth;
+            if (natural > width) element.style.zoom = String(width / natural);
+            // The cap stops viewport-relative email styles from growing the frame forever.
             const height = Math.min(
               Math.ceil(element.getBoundingClientRect().height),
-              window.innerHeight * 3,
+              MAX_FRAME_HEIGHT,
             );
             frame.style.height = height + "px";
             rememberHeight(id, height);

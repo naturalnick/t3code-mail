@@ -6,12 +6,14 @@ import { useMailEnvironmentId } from "../state/mail";
 
 interface MailThreadSearch {
   readonly chat?: true;
+  readonly compose?: "reply" | "forward";
 }
 
 function ThreadPage() {
   const environmentId = useMailEnvironmentId();
   const { mailThreadId } = Route.useParams();
   const chatOpen = Route.useSearch({ select: (search) => search.chat === true });
+  const compose = Route.useSearch({ select: (search) => search.compose ?? null });
   const navigate = Route.useNavigate();
   return environmentId ? (
     <MailThreadView
@@ -22,6 +24,10 @@ function ThreadPage() {
       onChatOpenChange={(open) =>
         void navigate({ search: open ? { chat: true } : {}, replace: true })
       }
+      requestedCompose={compose}
+      onComposeHandled={() =>
+        void navigate({ search: chatOpen ? { chat: true } : {}, replace: true })
+      }
     />
   ) : (
     <MailPage>{null}</MailPage>
@@ -29,7 +35,9 @@ function ThreadPage() {
 }
 
 export const Route = createFileRoute("/_chat/mail/$mailThreadId")({
-  validateSearch: (raw: Record<string, unknown>): MailThreadSearch =>
-    raw.chat === true || raw.chat === "true" ? { chat: true } : {},
+  validateSearch: (raw: Record<string, unknown>): MailThreadSearch => ({
+    ...(raw.chat === true || raw.chat === "true" ? { chat: true as const } : {}),
+    ...(raw.compose === "reply" || raw.compose === "forward" ? { compose: raw.compose } : {}),
+  }),
   component: ThreadPage,
 });

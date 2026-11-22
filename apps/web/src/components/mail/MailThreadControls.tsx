@@ -1,11 +1,13 @@
 import type { EnvironmentId, MailThreadRow } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { useNavigate } from "@tanstack/react-router";
 import { T, useGT, useMessages } from "gt-react";
 import {
   AlarmClockOffIcon,
   CheckIcon,
   ClockIcon,
   EllipsisIcon,
+  ForwardIcon,
   MessageSquareIcon,
   ReplyIcon,
   SquareMenuIcon,
@@ -105,7 +107,7 @@ export function MailThreadToolbar({
   environmentId,
   thread,
   canReply,
-  onReply,
+  onCompose,
   detailsOpen,
   onToggleDetails,
   chatOpen,
@@ -115,7 +117,7 @@ export function MailThreadToolbar({
   environmentId: EnvironmentId;
   thread: MailThreadRow;
   canReply: boolean;
-  onReply: () => void;
+  onCompose: (mode: "reply" | "forward") => void;
   detailsOpen: boolean;
   onToggleDetails: (() => void) | null;
   chatOpen: boolean;
@@ -125,6 +127,7 @@ export function MailThreadToolbar({
   const gt = useGT();
   const resolve = useMessages();
   const { act, disabled } = useMailActions(environmentId);
+  const navigate = useNavigate();
   const markRead = useEffectEvent(() => void act([thread.id], { type: "mark_read" }));
   const readAt = useRef<string | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Opening unread mail acknowledges it on the server.
@@ -149,9 +152,13 @@ export function MailThreadToolbar({
         <MessageSquareIcon />
         <T>Chat</T>
       </Toggle>
-      <Button size="sm" variant="ghost" disabled={!canReply} onClick={onReply}>
+      <Button size="sm" variant="ghost" disabled={!canReply} onClick={() => onCompose("reply")}>
         <ReplyIcon />
         <T>Reply</T>
+      </Button>
+      <Button size="sm" variant="ghost" disabled={!canReply} onClick={() => onCompose("forward")}>
+        <ForwardIcon />
+        <T>Forward</T>
       </Button>
       {thread.state === "snoozed" ? (
         <Button
@@ -247,9 +254,24 @@ export function MailThreadToolbar({
             </MenuItem>
           )}
           <MenuItem
+            onClick={() => void act([thread.id], { type: "mark_unread" }, gt("Marked as unread"))}
+          >
+            {gt("Mark as unread")}
+          </MenuItem>
+          <MenuItem
             onClick={() => void act([thread.id], { type: "never_show" }, gt("Sender muted"))}
           >
             {gt("Never show this sender")}
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem
+            variant="destructive"
+            onClick={async () => {
+              const deleted = await act([thread.id], { type: "delete" }, gt("Moved to Trash"));
+              if (deleted) void navigate({ to: "/mail" });
+            }}
+          >
+            {gt("Delete")}
           </MenuItem>
         </MenuPopup>
       </Menu>

@@ -463,6 +463,7 @@ const make = Effect.gen(function* () {
     let reason: string | null = null;
     let mirrorUndo: MailStore.MirrorUndo | undefined;
     let read: NonNullable<MailStore.ActionRecord["undo"]>["read"];
+    let trash: NonNullable<MailStore.ActionRecord["undo"]>["trash"];
     switch (action.type) {
       case "settle":
       case "approve": {
@@ -579,6 +580,45 @@ const make = Effect.gen(function* () {
         kind = "mark_read";
         break;
       }
+      case "mark_unread": {
+        const token = yield* uuid;
+        const messages = yield* store.markNewestUnread(thread.id, token);
+        if (messages.length === 0) return null;
+        const targets = (yield* store.messageTargets(
+          thread.id,
+          messages.map(({ id }) => id),
+        )).map(({ id, identity }) => ({ id, identity }));
+        yield* store.refreshUnread(thread.id);
+        yield* sync.enqueue(thread.accountId, {
+          kind: "seen",
+          threadId: thread.id,
+          seen: false,
+          targets,
+        });
+        read = { token, count: messages.length, targets, unread: true };
+        patch = {};
+        kind = "mark_unread";
+        break;
+      }
+      case "delete": {
+        // Delete is an explicit request, so it reaches the server even with mirroring off.
+        const locations = yield* store.serverLocations(thread.id);
+        yield* sync.enqueue(thread.accountId, {
+          kind: "trash",
+          locations: locations.map(({ mailbox, uid, uidValidity }) => ({
+            mailbox,
+            uid,
+            uidValidity,
+          })),
+        });
+        trash = {
+          accountId: thread.accountId,
+          messageIds: locations.flatMap(({ messageId }) => (messageId ? [messageId] : [])),
+        };
+        patch = {};
+        kind = "delete";
+        break;
+      }
       case "wait_for_reply":
         patch = {
           state: "working",
@@ -607,6 +647,7 @@ const make = Effect.gen(function* () {
         ...(trust ? { trust } : {}),
         ...(mirrorUndo ? { mirror: mirrorUndo } : {}),
         ...(read ? { read } : {}),
+        ...(trash ? { trash } : {}),
       },
     );
   });
@@ -617,18 +658,26 @@ const make = Effect.gen(function* () {
       const threads = yield* store.getThreads(input.threadIds);
       if (threads.length === 0) return yield* notFound("email");
       const actionIds: Array<number> = [];
+      const removed: Array<MailThreadId> = [];
       for (const thread of threads) {
         const id = yield* actOne(thread, input.action, actor, now);
         if (id !== null) actionIds.push(id);
+        if (input.action.type === "delete") removed.push(...(yield* store.removeThread(thread.id)));
       }
-      return { actionIds };
+      return { actionIds, removed };
     },
     store.transaction,
     commit,
     (effect, input) =>
       effect.pipe(
-        Effect.tap(() => engine.publishThreads(input.threadIds)),
+        Effect.tap(({ removed }) =>
+          Effect.andThen(
+            engine.publishThreads(input.threadIds.filter((id) => !removed.includes(id))),
+            engine.publishRemoved(removed),
+          ),
+        ),
         Effect.tap(() => engine.publishStatus),
+        Effect.map(({ actionIds }) => ({ actionIds })),
       ),
     sqlSafe,
   );
@@ -643,6 +692,15 @@ const make = Effect.gen(function* () {
       if (!history || action.undoneAt !== null)
         return yield* invalid("That action cannot be undone.");
       const now = yield* nowIso;
+      if (history.trash) {
+        // The email left this list with the delete; restored messages arrive again through sync.
+        yield* sync.enqueue(history.trash.accountId, {
+          kind: "untrash",
+          messageIds: history.trash.messageIds,
+        });
+        yield* store.markActionUndone(actionId, now);
+        return null;
+      }
       const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
       if (action.threadId !== null && thread === null) return yield* staleUndo();
       if (history.thread && thread) {
@@ -670,13 +728,16 @@ const make = Effect.gen(function* () {
         yield* store.saveDraftContent({ ...draft, revision: draft.revision + 1, updatedAt: now });
       }
       if (history.read && thread) {
-        const changed = yield* store.undoMessagesRead(thread.id, history.read.token);
+        const unread = history.read.unread === true;
+        const changed = unread
+          ? yield* store.undoMessagesUnread(thread.id, history.read.token)
+          : yield* store.undoMessagesRead(thread.id, history.read.token);
         if (changed.length !== history.read.count) return yield* staleUndo();
         yield* store.refreshUnread(thread.id);
         yield* sync.enqueue(thread.accountId, {
           kind: "seen",
           threadId: thread.id,
-          seen: false,
+          seen: unread,
           targets: history.read.targets,
         });
       }

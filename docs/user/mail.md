@@ -19,7 +19,11 @@ Mail learns from consecutive approvals for a sender or category. Adjust the appr
 
 Formatted messages preserve the sender’s layout. Choose **Load remote images** to display pictures hosted by the sender for that message.
 
-Choose **Chat** on an email to open its chat beside the email, with the saved triage history. Each entry shows what Mail decided and whether a model, rule or learned preference made the decision. Opening the chat uses no model tokens. Ask a follow-up there to work with the email, or choose **Reply** to write a reply yourself. Drafts appear in the email's details panel, which **Toggle mail details** shows or hides. Select **Review and send** to check the recipients and text, then **Approve and send**. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next approval.
+Choose **Chat** on an email to open its chat beside the email, with the saved triage history. Each entry shows what Mail decided and whether a model, rule or learned preference made the decision. Opening the chat uses no model tokens. Ask a follow-up there to work with the email.
+
+Choose **Reply** or **Forward** to write under the email while its chat stays open. **Send** sends it; **Save draft** or closing the editor keeps it for later. Drafts, including ones an agent left, appear in the email's details panel, which **Toggle mail details** shows or hides; choose **Open draft** to continue one. A forward carries the newest message's text but not its attachments. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next send.
+
+Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Never show this sender** and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation to restore it to your inbox.
 
 ## Use the CLI or an MCP agent
 
