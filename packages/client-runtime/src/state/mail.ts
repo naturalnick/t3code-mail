@@ -223,5 +223,9 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-command:mail:set-sender-ai",
       tag: WS_METHODS.mailSetSenderAi,
     }),
+    reviewExisting: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:review-existing",
+      tag: WS_METHODS.mailReviewExisting,
+    }),
   };
 }

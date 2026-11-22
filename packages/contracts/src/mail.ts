@@ -401,6 +401,10 @@ export const MailStatus = Schema.Struct({
   sessionProjectId: Schema.NullOr(ProjectId),
   emailMdPath: Schema.String,
   settledCount: NonNegativeInt,
+  /** Active mail that was in the inbox before the account was connected; AI only sorts new mail. */
+  unreviewed: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  /** Existing mail the user sent to AI that it hasn't sorted yet. */
+  reviewing: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
 });
 export type MailStatus = typeof MailStatus.Type;
 
@@ -602,6 +606,14 @@ export const MailDryRunRuleResult = Schema.Struct({
 
 export const MailSeedVoiceResult = Schema.Struct({ notes: Schema.String });
 export const MailDismissRecapInput = Schema.Struct({ date: TrimmedNonEmptyString });
+/**
+ * `review: false` stops a review that hasn't finished; what AI already sorted stays sorted.
+ * `limit` is the count the user was shown, so mail held after that waits for another ask.
+ */
+export const MailReviewExistingInput = Schema.Struct({
+  review: Schema.Boolean,
+  limit: Schema.optionalKey(NonNegativeInt),
+});
 /** An address or a domain; `enabled: false` keeps that sender's mail away from models. */
 export const MailSetSenderAiInput = Schema.Struct({
   sender: TrimmedNonEmptyString,
@@ -637,6 +649,7 @@ export type MailDryRunRuleResult = typeof MailDryRunRuleResult.Type;
 export type MailSeedVoiceResult = typeof MailSeedVoiceResult.Type;
 export type MailDismissRecapInput = typeof MailDismissRecapInput.Type;
 export type MailSetSenderAiInput = typeof MailSetSenderAiInput.Type;
+export type MailReviewExistingInput = typeof MailReviewExistingInput.Type;
 
 /**
  * The entry in a sender list that covers `address`: an exact address ("news@example.com") or a

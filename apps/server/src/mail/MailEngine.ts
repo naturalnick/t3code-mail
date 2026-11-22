@@ -253,6 +253,7 @@ const make = Effect.gen(function* () {
       sessionProjectId: MAIL_SESSION_PROJECT_ID,
       emailMdPath: `${store.workspaceDir}/EMAIL.md`,
       settledCount: yield* store.countSettled,
+      ...(yield* store.reviewCounts),
     } satisfies MailStatus;
   });
 

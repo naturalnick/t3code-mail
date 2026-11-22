@@ -326,6 +326,12 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `ALTER TABLE mail_drafts ADD COLUMN mode TEXT NOT NULL DEFAULT 'reply'`,
     `ALTER TABLE mail_drafts ADD COLUMN target_message INTEGER`,
   ],
+  [
+    // "held": mail from before the account was connected, waiting for the user to send it to AI.
+    // "review": held mail the user sent, sorted after new mail.
+    `DROP INDEX mail_threads_triage`,
+    `CREATE INDEX mail_threads_triage ON mail_threads (triage_state, last_message_at)`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -443,7 +449,7 @@ export interface ThreadRecord {
   readonly guardrail: MailGuardrail | null;
   readonly bulk: boolean;
   readonly verdict: ThreadVerdict | null;
-  readonly triageState: "pending" | "done" | "waiting_model" | "capped";
+  readonly triageState: "pending" | "review" | "held" | "done" | "waiting_model" | "capped";
   readonly triagedCount: number;
   readonly nudge: string | null;
   readonly chatThreadId: string | null;
@@ -1371,11 +1377,36 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       Effect.asVoid,
     );
 
-  const pendingTriage = (limit: number) =>
-    sql<{ id: string }>`SELECT id FROM mail_threads WHERE triage_state = 'pending'
+  const queued = (state: "pending" | "review", limit: number) =>
+    sql<{ id: string }>`SELECT id FROM mail_threads WHERE triage_state = ${state}
       ORDER BY last_message_at DESC LIMIT ${limit}`.pipe(
       Effect.map((rows) => rows.map((row) => MailThreadId.make(row.id))),
     );
+  /** New mail first; existing mail the user sent for review fills what's left of the batch. */
+  const pendingTriage = Effect.fn("MailStore.pendingTriage")(function* (limit: number) {
+    const fresh = yield* queued("pending", limit);
+    return fresh.length < limit
+      ? [...fresh, ...(yield* queued("review", limit - fresh.length))]
+      : fresh;
+  });
+  /** Queues up to `limit` held emails, newest first, so mail held later waits for another ask. */
+  const setReview = (review: boolean, limit: number | null) =>
+    review
+      ? sql`UPDATE mail_threads SET triage_state = 'review' WHERE id IN (
+          SELECT id FROM mail_threads WHERE triage_state = 'held' AND state = 'active'
+          ORDER BY last_message_at DESC LIMIT ${limit ?? -1})`.pipe(Effect.asVoid)
+      : sql`UPDATE mail_threads SET triage_state = 'held' WHERE triage_state = 'review'`.pipe(
+          Effect.asVoid,
+        );
+  const reviewCounts = sql<{ unreviewed: number; reviewing: number }>`SELECT
+      (SELECT COUNT(*) FROM mail_threads WHERE triage_state = 'held' AND state = 'active')
+        AS unreviewed,
+      (SELECT COUNT(*) FROM mail_threads WHERE triage_state = 'review') AS reviewing`.pipe(
+    Effect.map((rows) => ({
+      unreviewed: num(rows[0]?.unreviewed),
+      reviewing: num(rows[0]?.reviewing),
+    })),
+  );
   const requeueWaitingTriage = sql`UPDATE mail_threads SET triage_state = 'pending'
     WHERE triage_state IN ('waiting_model', 'capped')`.pipe(Effect.asVoid);
 
@@ -1827,6 +1858,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     markActionUndone,
     listActions,
     recapSince,
+    setReview,
+    reviewCounts,
     draftsForThread,
     threadsWithDrafts,
     getDraft,

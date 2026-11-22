@@ -15,6 +15,7 @@ import {
   MailActResult,
   MailAddAccountInput,
   MailDismissRecapInput,
+  MailReviewExistingInput,
   MailSetSenderAiInput,
   MailDraft,
   MailDraftInput,
@@ -74,6 +75,7 @@ export const MAIL_WS_METHODS = {
   mailSeedVoice: "mail.seedVoice",
   mailDismissRecap: "mail.dismissRecap",
   mailSetSenderAi: "mail.setSenderAi",
+  mailReviewExisting: "mail.reviewExisting",
 } as const;
 
 const error = Schema.Union([MailError, EnvironmentAuthorizationError]);
@@ -179,6 +181,7 @@ export const MailRpcs = [
   }),
   Rpc.make(MAIL_WS_METHODS.mailDismissRecap, { payload: MailDismissRecapInput, error }),
   Rpc.make(MAIL_WS_METHODS.mailSetSenderAi, { payload: MailSetSenderAiInput, error }),
+  Rpc.make(MAIL_WS_METHODS.mailReviewExisting, { payload: MailReviewExistingInput, error }),
 ] as const;
 
 /** Reading mail is reading the environment's data. */
@@ -211,6 +214,7 @@ export const MAIL_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailRemoveAccount]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailUpdateSettings]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailSetSenderAi]: AuthSettingsWriteScope,
+  [MAIL_WS_METHODS.mailReviewExisting]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailSetTrust]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailWriteEmailMd]: AuthSettingsWriteScope,
 } as const;

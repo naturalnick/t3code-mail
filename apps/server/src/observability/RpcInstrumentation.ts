@@ -290,6 +290,7 @@ const RPC_AGGREGATES = {
   [MAIL_WS_METHODS.mailSeedVoice]: "mail",
   [MAIL_WS_METHODS.mailDismissRecap]: "mail",
   [MAIL_WS_METHODS.mailSetSenderAi]: "mail",
+  [MAIL_WS_METHODS.mailReviewExisting]: "mail",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

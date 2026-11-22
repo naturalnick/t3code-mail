@@ -9,7 +9,7 @@ Open **Settings → Mail → Accounts → Add account** and enter your email add
 - **Gmail.** Enable 2-Step Verification in your Google Account. Choose **Create a Gmail app password**, name it `T3 Mail`, and paste the generated password into **App password**. If you change your Google password, create a replacement and choose **Re-enter app password** in Mail settings. [Google’s app password help](https://support.google.com/accounts/answer/185833)
 - **Other accounts.** Enter your provider’s app password. Mail recognizes common iCloud, Yahoo, and Fastmail addresses. For a custom domain, expand **Other provider** and enter the IMAP and SMTP hosts, ports, and TLS settings from your provider.
 
-Choose **Add account** to start syncing. Select a **Default mail model** to get triage suggestions.
+Choose **Add account** to start syncing. Select a **Default mail model** to get triage suggestions. AI sorts mail that arrives after you connect; recent mail that was already in your inbox stays in Active untouched. To have AI sort that too, choose **Review emails with AI** on **Mail home**, which shows how many it will read. **Stop** halts it, and anything the weekly token cap interrupts waits for you to ask again.
 
 ## Review mail and reply
 

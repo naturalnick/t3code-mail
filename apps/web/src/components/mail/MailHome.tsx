@@ -86,6 +86,56 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
   );
 }
 
+/** Mail from before the account was connected; sending it to AI is the user's call. */
+function ExistingInbox({
+  environmentId,
+  status,
+}: {
+  environmentId: EnvironmentId;
+  status: MailStatus;
+}) {
+  const gt = useGT();
+  const review = useMailCommand(
+    environmentId,
+    mailEnvironment.reviewExisting,
+    gt("Could not change the review"),
+  );
+  const reviewing = status.reviewing > 0;
+  return (
+    <section className="grid min-w-0 grid-cols-1 justify-items-start gap-2">
+      <h2 className="text-sm font-medium">{gt("Existing inbox")}</h2>
+      <p className="text-sm text-muted-foreground">
+        {reviewing
+          ? gt(
+              "{count, plural, one {AI is sorting # email from before you connected.} other {AI is sorting # emails from before you connected.}}",
+              { count: status.reviewing },
+            )
+          : gt(
+              "{count, plural, one {# email from before you connected hasn't been sorted. AI sorts new mail only.} other {# emails from before you connected haven't been sorted. AI sorts new mail only.}}",
+              { count: status.unreviewed },
+            )}
+      </p>
+      <Button
+        size="sm"
+        variant={reviewing ? "outline" : "default"}
+        disabled={review.disabled || (!reviewing && status.settings.defaultModelSelection === null)}
+        // The count on the button is what the user agreed to; mail held later waits.
+        onClick={() =>
+          void review.run(
+            reviewing ? { review: false } : { review: true, limit: status.unreviewed },
+          )
+        }
+      >
+        {reviewing
+          ? gt("Stop")
+          : gt("{count, plural, one {Review # email with AI} other {Review # emails with AI}}", {
+              count: status.unreviewed,
+            })}
+      </Button>
+    </section>
+  );
+}
+
 function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status: MailStatus }) {
   const gt = useGT();
   const resolve = useMessages();
@@ -126,6 +176,9 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
           {gt("Reconnect {email}", { email: account.email })}
         </Link>
       ))}
+      {status.accounts.length > 0 && (status.unreviewed > 0 || status.reviewing > 0) ? (
+        <ExistingInbox environmentId={environmentId} status={status} />
+      ) : null}
       {recap && status.accounts.length > 0 && (
         <section className="grid min-w-0 grid-cols-1 gap-1">
           <div className="flex flex-wrap items-center justify-between">

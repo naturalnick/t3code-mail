@@ -11,6 +11,7 @@ import {
   MailError,
   type MailRule,
   mailSenderEntry,
+  type MailReviewExistingInput,
   type MailSetSenderAiInput,
   type MailSettings,
   type MailSettleReason,
@@ -326,6 +327,8 @@ export class MailService extends Context.Service<
     readonly dismissRecap: (date: string) => Effect.Effect<void, MailError>;
     /** Tells whether the user turned AI off for a sender, so agents must not read its mail. */
     readonly aiExcluded: Effect.Effect<(address: string) => boolean, MailError>;
+    /** Sends the inbox mail that predates the account to AI, or stops what hasn't been sorted. */
+    readonly reviewExisting: (input: MailReviewExistingInput) => Effect.Effect<void, MailError>;
     /** Adds or removes an address or domain from the senders whose mail never reaches a model. */
     readonly setSenderAi: (input: MailSetSenderAiInput) => Effect.Effect<MailSettings, MailError>;
     /** Triages until no pending thread can progress. The worker runs it after a debounce. */
@@ -1129,6 +1132,8 @@ const make = Effect.gen(function* () {
     readonly repliedTo: boolean;
     readonly asksQuestion: boolean;
     readonly bodyMissing: boolean;
+    /** The newest incoming mail predates the account, so AI reads it only when the user asks. */
+    readonly existing: boolean;
     readonly item: TriageItem;
   }
 
@@ -1207,6 +1212,7 @@ const make = Effect.gen(function* () {
       repliedTo: replied.size > 0,
       asksQuestion: asksQuestion(latest.subject) || asksQuestion(full),
       bodyMissing: latest.bodyState !== "loaded" || full.trim().length === 0,
+      existing: account !== null && latest.date < account.createdAt,
       item: {
         id: "",
         from: latest.from.name
@@ -1252,7 +1258,9 @@ const make = Effect.gen(function* () {
     const ids = yield* store.pendingTriage(L1_BATCH * 4);
     if (ids.length === 0) return false;
     const settings = yield* engine.settings;
-    const threads = yield* store.getThreads(ids);
+    const loaded = new Map((yield* store.getThreads(ids)).map((thread) => [thread.id, thread]));
+    // In queue order, so new mail reaches the model (and the token cap) before a review.
+    const threads = ids.flatMap((id) => loaded.get(id) ?? []);
     const forModel: Array<Prepared> = [];
     let progressed = false;
     for (const thread of threads) {
@@ -1299,19 +1307,40 @@ const make = Effect.gen(function* () {
         });
         continue;
       }
+      if (prepared.existing && thread.triageState !== "review") {
+        yield* setTriageIfFresh(thread, {
+          category: prepared.prefiltered.category,
+          guardrail: prepared.prefiltered.guardrail,
+          bulk: prepared.prefiltered.bulk,
+          triageState: "held",
+        });
+        continue;
+      }
       forModel.push({
         ...prepared,
         item: { ...prepared.item, flags: [...prepared.item.flags, ...trustFacts(trust)] },
       });
       continue;
     }
-    // The AI-off list can change while a batch waits on a model, so it is read again right before each call.
+    // A review the model can't finish goes back to the user rather than spending tokens later.
+    const waiting = (entry: Prepared, state: "capped" | "waiting_model") =>
+      entry.thread.triageState === "review" ? "held" : state;
+    // The AI-off list and a review's Stop can change while a batch waits on a model, so both are
+    // read again right before each call and before any verdict is applied.
     const stillAllowed = Effect.fn("MailService.stillAllowed")(function* (
       entries: ReadonlyArray<Prepared>,
     ) {
       const { aiExcludedSenders } = yield* engine.settings;
+      const current = new Map(
+        (yield* store.getThreads(entries.map((entry) => entry.thread.id))).map((thread) => [
+          thread.id,
+          thread.triageState,
+        ]),
+      );
       const allowed: Array<Prepared> = [];
       for (const entry of entries) {
+        if (entry.thread.triageState === "review" && current.get(entry.thread.id) !== "review")
+          continue;
         if (mailSenderEntry(entry.thread.fromAddress, aiExcludedSenders) === null) {
           allowed.push(entry);
           continue;
@@ -1331,7 +1360,7 @@ const make = Effect.gen(function* () {
             category: prepared.prefiltered.category,
             guardrail: prepared.prefiltered.guardrail,
             bulk: prepared.prefiltered.bulk,
-            triageState: capped ? "capped" : "waiting_model",
+            triageState: waiting(prepared, capped ? "capped" : "waiting_model"),
             injection: looksLikeInstructionsToAi(prepared.text),
           });
         }
@@ -1343,7 +1372,7 @@ const make = Effect.gen(function* () {
             Effect.annotateLogs({ count: batch.length, cause: String(cause).slice(0, 200) }),
             Effect.andThen(
               Effect.forEach(batch, (entry) =>
-                setTriageIfFresh(entry.thread, { triageState: "waiting_model" }),
+                setTriageIfFresh(entry.thread, { triageState: waiting(entry, "waiting_model") }),
               ),
             ),
             Effect.as([] as ReadonlyArray<{ entry: Prepared; verdict: null }>),
@@ -1380,7 +1409,9 @@ const make = Effect.gen(function* () {
         const prepared = result.entry;
         const initial = result.verdict;
         if (initial === null) {
-          yield* setTriageIfFresh(prepared.thread, { triageState: "waiting_model" });
+          yield* setTriageIfFresh(prepared.thread, {
+            triageState: waiting(prepared, "waiting_model"),
+          });
           continue;
         }
         if (!deciding.has(prepared.thread.id)) continue;
@@ -1531,7 +1562,11 @@ const make = Effect.gen(function* () {
             );
           }
         }
-        if (changed.length > 0) yield* engine.publishThreads(changed);
+        if (changed.length > 0) {
+          yield* engine.publishThreads(changed);
+          // A returning thread can change what Mail home counts, such as held mail.
+          yield* engine.publishStatus;
+        }
         yield* engine.refreshChatUsage;
         // Failed or capped triage gets another try; the cap rolls over weekly.
         const minute = Math.floor(DateTime.toEpochMillis(now) / 60_000);
@@ -2475,6 +2510,16 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
+  const reviewExisting: MailService["Service"]["reviewExisting"] = Effect.fn(
+    "MailService.reviewExisting",
+  )(function* (input) {
+    if (input.review && (yield* engine.settings).defaultModelSelection === null)
+      return yield* invalid("Pick a mail model first.");
+    yield* store.setReview(input.review, input.limit ?? null);
+    if (input.review) yield* Queue.offer(engine.triageSignal, undefined);
+    yield* engine.publishStatus;
+  }, sqlSafe);
+
   const dismissRecap: MailService["Service"]["dismissRecap"] = (date) =>
     store.setKv("recap-dismissed", date).pipe(Effect.andThen(engine.publishStatus), sqlSafe);
 
@@ -2522,6 +2567,7 @@ const make = Effect.gen(function* () {
     seedVoice,
     dismissRecap,
     aiExcluded,
+    reviewExisting,
     setSenderAi,
     drainTriage,
   });

@@ -80,28 +80,39 @@ const message = (input: MessageInput): ParsedMessage => {
 
 type ModelReply = (model: string, prompt: string) => Partial<MailTriageVerdict>;
 
-const textGeneration = (reply: ModelReply) =>
+/** Runs while a triage call is with the model, for tests that change state mid-call. */
+type DuringCall = () => Effect.Effect<void, MailStore.StoreError>;
+
+const textGeneration = (reply: ModelReply, duringCall: DuringCall) =>
   Layer.mock(TextGeneration.TextGeneration)({
     generateMailNotes: () => Effect.succeed({ notes: "Voice notes" }),
     generateMailTriage: (input) =>
-      Effect.sync(() => ({
-        verdicts: [...input.prompt.matchAll(/<email id="(e\d+)">/g)].map((match) => ({
-          id: match[1]!,
-          decision: "settle" as const,
-          reason: "fyi",
-          why: "A routine update; nothing to do.",
-          category: "notification",
-          action: "Settle",
-          confidence: 0.92,
-          urgent: false,
-          injection: false,
-          ...reply(input.modelSelection.model, input.prompt),
-        })),
-      })),
+      Effect.gen(function* () {
+        yield* duringCall().pipe(Effect.orDie);
+        return {
+          verdicts: [...input.prompt.matchAll(/<email id="(e\d+)">/g)].map((match) => ({
+            id: match[1]!,
+            decision: "settle" as const,
+            reason: "fyi",
+            why: "A routine update; nothing to do.",
+            category: "notification",
+            action: "Settle",
+            confidence: 0.92,
+            urgent: false,
+            injection: false,
+            ...reply(input.modelSelection.model, input.prompt),
+          })),
+        };
+      }),
   });
 
 let randomCounter = 0;
-const testLayer = (mailDir: string, reply: ModelReply, credentials = MailCredentials.layerMemory) =>
+const testLayer = (
+  mailDir: string,
+  reply: ModelReply,
+  credentials = MailCredentials.layerMemory,
+  duringCall: DuringCall = () => Effect.void,
+) =>
   MailService.layer.pipe(
     Layer.provide(Layer.mock(EventSink.EventSinkV2)({})),
     Layer.provideMerge(
@@ -135,7 +146,7 @@ const testLayer = (mailDir: string, reply: ModelReply, credentials = MailCredent
     Layer.provideMerge(MailChatContext.layer),
     Layer.provideMerge(MailStore.layerMemory(mailDir)),
     Layer.provideMerge(Sqlite.layerMemory),
-    Layer.provide(textGeneration(reply)),
+    Layer.provide(textGeneration(reply, duringCall)),
     Layer.provide(
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
         launch: (input) =>
@@ -187,11 +198,12 @@ const withMail = <A, E>(
   >,
   reply: ModelReply = () => ({}),
   credentials = MailCredentials.layerMemory,
+  duringCall?: DuringCall,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const mailDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-mail-" });
-    return yield* body.pipe(Effect.provide(testLayer(mailDir, reply, credentials)));
+    return yield* body.pipe(Effect.provide(testLayer(mailDir, reply, credentials, duringCall)));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 /** Delivers one message the way sync does: ingest, fetch its body, then triage. */
@@ -450,6 +462,76 @@ describe("MailService trust ramp", () => {
         prompts.push(prompt);
         return prompt.includes("FAILED") ? { decision: "keep", reason: "Build failed" } : {};
       },
+    );
+  });
+
+  it.effect("leaves mail from before the account to the user until they send it to AI", () => {
+    const prompts: Array<string> = [];
+    let stopReview: Effect.Effect<void, MailStore.StoreError> = Effect.void;
+    return withMail(
+      Effect.gen(function* () {
+        const engine = yield* MailEngine.MailEngine;
+        const store = yield* MailStore.MailStore;
+        const mail = yield* MailService.MailService;
+        yield* addSendingAccount;
+        yield* mail.updateSettings({
+          defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
+        });
+        // Older than the account (connected at `at`), and delivered by a plain incremental sync.
+        const old = Array.from({ length: 13 }, (_, index) =>
+          message({
+            subject: `Old notice ${index + 1}`,
+            at: `2026-10-${String(index + 10).padStart(2, "0")}T06:00:00.000Z`,
+          }),
+        );
+        const result = yield* engine.ingest(
+          {
+            accountId,
+            accountEmail: me,
+            gmail: false,
+            mailbox: "INBOX",
+            role: "primary",
+            initial: false,
+            backfill: false,
+          },
+          old,
+        );
+        for (const entry of result.newMessageIds) yield* store.setMessageBody(entry.id, "Hello.");
+        yield* engine.afterBodies(result.threads);
+        yield* mail.drainTriage;
+        expect(prompts).toHaveLength(0);
+        expect(yield* store.reviewCounts).toEqual({ unreviewed: 13, reviewing: 0 });
+
+        // The count the user saw bounds the review.
+        yield* mail.reviewExisting({ review: true, limit: 12 });
+        expect(yield* store.reviewCounts).toEqual({ unreviewed: 1, reviewing: 12 });
+        yield* mail.reviewExisting({ review: false });
+        expect(yield* store.reviewCounts).toEqual({ unreviewed: 13, reviewing: 0 });
+
+        // Stop while the first batch is with the model: its verdicts and later batches are dropped.
+        stopReview = store.setReview(false, null);
+        yield* mail.reviewExisting({ review: true });
+        yield* mail.drainTriage;
+        // The mock answers once per email; one call carried the first batch of 12.
+        expect(new Set(prompts).size).toBe(1);
+        expect(yield* store.reviewCounts).toEqual({ unreviewed: 13, reviewing: 0 });
+
+        stopReview = Effect.void;
+        yield* mail.reviewExisting({ review: true });
+        yield* mail.drainTriage;
+        expect(yield* store.reviewCounts).toEqual({ unreviewed: 0, reviewing: 0 });
+        expect(yield* rowOf(result.threads[0]!)).toMatchObject({ suggestion: { reason: "fyi" } });
+
+        // New mail is still sorted without asking.
+        yield* deliver({ subject: "Fresh", body: "New today.", at: "2026-11-05T06:00:00.000Z" });
+        expect(prompts.at(-1)).toContain("New today.");
+      }),
+      (_model, prompt) => {
+        prompts.push(prompt);
+        return {};
+      },
+      MailCredentials.layerMemory,
+      () => stopReview,
     );
   });
 
