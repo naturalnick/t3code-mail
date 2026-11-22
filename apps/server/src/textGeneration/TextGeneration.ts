@@ -47,7 +47,9 @@ type TextGenerationOp =
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateReviewGuide"
-  | "generateTranscriptionPostProcessing";
+  | "generateTranscriptionPostProcessing"
+  | "generateMailTriage"
+  | "generateMailNotes";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -199,6 +201,16 @@ export const make = Effect.gen(function* () {
         input.modelSelection,
         input.projectId,
         (service, modelSelection) => service.generateReviewGuide({ ...input, modelSelection }),
+      );
+    }),
+    generateMailTriage: Effect.fn("TextGeneration.generateMailTriage")(function (input) {
+      return generate("generateMailTriage", input.modelSelection, null, (service, modelSelection) =>
+        service.generateMailTriage({ ...input, modelSelection }),
+      );
+    }),
+    generateMailNotes: Effect.fn("TextGeneration.generateMailNotes")(function (input) {
+      return generate("generateMailNotes", input.modelSelection, null, (service, modelSelection) =>
+        service.generateMailNotes({ ...input, modelSelection }),
       );
     }),
     generateTranscriptionPostProcessing: Effect.fn(

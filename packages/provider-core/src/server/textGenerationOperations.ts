@@ -21,6 +21,24 @@ import {
 
 export const TranscriptionPostProcessingOutput = Schema.Struct({ transcription: Schema.String });
 
+export const MailTriageOutput = Schema.Struct({
+  verdicts: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      summary: Schema.String,
+      decision: Schema.Literals(["settle", "keep"]),
+      reason: Schema.String,
+      category: Schema.String,
+      action: Schema.String,
+      confidence: Schema.Number,
+      urgent: Schema.Boolean,
+      injection: Schema.Boolean,
+    }),
+  ),
+});
+
+export const MailNotesOutput = Schema.Struct({ notes: Schema.String });
+
 export type Operation = keyof ProviderTextGeneration;
 
 export interface Request<S extends Schema.Top> {
@@ -182,6 +200,30 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
       });
     });
 
+  const generateMailTriage: ProviderTextGeneration["generateMailTriage"] = Effect.fn(
+    `${name}.generateMailTriage`,
+  )(function* (input) {
+    return yield* run({
+      operation: "generateMailTriage",
+      cwd: input.cwd,
+      prompt: input.prompt,
+      outputSchema: MailTriageOutput,
+      modelSelection: input.modelSelection,
+    });
+  });
+
+  const generateMailNotes: ProviderTextGeneration["generateMailNotes"] = Effect.fn(
+    `${name}.generateMailNotes`,
+  )(function* (input) {
+    return yield* run({
+      operation: "generateMailNotes",
+      cwd: input.cwd,
+      prompt: input.prompt,
+      outputSchema: MailNotesOutput,
+      modelSelection: input.modelSelection,
+    });
+  });
+
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = Effect.fn(
     `${name}.generateReviewGuide`,
   )(function* (input) {
@@ -201,5 +243,7 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     generateThreadTitle,
     generateReviewGuide,
     generateTranscriptionPostProcessing,
+    generateMailTriage,
+    generateMailNotes,
   } satisfies ProviderTextGeneration;
 }

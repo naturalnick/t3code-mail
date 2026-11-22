@@ -26,6 +26,8 @@ import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textG
 import {
   generatedThreadTitle,
   investigationUnsupported,
+  MailNotesOutput,
+  MailTriageOutput,
   TranscriptionPostProcessingOutput,
 } from "@t3tools/provider-core/server/textGenerationOperations";
 import {
@@ -392,6 +394,26 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
         modelSelection: input.modelSelection,
       });
     });
+  const generateMailTriage: ProviderTextGeneration["generateMailTriage"] = Effect.fn(
+    "MuseTextGeneration.generateMailTriage",
+  )(function* (input) {
+    return yield* runMuseJson({
+      operation: "generateMailTriage",
+      prompt: input.prompt,
+      outputSchema: MailTriageOutput,
+      modelSelection: input.modelSelection,
+    });
+  });
+  const generateMailNotes: ProviderTextGeneration["generateMailNotes"] = Effect.fn(
+    "MuseTextGeneration.generateMailNotes",
+  )(function* (input) {
+    return yield* runMuseJson({
+      operation: "generateMailNotes",
+      prompt: input.prompt,
+      outputSchema: MailNotesOutput,
+      modelSelection: input.modelSelection,
+    });
+  });
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = () =>
     Effect.fail(investigationUnsupported("generateReviewGuide", "Muse Code"));
   return {
@@ -401,5 +423,7 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
     generateThreadTitle,
     generateReviewGuide,
     generateTranscriptionPostProcessing,
+    generateMailTriage,
+    generateMailNotes,
   } satisfies ProviderTextGeneration;
 });

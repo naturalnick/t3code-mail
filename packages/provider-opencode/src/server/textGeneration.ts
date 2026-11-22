@@ -25,6 +25,8 @@ const OpenCodeTextGenerationOperation = Schema.Literals([
   "generateThreadTitle",
   "generateReviewGuide",
   "generateTranscriptionPostProcessing",
+  "generateMailTriage",
+  "generateMailNotes",
 ]);
 
 const openCodeTextGenerationErrorContext = {

@@ -64,6 +64,8 @@ const dependencies = Layer.mergeAll(
       generateThreadTitle: () => Effect.die("not used"),
       generateReviewGuide: () => Effect.die("not used"),
       generateTranscriptionPostProcessing: () => Effect.die("not used"),
+      generateMailTriage: () => Effect.die("not used"),
+      generateMailNotes: () => Effect.die("not used"),
     }),
   ),
 );
@@ -392,6 +394,8 @@ effectIt.effect("tells the client why transcript cleanup failed", () =>
           generateBranchName: () => Effect.die("not used"),
           generateThreadTitle: () => Effect.die("not used"),
           generateReviewGuide: () => Effect.die("not used"),
+          generateMailTriage: () => Effect.die("not used"),
+          generateMailNotes: () => Effect.die("not used"),
           generateTranscriptionPostProcessing: () =>
             Effect.fail(
               new TextGenerationError({

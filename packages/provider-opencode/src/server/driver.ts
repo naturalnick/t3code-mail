@@ -231,6 +231,16 @@ function selectOpenCodeRuntimeTextGeneration(
         v1: v1.generateTranscriptionPostProcessing(input),
         v2: v2.generateTranscriptionPostProcessing(input),
       }),
+    generateMailTriage: (input) =>
+      byOpenCodeRuntime(resolve, {
+        v1: v1.generateMailTriage(input),
+        v2: v2.generateMailTriage(input),
+      }),
+    generateMailNotes: (input) =>
+      byOpenCodeRuntime(resolve, {
+        v1: v1.generateMailNotes(input),
+        v2: v2.generateMailNotes(input),
+      }),
   };
 }
 

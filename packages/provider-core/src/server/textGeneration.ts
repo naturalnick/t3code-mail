@@ -114,7 +114,49 @@ export interface TranscriptionPostProcessingResult {
   transcription: string;
 }
 
+/** One batched L1 pass over cleaned mail; the prompt carries the threads as quoted data. */
+export interface MailTriageGenerationInput {
+  cwd: string;
+  prompt: string;
+  modelSelection: ModelSelection;
+}
+
+export interface MailTriageVerdict {
+  id: string;
+  summary: string;
+  decision: "settle" | "keep";
+  reason: string;
+  category: string;
+  action: string;
+  confidence: number;
+  urgent: boolean;
+  injection: boolean;
+}
+
+export interface MailTriageGenerationResult {
+  verdicts: ReadonlyArray<MailTriageVerdict>;
+}
+
+/** Free-form notes about mail, such as tone notes seeded from sent mail. */
+export interface MailNotesGenerationInput {
+  cwd: string;
+  prompt: string;
+  modelSelection: ModelSelection;
+}
+
+export interface MailNotesGenerationResult {
+  notes: string;
+}
+
 export interface ProviderTextGeneration {
+  readonly generateMailTriage: (
+    input: MailTriageGenerationInput,
+  ) => Effect.Effect<MailTriageGenerationResult, TextGenerationError>;
+
+  readonly generateMailNotes: (
+    input: MailNotesGenerationInput,
+  ) => Effect.Effect<MailNotesGenerationResult, TextGenerationError>;
+
   readonly generateTranscriptionPostProcessing: (
     input: TranscriptionPostProcessingInput,
   ) => Effect.Effect<TranscriptionPostProcessingResult, TextGenerationError>;
