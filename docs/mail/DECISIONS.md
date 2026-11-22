@@ -42,3 +42,6 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - Learned draft edits are retrieved by account and correspondent. Related-mail lookups use the same account boundary.
 - Archive and read operations capture the affected messages at the time of the action. Undo checks the current revision or field value before reversing a change.
 - Automatic mail generation uses the selected provider instance. When it is unavailable, mail content stays local until the selected provider can run.
+- An approval names the revision of each visible suggestion. If a reply or a new proposal changes any of them, the batch must be reviewed again.
+- Partial SMTP acceptance keeps a delivery record and creates a new revision of the same draft for the rejected recipients. Sending it requires another approval.
+- Body download quota responses pause downloads and backfill for 24 hours. New message headers continue to sync, and completed body downloads in the same batch are retained.

@@ -157,7 +157,12 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
               onClick={() =>
                 void actions.act(
                   proposals.map((t) => t.id),
-                  { type: "approve" },
+                  {
+                    type: "approve",
+                    revisions: Object.fromEntries(
+                      proposals.map((t) => [t.id, t.suggestion!.revision]),
+                    ),
+                  },
                   gt("Settled"),
                 )
               }

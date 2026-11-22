@@ -93,7 +93,7 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "wait_for_reply":
       return resolve(msg("Waiting for reply"));
     case "send":
-      return resolve(msg("Sent a reply"));
+      return action.reason ?? resolve(msg("Sent a reply"));
     case "trust":
       return resolve(msg("Changed trust"));
     case "nudge":

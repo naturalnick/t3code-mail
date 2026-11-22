@@ -42,6 +42,27 @@ const parseTextPart = (raw: string): { part: string; html: boolean } | null => {
     return null;
   }
 };
+export async function downloadBodies(
+  pending: ReadonlyArray<{ id: number; thread_id: string; uid: number; text_part: string }>,
+  fetchBody: ImapSession["fetchBody"],
+) {
+  const bodies: Array<{ id: number; threadId: string; body: string | null | typeof FETCH_FAILED }> =
+    [];
+  for (const row of pending) {
+    const part = row.text_part ? parseTextPart(row.text_part) : null;
+    try {
+      const body = part === null ? null : await fetchBody(row.uid, part);
+      bodies.push({ id: row.id, threadId: row.thread_id, body });
+    } catch (error) {
+      const failure = classifyImapError(error);
+      if (failure.kind === "quota") return { bodies, quota: true };
+      if (failure.kind === "auth" || failure.kind === "network") throw failure;
+      bodies.push({ id: row.id, threadId: row.thread_id, body: FETCH_FAILED });
+    }
+  }
+  return { bodies, quota: false };
+}
+
 interface LiveSession {
   readonly imap: ImapSession;
   readonly wake: () => void;
@@ -274,29 +295,23 @@ const make = Effect.gen(function* () {
       yield* syncMailboxOnce(path, role);
     });
 
+    const bodyPauseKey = `body-quota:${accountId}`;
+    let bodyPauseUntil = yield* store.getKv(bodyPauseKey).pipe(Effect.orDie);
     const fetchBodies = Effect.fn("MailSync.fetchBodies")(function* (path: string) {
+      const now = yield* DateTime.now;
+      if (bodyPauseUntil !== null && bodyPauseUntil > DateTime.formatIso(now)) return 0;
       const pending = yield* store.pendingBodies(accountId, path, BODY_ROUND).pipe(Effect.orDie);
       if (pending.length === 0) return 0;
-      const bodies = yield* promise(() =>
-        imap.withMailbox(path, null, async () => {
-          const results: Array<{
-            id: number;
-            threadId: string;
-            body: string | null | typeof FETCH_FAILED;
-          }> = [];
-          for (const row of pending) {
-            const part = row.text_part ? parseTextPart(row.text_part) : null;
-            const body =
-              part === null
-                ? null
-                : await imap
-                    .fetchBody(row.uid, part)
-                    .catch((): typeof FETCH_FAILED => FETCH_FAILED);
-            results.push({ id: row.id, threadId: row.thread_id, body });
-          }
-          return results;
-        }),
+      const { bodies, quota } = yield* promise(() =>
+        imap.withMailbox(path, null, () =>
+          downloadBodies(pending, (uid, part) => imap.fetchBody(uid, part)),
+        ),
       );
+      if (quota) {
+        bodyPauseUntil = DateTime.formatIso(DateTime.add(now, { hours: QUOTA_PAUSE_HOURS }));
+        yield* store.setKv(bodyPauseKey, bodyPauseUntil).pipe(Effect.orDie);
+        yield* setStatus(accountId, { backfillPausedUntil: bodyPauseUntil });
+      }
       for (const entry of bodies) {
         yield* (
           entry.body === FETCH_FAILED

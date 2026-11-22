@@ -297,6 +297,11 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `ALTER TABLE mail_accounts ADD COLUMN keychain_possible INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE mail_accounts ADD COLUMN credential_pending INTEGER NOT NULL DEFAULT 0`,
   ],
+  [
+    `UPDATE mail_trust SET explicit = 0 WHERE explicit = 1 AND trust = 'auto' AND
+      (SELECT reason FROM mail_actions WHERE kind = 'trust' AND actor_label = mail_trust.key
+        AND undone_at IS NULL ORDER BY id DESC LIMIT 1) IS NOT 'auto'`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -582,7 +587,11 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
     snoozeOnReply: thread.state === "snoozed" && thread.snoozeOnReply,
     suggestion:
       thread.state === "active" && thread.suggestionReason !== null
-        ? { reason: thread.suggestionReason, confidence: thread.suggestionConfidence ?? 0 }
+        ? {
+            reason: thread.suggestionReason,
+            confidence: thread.suggestionConfidence ?? 0,
+            revision: thread.workflowVersion ?? "initial",
+          }
         : null,
     category: thread.category,
     guardrail: thread.guardrail,
@@ -835,7 +844,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         yield* sql`DELETE FROM mail_actions WHERE instr(thread_id, ${prefix}) = 1`;
         yield* sql`DELETE FROM mail_contacts WHERE account_id = ${id}`;
         // Legacy reply examples have no ownership information.
-        yield* sql`DELETE FROM mail_kv WHERE key = 'draft-edits' OR key IN (
+        yield* sql`DELETE FROM mail_kv WHERE key IN ('draft-edits', ${"body-quota:" + id}) OR key IN (
           SELECT 'chat-context:' || chat_thread_id FROM mail_threads WHERE account_id = ${id}
         )`;
         yield* sql`DELETE FROM mail_threads WHERE account_id = ${id}`;
@@ -1475,12 +1484,23 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       readonly error: string | null;
       readonly at: string;
       readonly editSender?: string | null;
+      readonly remaining?:
+        | { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> }
+        | undefined;
     },
   ) =>
-    sql`UPDATE mail_drafts SET status = ${result.status}, error = ${result.error},
+    sql<Row>`UPDATE mail_drafts SET status = ${result.status}, error = ${result.error},
+        ${
+          result.remaining
+            ? sql`to_json = ${toJson(result.remaining.to)}, cc_json = ${toJson(result.remaining.cc)},
+          message_id = NULL, revision = revision + 1,`
+            : sql``
+        }
         updated_at = ${result.at}, sent_at = ${result.status === "sent" ? result.at : null},
         edit_sender = ${result.editSender ?? null}
-      WHERE id = ${id} AND status = 'sending'`.pipe(Effect.asVoid);
+      WHERE id = ${id} AND status = 'sending' RETURNING *`.pipe(
+      Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)),
+    );
   const recentReplyEdits = (accountId: MailAccountId, sender: string) =>
     sql<{ before: string; after: string }>`SELECT substr(original_body, 1, 600) AS before,
         substr(body, 1, 600) AS after FROM mail_drafts

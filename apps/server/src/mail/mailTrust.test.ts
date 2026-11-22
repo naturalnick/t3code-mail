@@ -119,6 +119,11 @@ describe("trust ramp", () => {
       rule: { action: "settle", reason: "fyi" },
     } as const;
     expect(decide(invoice).type).toBe("suggest");
+    const suggest = setLevel(sender(), "suggest");
+    expect(decide({ ...invoice, sender: approve(suggest, 3) }).type).toBe("suggest");
+    expect(
+      decide({ ...base, sender: suggest, category: setLevel(sender(), "auto"), rule: null }).type,
+    ).toBe("suggest");
     expect(decide({ ...invoice, sender: sender({ trust: "auto", explicit: true }) }).type).toBe(
       "auto_settle",
     );

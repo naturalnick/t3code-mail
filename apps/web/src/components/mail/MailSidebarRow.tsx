@@ -181,7 +181,14 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
                     disabled={actions.disabled}
                     onClick={(event) => {
                       stop(event);
-                      void actions.act([thread.id], { type: "approve" }, gt("Settled"));
+                      void actions.act(
+                        [thread.id],
+                        {
+                          type: "approve",
+                          revisions: { [thread.id]: thread.suggestion!.revision },
+                        },
+                        gt("Settled"),
+                      );
                     }}
                     className="relative z-[2] inline-flex h-4 shrink-0 cursor-pointer items-center gap-0.5 rounded-sm border border-border px-1 text-2xs font-medium text-muted-foreground hover:border-primary/40 hover:text-primary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none"
                   />

@@ -38,11 +38,7 @@ export async function buildRaw(message: OutgoingMessage): Promise<Buffer> {
   return composer.compile().build();
 }
 
-export async function sendRaw(
-  config: SmtpConfig,
-  message: OutgoingMessage,
-  raw: Buffer,
-): Promise<void> {
+export async function sendRaw(config: SmtpConfig, message: OutgoingMessage, raw: Buffer) {
   const transport = Nodemailer.createTransport({
     host: config.host,
     port: config.port,
@@ -55,10 +51,13 @@ export async function sendRaw(
     socketTimeout: 60_000,
   });
   try {
-    await transport.sendMail({
+    const result = await transport.sendMail({
       envelope: { from: message.from.address, to: [...message.to, ...message.cc] },
       raw,
     });
+    const addressOf = (entry: string | { address: string }) =>
+      typeof entry === "string" ? entry : entry.address;
+    return { accepted: result.accepted.map(addressOf), rejected: result.rejected.map(addressOf) };
   } finally {
     transport.close();
   }

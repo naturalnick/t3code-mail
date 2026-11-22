@@ -68,7 +68,7 @@ export function decide(input: DecideInput): TrustDecision {
   }
   if (sender?.trust === "auto") return { type: "auto_settle", reason, via: "sender" };
   // A sender the user just corrected stays in suggest mode even inside a trusted category.
-  const senderDemoted = sender !== null && sender.streak === 0 && sender.rejections > 0;
+  const senderDemoted = sender?.trust === "suggest" && (sender.explicit || sender.rejections > 0);
   if (category?.trust === "auto" && !senderDemoted) {
     return { type: "auto_settle", reason, via: "category" };
   }
@@ -102,6 +102,7 @@ export function recordApproval(
     streak,
     reason: input.reason,
     trust: graduates ? "auto" : record.trust,
+    explicit: graduates ? false : record.explicit,
     bulk: graduates ? input.bulk : record.bulk,
   };
 }

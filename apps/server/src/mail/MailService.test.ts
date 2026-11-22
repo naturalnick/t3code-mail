@@ -28,10 +28,11 @@ import * as MailEngine from "./MailEngine.ts";
 import * as MailService from "./MailService.ts";
 import * as MailStore from "./MailStore.ts";
 import * as MailSync from "./MailSync.ts";
+import * as Smtp from "./smtpSend.ts";
 
 vi.mock(import("./smtpSend.ts"), async (importOriginal) => ({
   ...(await importOriginal()),
-  sendRaw: async () => {},
+  sendRaw: async (_config, message) => ({ accepted: [...message.to, ...message.cc], rejected: [] }),
 }));
 
 const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "luna" };
@@ -232,7 +233,15 @@ describe("MailService trust ramp", () => {
           // A repeated approve (double tap, stale client) is not a second approval.
           for (const _ of [1, 2]) {
             yield* mail.act(
-              { threadIds: [threadId], action: { type: "approve" } },
+              {
+                threadIds: [threadId],
+                action: {
+                  type: "approve",
+                  revisions: {
+                    [threadId]: (yield* rowOf(threadId)).suggestion?.revision ?? "already-settled",
+                  },
+                },
+              },
               { actor: "user" },
             );
           }
@@ -543,6 +552,28 @@ describe("MailService trust ramp", () => {
     ),
   );
 
+  it.effect("rejects approval of a superseded suggestion", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const threadId = yield* deliver({ subject: "Build", body: "Passed.", at });
+        yield* mail.propose({ threadIds: [threadId], reason: "fyi" }, { actor: "agent" });
+        const reviewed = (yield* rowOf(threadId)).suggestion!;
+        yield* mail.propose({ threadIds: [threadId], reason: "noise" }, { actor: "agent" });
+        const approval = { type: "approve", revisions: { [threadId]: reviewed.revision } } as const;
+        expect(
+          (yield* mail
+            .act({ threadIds: [threadId], action: approval }, { actor: "user" })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(yield* rowOf(threadId)).toMatchObject({
+          state: "active",
+          suggestion: { reason: "noise" },
+        });
+      }),
+    ),
+  );
+
   it.effect("keeps the latest explicit trust choice when an older approval is undone", () =>
     withMail(
       Effect.gen(function* () {
@@ -552,7 +583,15 @@ describe("MailService trust ramp", () => {
         const threadId = yield* deliver({ subject: "Status report", body: "Ready", at });
         yield* mail.propose({ threadIds: [threadId], reason: "fyi" }, { actor: "agent" });
         const approved = yield* mail.act(
-          { threadIds: [threadId], action: { type: "approve" } },
+          {
+            threadIds: [threadId],
+            action: {
+              type: "approve",
+              revisions: {
+                [threadId]: (yield* rowOf(threadId)).suggestion?.revision ?? "already-settled",
+              },
+            },
+          },
           user,
         );
         yield* mail.setTrust({ key, trust: "auto" });
@@ -821,6 +860,47 @@ describe("MailService model usage and replies", () => {
           ).toHaveLength(2);
         }),
       ),
+  );
+
+  it.effect("requires fresh approval for only the rejected recipients of a partial delivery", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const store = yield* MailStore.MailStore;
+        yield* addSendingAccount;
+        const threadId = yield* deliver({ subject: "Review", body: "Ready", at });
+        const to = "one@example.org";
+        const cc = "two@example.org";
+        const draft = yield* mail.saveDraft(
+          { threadId, to: [to], cc: [cc], subject: "Re: Review", body: "Thanks" },
+          { actor: "user" },
+        );
+        using send = vi
+          .spyOn(Smtp, "sendRaw")
+          .mockResolvedValueOnce({ accepted: [to], rejected: [cc] })
+          .mockResolvedValueOnce({ accepted: [cc], rejected: [] });
+        const remainder = yield* mail.sendDraft({ draftId: draft.id, revision: draft.revision });
+        expect(remainder).toMatchObject({
+          status: "failed",
+          to: [],
+          cc: [cc],
+          revision: draft.revision + 1,
+        });
+        expect(remainder.error).toContain(to);
+        expect(remainder.error).toContain(cc);
+        expect((yield* rowOf(threadId)).state).not.toBe("settled");
+        expect(
+          (yield* mail
+            .sendDraft({ draftId: draft.id, revision: draft.revision })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(
+          (yield* mail.sendDraft({ draftId: draft.id, revision: remainder.revision })).status,
+        ).toBe("sent");
+        expect(send.mock.calls.map(([, m]) => [...m.to, ...m.cc])).toEqual([[to, cc], [cc]]);
+        expect((yield* store.threadMessages(threadId)).filter((m) => m.outgoing)).toHaveLength(2);
+      }),
+    ),
   );
 
   it.effect("checks the weekly cap before generating voice notes", () =>
@@ -1175,7 +1255,16 @@ describe("MailService accounts", () => {
             body: "Succeeded.",
             at: "2026-11-01T06:00:00.000Z",
           });
-          yield* mail.act({ threadIds: [id], action: { type: "approve" } }, { actor: "user" });
+          yield* mail.act(
+            {
+              threadIds: [id],
+              action: {
+                type: "approve",
+                revisions: { [id]: (yield* rowOf(id)).suggestion!.revision },
+              },
+            },
+            { actor: "user" },
+          );
           expect((yield* mail.listTrust).records.length).toBeGreaterThan(0);
           yield* addSendingAccount;
           const shared = yield* deliver({
@@ -1185,7 +1274,16 @@ describe("MailService accounts", () => {
             body: "Succeeded.",
             at,
           });
-          yield* mail.act({ threadIds: [shared], action: { type: "approve" } }, { actor: "user" });
+          yield* mail.act(
+            {
+              threadIds: [shared],
+              action: {
+                type: "approve",
+                revisions: { [shared]: (yield* rowOf(shared)).suggestion!.revision },
+              },
+            },
+            { actor: "user" },
+          );
           yield* store.setChatThread(id, ThreadId.make("fixture-chat"));
           yield* store.setKv("chat-context:fixture-chat", "receipt");
           yield* mail.removeAccount(accountId);
@@ -1352,3 +1450,23 @@ it.effect("notifies once for new unread inbox mail and skips backfill and repeat
     }),
   ),
 );
+
+it("leaves quota-limited bodies pending and preserves earlier downloads", async () => {
+  const rows = [1, 2, 3].map((id) => ({
+    id,
+    uid: id,
+    thread_id: "m",
+    text_part: '{"part":"1","html":false}',
+  }));
+  const fetchBody = vi
+    .fn()
+    .mockResolvedValueOnce("first")
+    .mockRejectedValueOnce(new Error("OVERQUOTA"))
+    .mockResolvedValue("resumed");
+  const first = await MailSync.downloadBodies(rows, fetchBody);
+  expect(first).toEqual({ quota: true, bodies: [{ id: 1, threadId: "m", body: "first" }] });
+  expect(fetchBody).toHaveBeenCalledTimes(2);
+  expect(
+    (await MailSync.downloadBodies(rows.slice(1), fetchBody)).bodies.map((entry) => entry.id),
+  ).toEqual([2, 3]);
+});

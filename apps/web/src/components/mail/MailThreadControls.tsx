@@ -88,7 +88,13 @@ export function MailThreadControls({
           variant="outline"
           disabled={disabled}
           onClick={() =>
-            void act([thread.id], { type: thread.suggestion ? "approve" : "settle" }, gt("Settled"))
+            void act(
+              [thread.id],
+              thread.suggestion
+                ? { type: "approve", revisions: { [thread.id]: thread.suggestion.revision } }
+                : { type: "settle" },
+              gt("Settled"),
+            )
           }
         >
           {thread.suggestion

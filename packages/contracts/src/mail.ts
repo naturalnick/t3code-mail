@@ -75,6 +75,7 @@ export const MailAddress = Schema.Struct({
 export type MailAddress = typeof MailAddress.Type;
 
 export const MailSuggestion = Schema.Struct({
+  revision: Schema.String,
   reason: MailSettleReason,
   confidence: Schema.Number,
 });
@@ -416,7 +417,10 @@ export const MailThreadAction = Schema.Union([
   }),
   Schema.Struct({ type: Schema.Literal("unsnooze") }),
   /** Accept the AI's settle proposal. Counts toward graduation. */
-  Schema.Struct({ type: Schema.Literal("approve") }),
+  Schema.Struct({
+    type: Schema.Literal("approve"),
+    revisions: Schema.Record(Schema.String, Schema.String),
+  }),
   /** "Keep in Active": refuse the proposal or an AI settle. Demotes the sender and category. */
   Schema.Struct({ type: Schema.Literal("keep") }),
   Schema.Struct({ type: Schema.Literal("never_show") }),

@@ -461,9 +461,17 @@ const make = Effect.gen(function* () {
       case "settle":
       case "approve": {
         if (thread.state === "settled") return null;
+        if (
+          action.type === "approve" &&
+          (thread.state !== "active" ||
+            thread.suggestionReason === null ||
+            action.revisions[thread.id] !== (thread.workflowVersion ?? "initial"))
+        ) {
+          return yield* invalid("The suggestion changed. Review the current mail before settling.");
+        }
         const settleReason =
           action.type === "approve"
-            ? (thread.suggestionReason ?? "fyi")
+            ? thread.suggestionReason!
             : (action.reason ?? thread.suggestionReason ?? "done");
         patch = settledPatch(now, settleReason, actor.actor);
         // Only agreeing with a pending suggestion counts toward graduation; settling mail the AI
@@ -1515,7 +1523,7 @@ const make = Effect.gen(function* () {
       const sent = yield* Effect.tryPromise({
         try: async () => {
           const raw = await buildRaw(outgoing);
-          await sendRaw(
+          const delivery = await sendRaw(
             {
               host: account.smtpHost,
               port: account.smtpPort,
@@ -1526,7 +1534,7 @@ const make = Effect.gen(function* () {
             outgoing,
             raw,
           );
-          return raw;
+          return { raw, ...delivery };
         },
         catch: (error) => classifySmtpError(error),
       }).pipe(Effect.exit);
@@ -1550,68 +1558,82 @@ const make = Effect.gen(function* () {
         [...claimed.to, ...claimed.cc].every((address) => address.trim().toLowerCase() === sender)
           ? sender
           : null;
-      yield* store.finishDraftSend(claimed.id, {
-        status: "sent",
-        error: null,
-        at: sentAt,
-        editSender,
-      });
-      const final: MailStore.DraftRecord = {
-        ...claimed,
-        status: "sent",
-        error: null,
-        sentAt,
-        updatedAt: sentAt,
-      };
-      const local = yield* store.upsertMessage({
-        accountId: account.id,
-        mailbox: "__local",
-        uid: yield* store.nextLocalSentUid,
-        messageId,
-        threadId: claimed.threadId,
-        labels: null,
-        inInbox: false,
-        from: { name: account.displayName, address: account.email },
-        to: claimed.to.map((address) => ({ name: "", address })),
-        cc: claimed.cc.map((address) => ({ name: "", address })),
-        subject: claimed.subject,
-        date: sentAt,
-        inReplyTo: outgoing.inReplyTo,
-        references: outgoing.references,
-        seen: true,
-        outgoing: true,
-        size: claimed.body.length,
-        attachments: [],
-        listUnsubscribe: false,
-        listId: null,
-        precedence: null,
-        autoSubmitted: null,
-        calendar: false,
-        textPart: null,
-      });
-      yield* store.setMessageBody(local.id, claimed.body);
-      yield* store.refreshThreadAggregate(claimed.threadId);
-      const thread = yield* store.getThread(claimed.threadId);
-      if (thread !== null && thread.state !== "settled") {
-        yield* store.patchThread(thread.id, settledPatch(sentAt, "replied", "user"));
-        yield* mirror(thread, "archive");
-      }
+      const { accepted, rejected, raw } = sent.value;
+      const partial = rejected.length > 0;
+      const deliveryDetail = partial
+        ? `SMTP accepted: ${accepted.join(", ")}. SMTP rejected: ${rejected.join(", ")}.`
+        : null;
+      const originalCc = new Set(claimed.cc.map((entry) => entry.toLowerCase()));
+      const remaining = partial
+        ? {
+            to: rejected.filter((address) => !originalCc.has(address.toLowerCase())),
+            cc: rejected.filter((address) => originalCc.has(address.toLowerCase())),
+          }
+        : undefined;
+      const final = yield* store.transaction(
+        Effect.gen(function* () {
+          const saved = yield* store.finishDraftSend(claimed.id, {
+            status: partial ? "failed" : "sent",
+            error: deliveryDetail,
+            remaining,
+            at: sentAt,
+            editSender: partial ? null : editSender,
+          });
+          if (saved === null) return yield* invalid(DRAFT_CHANGED);
+          const local = yield* store.upsertMessage({
+            accountId: account.id,
+            mailbox: "__local",
+            uid: yield* store.nextLocalSentUid,
+            messageId,
+            threadId: claimed.threadId,
+            labels: null,
+            inInbox: false,
+            from: { name: account.displayName, address: account.email },
+            to: claimed.to.map((address) => ({ name: "", address })),
+            cc: claimed.cc.map((address) => ({ name: "", address })),
+            subject: claimed.subject,
+            date: sentAt,
+            inReplyTo: outgoing.inReplyTo,
+            references: outgoing.references,
+            seen: true,
+            outgoing: true,
+            size: claimed.body.length,
+            attachments: [],
+            listUnsubscribe: false,
+            listId: null,
+            precedence: null,
+            autoSubmitted: null,
+            calendar: false,
+            textPart: null,
+          });
+          yield* store.setMessageBody(local.id, claimed.body);
+          yield* store.refreshThreadAggregate(claimed.threadId);
+          const thread = yield* store.getThread(claimed.threadId);
+          if (thread !== null && partial && thread.state !== "active") {
+            yield* store.patchThread(thread.id, activePatch(sentAt));
+          } else if (thread !== null && !partial && thread.state !== "settled") {
+            yield* store.patchThread(thread.id, settledPatch(sentAt, "replied", "user"));
+            yield* mirror(thread, "archive");
+          }
+          yield* store.insertAction({
+            at: sentAt,
+            actor: "user",
+            actorLabel: null,
+            kind: "send",
+            threadId: claimed.threadId,
+            reason: deliveryDetail,
+            undo: null,
+          });
+          if (account.provider !== "gmail") {
+            yield* sync.enqueue(account.id, {
+              kind: "append_sent",
+              raw: raw.toString("base64"),
+            });
+          }
+          return saved;
+        }),
+      );
       yield* engine.afterBodies([claimed.threadId]);
-      yield* store.insertAction({
-        at: sentAt,
-        actor: "user",
-        actorLabel: null,
-        kind: "send",
-        threadId: claimed.threadId,
-        reason: null,
-        undo: null,
-      });
-      if (account.provider !== "gmail") {
-        yield* sync.enqueue(account.id, {
-          kind: "append_sent",
-          raw: sent.value.toString("base64"),
-        });
-      }
       yield* engine.publishThreads([claimed.threadId]);
       return MailStore.draftView(final);
     },

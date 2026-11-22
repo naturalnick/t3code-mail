@@ -17,7 +17,7 @@ Choose **Add account** to start syncing. Select a **Default mail model** to get 
 
 Mail learns from consecutive approvals for a sender or category. Adjust the approval threshold or switch a sender back to **Suggest** under **Settings → Mail → Trust**. For an explicit rule, use **Rules → Add rule → Dry run** to preview matches before saving.
 
-Open a thread and choose **Draft reply**, or ask an agent for a draft with **Start mail chat**. Select **Review and send** to check the recipients and text, then **Approve and send**.
+Open a thread and choose **Draft reply**, or ask an agent for a draft with **Start mail chat**. Select **Review and send** to check the recipients and text, then **Approve and send**. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next approval.
 
 ## Use the CLI or an MCP agent
 
