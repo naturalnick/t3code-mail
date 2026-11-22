@@ -13,7 +13,6 @@ import {
   type MailSettleReason,
   type MailThreadRow,
   type MailThreadState,
-  type MailTrustLevel,
   type MailWorkingReason,
   MailAccountId,
   MailDraftId,
@@ -349,6 +348,13 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       WHERE incoming_count = 0 AND message_count > 0
         AND EXISTS (SELECT 1 FROM mail_messages WHERE thread_id = mail_threads.id AND removed = 0)`,
   ],
+  [
+    // Approvals no longer graduate a sender or category; only the user's rules settle alone.
+    `UPDATE mail_trust SET trust = 'suggest' WHERE trust = 'auto'`,
+    `ALTER TABLE mail_trust DROP COLUMN streak`,
+    `ALTER TABLE mail_trust DROP COLUMN explicit`,
+    `ALTER TABLE mail_trust DROP COLUMN bulk`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -434,6 +440,10 @@ export interface ThreadVerdict {
   /** The model's one-line reason; absent on rules and older verdicts. */
   readonly why?: string | null;
   readonly by?: MailDecidedBy | null;
+  /** The user's rule that matched: exactly, or by the model reading its condition. */
+  readonly ruleId?: string | null;
+  /** The model's short name for this type of email, offered as a new rule's condition. */
+  readonly kind?: string | null;
 }
 
 export interface ThreadRecord {
@@ -669,6 +679,7 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
     // A verdict on older mail would explain a decision the newest mail hasn't had yet.
     why: thread.triageState === "done" ? (thread.verdict?.why ?? null) : null,
     decidedBy: thread.triageState === "done" ? (thread.verdict?.by ?? null) : null,
+    ruleId: thread.triageState === "done" ? (thread.verdict?.ruleId ?? null) : null,
   };
 }
 
@@ -727,10 +738,8 @@ const toTrust = (row: Row): TrustRecord => ({
   reason: strOrNull(row.reason) as MailSettleReason | null,
   approvals: num(row.approvals),
   rejections: num(row.rejections),
-  streak: num(row.streak),
-  trust: str(row.trust) as MailTrustLevel,
-  explicit: bool(row.explicit),
-  bulk: row.bulk === null || row.bulk === undefined ? null : bool(row.bulk),
+  // Earned "auto" trust no longer exists; only Never show still settles a sender.
+  trust: str(row.trust) === "never" ? "never" : "suggest",
 });
 
 const toAction = (row: Row): ActionRecord => ({
@@ -1446,14 +1455,18 @@ const makeStore = (sql: SqlClient.SqlClient) => {
 
   const settledPage = (input: {
     readonly before: { readonly at: string; readonly id: string } | undefined;
-    readonly reason: MailSettleReason | undefined;
-    readonly byAi: boolean | undefined;
+    readonly by: "ai" | "rule" | "user" | undefined;
     readonly limit: number;
   }) =>
     sql<Row>`SELECT * FROM mail_threads WHERE state = 'settled'
         ${input.before ? sql`AND (last_message_at, id) < (${input.before.at}, ${input.before.id})` : sql``}
-        ${input.reason ? sql`AND settled_reason = ${input.reason}` : sql``}
-        ${input.byAi === true ? sql`AND settled_by = 'ai'` : sql``}
+        ${
+          input.by === undefined
+            ? sql``
+            : input.by === "user"
+              ? sql`AND settled_by NOT IN ('ai', 'rule')`
+              : sql`AND settled_by = ${input.by}`
+        }
       ORDER BY last_message_at DESC, id DESC LIMIT ${input.limit + 1}`.pipe(
       Effect.map((rows) => ({
         threads: rows.slice(0, input.limit).map(toThread),
@@ -1632,13 +1645,11 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       Effect.map((rows) => rows[0]!),
     );
   const putTrust = (record: TrustRecord, now: string) =>
-    sql`INSERT INTO mail_trust (key, kind, reason, approvals, rejections, streak, trust, explicit, bulk, updated_at)
+    sql`INSERT INTO mail_trust (key, kind, reason, approvals, rejections, trust, updated_at)
       VALUES (${record.key}, ${record.kind}, ${record.reason}, ${record.approvals},
-        ${record.rejections}, ${record.streak}, ${record.trust}, ${record.explicit ? 1 : 0},
-        ${record.bulk === null ? null : record.bulk ? 1 : 0}, ${now})
+        ${record.rejections}, ${record.trust}, ${now})
       ON CONFLICT (key) DO UPDATE SET reason = excluded.reason, approvals = excluded.approvals,
-        rejections = excluded.rejections, streak = excluded.streak, trust = excluded.trust,
-        explicit = excluded.explicit, bulk = excluded.bulk, updated_at = excluded.updated_at`.pipe(
+        rejections = excluded.rejections, trust = excluded.trust, updated_at = excluded.updated_at`.pipe(
       Effect.asVoid,
     );
   const deleteTrust = (key: string) =>

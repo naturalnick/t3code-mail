@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
   MailDraft,
+  MailRule,
   MailThreadDetail,
   MailThreadId,
   MailThreadRow,
@@ -18,10 +19,11 @@ import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { mailEnvironment } from "../../state/mail";
+import { mailEnvironment, useMailStatus } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
 import { formatDateTimeTimestamp } from "../../timestampFormat";
 import { useMailCommand } from "../settings/MailSettings.commands";
+import { newRule, RuleDialog, useRuleSummary, useSaveRule } from "../settings/MailSettings.rules";
 import { Button } from "../ui/button";
 import { MailChatAside } from "./MailChatPanel";
 import { type ComposeTask, MailComposer } from "./MailComposer";
@@ -41,7 +43,6 @@ import {
   guardrailLabel,
   nudgeLabel,
   senderName,
-  settleReasonLabel,
 } from "./mailPresentation";
 import { MailNewEmail } from "./MailNewEmail";
 import { MailPage } from "./MailPage";
@@ -135,9 +136,23 @@ function MailThreadDetails({
   const aiOff = aiEntry !== null;
   const decision = mailDecision(thread);
   const nudge = nudgeLabel(thread.nudge, resolve);
+  const rules = useMailStatus(environmentId)?.settings.rules ?? [];
+  const rule = thread.ruleId ? (rules.find((entry) => entry.id === thread.ruleId) ?? null) : null;
+  const summary = useRuleSummary();
+  const saveRule = useSaveRule(environmentId);
+  const [ruleEditor, setRuleEditor] = useState<{ rule: MailRule; creating: boolean } | null>(null);
+  const suggestion = thread.state === "active" ? thread.suggestion : null;
+  const approve = () =>
+    suggestion
+      ? act(
+          [thread.id],
+          { type: "approve", revisions: { [thread.id]: suggestion.revision } },
+          gt("Settled"),
+        )
+      : Promise.resolve(false);
   const status =
-    thread.state === "settled" && thread.settledReason
-      ? gt("Settled as {reason}", { reason: settleReasonLabel(thread.settledReason, resolve) })
+    thread.state === "settled"
+      ? gt("Settled", { $context: "email state" })
       : thread.state === "snoozed"
         ? thread.snoozedUntil
           ? gt("Snoozed until {time}", {
@@ -155,9 +170,9 @@ function MailThreadDetails({
     decision !== null ||
     nudge !== null ||
     thread.injectionWarning ||
-    thread.suggestion !== null ||
+    suggestion !== null ||
+    rule !== null ||
     thread.suggestedAction !== null ||
-    thread.guardrail !== null ||
     account !== null;
   return (
     <>
@@ -174,12 +189,14 @@ function MailThreadDetails({
                     decidedBy={thread.decidedBy}
                   />
                 </span>
-                {decision.actor === "rule"
-                  ? thread.state === "settled"
-                    ? gt("Settled by your rule")
-                    : gt("Suggested by your rule")
-                  : (decision.why ??
-                    (thread.state === "settled" ? gt("Settled by AI") : gt("Suggested by AI")))}
+                {decision.why ??
+                  (decision.actor === "rule"
+                    ? thread.state === "settled"
+                      ? gt("Settled by your rule")
+                      : gt("Suggested by your rule")
+                    : thread.state === "settled"
+                      ? gt("Settled by AI")
+                      : gt("Suggested by AI"))}
               </p>
             ) : null}
             {aiOff ? (
@@ -207,35 +224,58 @@ function MailThreadDetails({
                 {gt("This email reads like instructions to an AI.")}
               </p>
             ) : null}
-            {thread.suggestion ? (
+            {rule ? (
               <div className="flex items-center justify-between gap-2">
-                <p className="min-w-0">
-                  {gt("Suggests settling as {reason}", {
-                    reason: settleReasonLabel(thread.suggestion.reason, resolve),
-                  })}
+                <p className="min-w-0 text-muted-foreground">
+                  {gt("Your rule: {rule}", { rule: rule.when ?? summary(rule).scope })}
                 </p>
                 <Button
                   size="compact"
                   variant="outline"
-                  disabled={disabled}
-                  onClick={() => void act([thread.id], { type: "keep" }, gt("Kept in Active"))}
+                  disabled={saveRule.disabled}
+                  onClick={() => setRuleEditor({ rule, creating: false })}
                 >
-                  {gt("Keep in Active")}
+                  {gt("Edit rule")}
                 </Button>
               </div>
             ) : null}
-            {thread.suggestedAction ? (
+            {suggestion && rule && thread.guardrail ? (
+              <p className="text-xs text-muted-foreground">
+                {gt("Mail asks first: {reason}", {
+                  reason: guardrailLabel(thread.guardrail, resolve),
+                })}
+              </p>
+            ) : null}
+            {suggestion ? (
+              <div className="flex flex-wrap gap-2">
+                <Button size="compact" disabled={disabled} onClick={() => void approve()}>
+                  {gt("Settle")}
+                </Button>
+                {rule ? null : (
+                  <Button
+                    size="compact"
+                    variant="outline"
+                    disabled={saveRule.disabled}
+                    onClick={() =>
+                      setRuleEditor({
+                        creating: true,
+                        rule: newRule({
+                          match: { from: thread.from.address },
+                          when: detail?.kind ?? "",
+                          reason: suggestion.reason,
+                        }),
+                      })
+                    }
+                  >
+                    {gt("Auto-settle…")}
+                  </Button>
+                )}
+              </div>
+            ) : thread.suggestedAction ? (
               <dl>
                 <dt className="text-xs text-muted-foreground">{gt("Suggested next step")}</dt>
                 <dd>{thread.suggestedAction}</dd>
               </dl>
-            ) : null}
-            {thread.guardrail ? (
-              <p className="text-xs text-muted-foreground">
-                {gt("Mail normally asks for review before settling messages marked “{reason}”.", {
-                  reason: guardrailLabel(thread.guardrail, resolve),
-                })}
-              </p>
             ) : null}
             {account ? (
               <dl>
@@ -245,6 +285,21 @@ function MailThreadDetails({
             ) : null}
           </div>
         </DetailsSection>
+      ) : null}
+      {ruleEditor ? (
+        <RuleDialog
+          environmentId={environmentId}
+          initial={ruleEditor.rule}
+          title={ruleEditor.creating ? gt("Auto-settle") : gt("Edit rule")}
+          {...(ruleEditor.creating && suggestion ? { saveLabel: gt("Save and settle") } : {})}
+          disabled={saveRule.disabled}
+          onClose={() => setRuleEditor(null)}
+          onSave={async (saved) => {
+            if (!(await saveRule.run(rules, saved))) return;
+            setRuleEditor(null);
+            if (ruleEditor.creating) void approve();
+          }}
+        />
       ) : null}
       {detail && detail.related.length > 0 ? (
         <DetailsSection title={gt("Related mail")}>

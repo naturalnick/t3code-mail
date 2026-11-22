@@ -22,19 +22,20 @@ const reviewReason: Record<MailGuardrail, string> = {
   urgent: "This was flagged as urgent.",
 };
 
-export function triageOutcome(decision: TrustDecision, guardrail: MailGuardrail | null) {
+export function triageOutcome(
+  decision: TrustDecision,
+  guardrail: MailGuardrail | null,
+  rule: string | null = null,
+) {
   if (decision.type === "keep")
     return guardrail ? `Kept in Active. ${reviewReason[guardrail]}` : "Kept in Active.";
   const reason = decision.reason === "fyi" ? "FYI" : decision.reason;
+  const ruleNote = rule ? ` Your rule: "${rule}".` : "";
   if (decision.type === "suggest")
-    return `Suggested settling as ${reason}. ${guardrail ? reviewReason[guardrail] + " " : ""}Left in Active for your review.`;
-  const via = {
-    sender: "because you approved settling this sender's mail",
-    category: "because you approved settling this kind of mail",
-    rule: "by your mail rule",
-    never_show: "by your Never Show preference",
-  }[decision.via];
-  return `Settled as ${reason} ${via}.`;
+    return `Suggested settling as ${reason}.${ruleNote} ${guardrail ? reviewReason[guardrail] + " " : ""}Left in Active for your review.`;
+  return decision.via === "never_show"
+    ? `Settled as ${reason} by your Never Show preference.`
+    : `Settled as ${reason} by your mail rule.${ruleNote}`;
 }
 
 export function triageText(

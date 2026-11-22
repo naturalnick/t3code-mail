@@ -1,9 +1,4 @@
-import type {
-  MailActionEntry,
-  MailAddress,
-  MailGuardrail,
-  MailSettleReason,
-} from "@t3tools/contracts";
+import type { MailActionEntry, MailAddress, MailGuardrail } from "@t3tools/contracts";
 import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "../../i18n/messages";
@@ -12,24 +7,7 @@ export function senderName(from: MailAddress): string {
   return from.name.trim() || from.address;
 }
 
-export function settleReasonLabel(reason: MailSettleReason, resolve: MessageResolver = m): string {
-  switch (reason) {
-    case "fyi":
-      return resolve(msg("FYI", { $context: "email settle reason: read, nothing to do" }));
-    case "receipt":
-      return resolve(msg("Receipt", { $context: "email settle reason" }));
-    case "noise":
-      return resolve(msg("Noise", { $context: "email settle reason: unwanted mail" }));
-    case "replied":
-      return resolve(msg("Replied", { $context: "email settle reason" }));
-    case "done":
-      return resolve(msg("Done", { $context: "email settle reason" }));
-    case "archived":
-      return resolve(msg("Archived", { $context: "email settle reason: archived elsewhere" }));
-  }
-}
-
-/** Why the AI asks before settling this one, even for a trusted sender. */
+/** Why Mail asks before settling this one, even when a rule covers it. */
 export function guardrailLabel(guardrail: MailGuardrail, resolve: MessageResolver = m): string {
   switch (guardrail) {
     case "replied_to":
@@ -61,20 +39,14 @@ export function nudgeLabel(code: string | null, resolve: MessageResolver = m): s
 }
 
 export function actionLabel(action: MailActionEntry, resolve: MessageResolver = m): string {
-  const reason =
-    action.reason && isSettleReason(action.reason)
-      ? settleReasonLabel(action.reason, resolve)
-      : null;
   switch (action.kind) {
     case "settle":
     case "approve":
-      return reason
-        ? resolve(msg("Settled as {reason}", { reason }))
-        : resolve(msg("Settled", { $context: "email action log" }));
+      return resolve(msg("Settled", { $context: "email action log" }));
     case "unsettle":
       return resolve(msg("Moved back to Active"));
     case "reject":
-      return resolve(msg("Kept in Active"));
+      return resolve(msg("Dismissed suggestion"));
     case "never_show":
       return resolve(msg("Never show this sender"));
     case "pin":
@@ -105,9 +77,7 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "returned":
       return resolve(msg("Returned to Active"));
     case "propose":
-      return reason
-        ? resolve(msg("Proposed settling as {reason}", { reason }))
-        : resolve(msg("Proposed settling"));
+      return resolve(msg("Suggested settling"));
   }
 }
 
@@ -124,12 +94,6 @@ export function actorLabel(action: MailActionEntry, resolve: MessageResolver = m
     case "mail":
       return resolve(msg("Mail", { $context: "who acted on an email: the app itself" }));
   }
-}
-
-const SETTLE_REASONS = new Set<string>(["fyi", "receipt", "noise", "replied", "done", "archived"]);
-
-function isSettleReason(value: string): value is MailSettleReason {
-  return SETTLE_REASONS.has(value);
 }
 
 /** A reply's subject: `Re:` once, never stacked. */

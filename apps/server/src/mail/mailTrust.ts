@@ -1,17 +1,16 @@
 import type { MailGuardrail, MailSettleReason, MailTrustLevel } from "@t3tools/contracts";
 
-/** The stored settle-memory record for one sender or category key. */
+/**
+ * What Mail remembers about how the user answered a sender's or category's suggestions. The
+ * model reads it as a fact; it never settles anything by itself. "never" is Never show.
+ */
 export interface TrustRecord {
   readonly key: string;
   readonly kind: "sender" | "category";
   readonly reason: MailSettleReason | null;
   readonly approvals: number;
   readonly rejections: number;
-  readonly streak: number;
   readonly trust: MailTrustLevel;
-  readonly explicit: boolean;
-  /** The bulk shape (list mail or not) of the mail the sender graduated on. */
-  readonly bulk: boolean | null;
 }
 
 export interface TrustVerdict {
@@ -20,11 +19,17 @@ export interface TrustVerdict {
   readonly confidence: number;
 }
 
+export interface RuleDecision {
+  readonly action: "settle" | "keep" | "never_show";
+  readonly reason: MailSettleReason;
+  readonly sensitive: boolean;
+}
+
 export type TrustDecision =
   | {
       readonly type: "auto_settle";
       readonly reason: MailSettleReason;
-      readonly via: "sender" | "category" | "never_show" | "rule";
+      readonly via: "never_show" | "rule";
     }
   | { readonly type: "suggest"; readonly reason: MailSettleReason; readonly confidence: number }
   | { readonly type: "keep" };
@@ -38,84 +43,48 @@ export interface DecideInput {
   readonly verdict: TrustVerdict;
   readonly guardrail: MailGuardrail | null;
   readonly sender: TrustRecord | null;
-  readonly category: TrustRecord | null;
-  readonly rule: {
-    readonly action: "settle" | "keep" | "never_show";
-    readonly reason: MailSettleReason;
-  } | null;
+  /** A rule without a condition that matched exactly; it skipped the model. */
+  readonly rule: RuleDecision | null;
+  /** A rule whose plain-language condition the model said this email meets. */
+  readonly conditional: RuleDecision | null;
 }
 
-/** Trust is earned per sender and category; guardrails and low confidence always ask first. */
+/** Only the user's rules settle on their own; the model alone only suggests. */
 export function decide(input: DecideInput): TrustDecision {
-  const { verdict, guardrail, sender, category, rule } = input;
+  const { verdict, guardrail, sender, rule, conditional } = input;
   if (sender?.trust === "never" || rule?.action === "never_show") {
     return { type: "auto_settle", reason: "noise", via: "never_show" };
   }
   if (rule?.action === "keep") return { type: "keep" };
-  const explicitlyTrusted = sender?.trust === "auto" && sender.explicit;
   if (rule?.action === "settle") {
     // A broad rule ("settle everything from this domain") still asks about an invoice.
-    return guardrail === null || explicitlyTrusted
+    return guardrail === null || rule.sensitive
       ? { type: "auto_settle", reason: rule.reason, via: "rule" }
       : { type: "suggest", reason: rule.reason, confidence: 1 };
   }
-  if (verdict.decision === "keep") return { type: "keep" };
-  const reason = verdict.reason ?? sender?.reason ?? category?.reason ?? "fyi";
+  if (verdict.decision === "keep" || conditional?.action === "keep") return { type: "keep" };
+  const reason = conditional?.reason ?? verdict.reason ?? sender?.reason ?? "fyi";
   const suggest: TrustDecision = { type: "suggest", reason, confidence: verdict.confidence };
-  if (verdict.confidence < LOW_CONFIDENCE) return suggest;
-  if (guardrail !== null) {
-    return explicitlyTrusted ? { type: "auto_settle", reason, via: "sender" } : suggest;
-  }
-  if (sender?.trust === "auto") return { type: "auto_settle", reason, via: "sender" };
-  // A sender the user just corrected stays in suggest mode even inside a trusted category.
-  const senderDemoted = sender?.trust === "suggest" && (sender.explicit || sender.rejections > 0);
-  if (category?.trust === "auto" && !senderDemoted) {
-    return { type: "auto_settle", reason, via: "category" };
-  }
-  return suggest;
+  if (conditional?.action !== "settle" || verdict.confidence < LOW_CONFIDENCE) return suggest;
+  return guardrail === null || conditional.sensitive
+    ? { type: "auto_settle", reason, via: "rule" }
+    : suggest;
 }
 
 export function emptyRecord(key: string, kind: TrustRecord["kind"]): TrustRecord {
-  return {
-    key,
-    kind,
-    reason: null,
-    approvals: 0,
-    rejections: 0,
-    streak: 0,
-    trust: "suggest",
-    explicit: false,
-    bulk: null,
-  };
+  return { key, kind, reason: null, approvals: 0, rejections: 0, trust: "suggest" };
 }
 
-/** One approved settle. N in a row with no rejection graduates the key. */
 export function recordApproval(
   record: TrustRecord,
-  input: { readonly threshold: number; readonly reason: MailSettleReason; readonly bulk: boolean },
+  input: { readonly reason: MailSettleReason },
 ): TrustRecord {
-  const streak = record.streak + 1;
-  const graduates = record.trust === "suggest" && streak >= input.threshold;
-  return {
-    ...record,
-    approvals: record.approvals + 1,
-    streak,
-    reason: input.reason,
-    trust: graduates ? "auto" : record.trust,
-    explicit: graduates ? false : record.explicit,
-    bulk: graduates ? input.bulk : record.bulk,
-  };
+  return { ...record, approvals: record.approvals + 1, reason: input.reason };
 }
 
-/** An undo or "keep in Active" drops the key back to suggest mode and restarts its count. */
+/** A dismissed suggestion or a settle the user took back. It also ends Never show. */
 export function recordRejection(record: TrustRecord): TrustRecord {
-  return {
-    ...record,
-    rejections: record.rejections + 1,
-    streak: 0,
-    trust: "suggest",
-    explicit: false,
-  };
+  return { ...record, rejections: record.rejections + 1, trust: "suggest" };
 }
 
 export interface TrustClock {
@@ -158,24 +127,13 @@ export function reverseTrust(
 ): TrustRecord {
   if (previous.reset !== latest.reset) return current;
   const approvals = Math.max(0, current.approvals - (effect === "approve" ? 1 : 0));
-  const rejections = Math.max(0, current.rejections - (effect === "reject" ? 1 : 0));
-  if (previous.setting !== latest.setting) return { ...current, approvals, rejections };
-  return {
-    ...current,
-    approvals,
-    rejections: rejections + (effect === "ai_settle" ? 1 : 0),
-    streak: 0,
-    trust: "suggest",
-    explicit: false,
-  };
+  const rejections =
+    Math.max(0, current.rejections - (effect === "reject" ? 1 : 0)) +
+    (effect === "ai_settle" ? 1 : 0);
+  return { ...current, approvals, rejections };
 }
 
 export function setLevel(record: TrustRecord, level: MailTrustLevel | "reset"): TrustRecord {
   if (level === "reset") return emptyRecord(record.key, record.kind);
-  return {
-    ...record,
-    trust: level,
-    explicit: true,
-    streak: level === "suggest" ? 0 : record.streak,
-  };
+  return { ...record, trust: level };
 }

@@ -8,21 +8,31 @@ import {
 } from "@t3tools/contracts";
 import { insertToneNotes, mailUsageShare, normalizeRule } from "./MailSettings.logic";
 
-it("requires a match and drops empty fields before previewing or saving", () => {
+it("requires a scope or a condition and drops empty fields before previewing or saving", () => {
   const rule: MailRule = {
     id: "rule",
     enabled: false,
     match: { from: "  " },
+    when: " ",
     action: "settle",
     reason: "fyi",
+    sensitive: false,
   };
+  const { when: _when, sensitive: _sensitive, ...bare } = rule;
   expect(normalizeRule(rule)).toBeNull();
   expect(
     normalizeRule({ ...rule, match: { from: " ", domain: " example.org ", listId: "list" } }),
-  ).toEqual({
-    ...rule,
-    match: { domain: "example.org", listId: "list" },
+  ).toEqual({ ...bare, match: { domain: "example.org", listId: "list" } });
+  expect(normalizeRule({ ...rule, when: " Shipping updates ", sensitive: true })).toEqual({
+    ...bare,
+    match: {},
+    when: "Shipping updates",
+    sensitive: true,
   });
+  // Never show takes no condition and can't be sensitive.
+  expect(
+    normalizeRule({ ...rule, action: "never_show", when: "Promotions", sensitive: true }),
+  ).toBeNull();
 });
 
 it("adds voice notes within the existing tone section or creates one", () => {

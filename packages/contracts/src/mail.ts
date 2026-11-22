@@ -111,7 +111,7 @@ export const MailThreadRow = Schema.Struct({
   settledBy: Schema.NullOr(MailActor),
   snoozedUntil: Schema.NullOr(IsoDateTime),
   snoozeOnReply: Schema.Boolean,
-  /** A pending "settle?" proposal while the sender or category is in suggest mode. */
+  /** A pending "settle?" proposal the user hasn't answered. */
   suggestion: Schema.NullOr(MailSuggestion),
   category: Schema.NullOr(MailCategory),
   guardrail: Schema.NullOr(MailGuardrail),
@@ -124,6 +124,8 @@ export const MailThreadRow = Schema.Struct({
   /** The model's one-line reason for its decision on the newest mail; null until it has one. */
   why: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   decidedBy: Schema.NullOr(MailDecidedBy).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
+  /** The user's rule that settled or proposed it, so the client can open that rule. */
+  ruleId: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
 });
 export type MailThreadRow = typeof MailThreadRow.Type;
 
@@ -255,6 +257,8 @@ export const MailThreadDetail = Schema.Struct({
       source: Schema.Literals(["rule", "memory", "model", "escalated"]),
     }),
   ),
+  /** The model's short name for this type of email, such as "Amazon shipping updates". */
+  kind: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
 });
 export type MailThreadDetail = typeof MailThreadDetail.Type;
 
@@ -305,8 +309,16 @@ export const MailRule = Schema.Struct({
     subjectContains: Schema.optionalKey(TrimmedString),
     listId: Schema.optionalKey(TrimmedString),
   }),
+  /**
+   * Plain-language condition the mail model checks within the match scope, such as "Shipping
+   * updates. Keep delivery confirmations." Without one, the rule applies to every match and
+   * skips the model.
+   */
+  when: Schema.optionalKey(TrimmedString.check(Schema.isMaxLength(300))),
   action: MailRuleAction,
   reason: MailSettleReason,
+  /** Also settles mail Mail normally asks about: money, security, legal, urgent, people you write to. */
+  sensitive: Schema.optionalKey(Schema.Boolean),
 });
 export type MailRule = typeof MailRule.Type;
 
@@ -314,7 +326,6 @@ export const MailSettings = Schema.Struct({
   defaultModelSelection: Schema.NullOr(ModelSelection),
   /** A smarter model for low-confidence verdicts and senders who matter. Null keeps them as suggestions. */
   escalationModelSelection: Schema.NullOr(ModelSelection),
-  trustThreshold: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 })),
   /** Estimated tokens per week. Null means no cap. */
   weeklyTokenCap: Schema.NullOr(NonNegativeInt),
   serverMirroring: Schema.Boolean,
@@ -331,7 +342,8 @@ export const MailSettings = Schema.Struct({
 });
 export type MailSettings = typeof MailSettings.Type;
 
-export const MailTrustLevel = Schema.Literals(["suggest", "auto", "never"]);
+/** "never" is Never show for a sender. Nothing settles on its own without a rule. */
+export const MailTrustLevel = Schema.Literals(["suggest", "never"]);
 export type MailTrustLevel = typeof MailTrustLevel.Type;
 
 export const MailTrustRecord = Schema.Struct({
@@ -341,10 +353,7 @@ export const MailTrustRecord = Schema.Struct({
   reason: Schema.NullOr(MailSettleReason),
   approvals: NonNegativeInt,
   rejections: NonNegativeInt,
-  streak: NonNegativeInt,
   trust: MailTrustLevel,
-  /** The user set this level by hand, which also lifts guardrails for an auto sender. */
-  explicit: Schema.Boolean,
   updatedAt: IsoDateTime,
 });
 export type MailTrustRecord = typeof MailTrustRecord.Type;
@@ -448,8 +457,8 @@ export const MailThreadInput = Schema.Struct({ threadId: MailThreadId });
 
 export const MailListSettledInput = Schema.Struct({
   before: Schema.optionalKey(Schema.Struct({ at: IsoDateTime, id: MailThreadId })),
-  reason: Schema.optionalKey(MailSettleReason),
-  byAi: Schema.optionalKey(Schema.Boolean),
+  /** Who settled it: the AI on its own, one of the user's rules, or the user. */
+  by: Schema.optionalKey(Schema.Literals(["ai", "rule", "user"])),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
 });
 export const MailThreadPage = Schema.Struct({
@@ -479,12 +488,12 @@ export const MailThreadAction = Schema.Union([
     onReply: Schema.Boolean,
   }),
   Schema.Struct({ type: Schema.Literal("unsnooze") }),
-  /** Accept the AI's settle proposal. Counts toward graduation. */
+  /** Accept the AI's settle proposal. */
   Schema.Struct({
     type: Schema.Literal("approve"),
     revisions: Schema.Record(Schema.String, Schema.String),
   }),
-  /** "Keep in Active": refuse the proposal or an AI settle. Demotes the sender and category. */
+  /** Dismiss the proposal, or refuse an AI settle. The model hears about it next time. */
   Schema.Struct({ type: Schema.Literal("keep") }),
   Schema.Struct({ type: Schema.Literal("never_show") }),
   Schema.Struct({ type: Schema.Literal("mark_read") }),
@@ -602,7 +611,6 @@ export const MailSyncInput = Schema.Struct({ accountId: Schema.optionalKey(MailA
 export const MailUpdateSettingsInput = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   escalationModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
-  trustThreshold: Schema.optionalKey(MailSettings.fields.trustThreshold),
   weeklyTokenCap: Schema.optionalKey(MailSettings.fields.weeklyTokenCap),
   serverMirroring: Schema.optionalKey(Schema.Boolean),
   recapEnabled: Schema.optionalKey(Schema.Boolean),
@@ -617,7 +625,7 @@ export const MailUpdateSettingsInput = Schema.Struct({
 export const MailTrustList = Schema.Struct({ records: Schema.Array(MailTrustRecord) });
 export const MailSetTrustInput = Schema.Struct({
   key: TrimmedNonEmptyString,
-  trust: Schema.Literals(["suggest", "auto", "never", "reset"]),
+  trust: Schema.Literals(["suggest", "never", "reset"]),
 });
 
 export const MailEmailMd = Schema.Struct({ path: Schema.String, content: Schema.String });

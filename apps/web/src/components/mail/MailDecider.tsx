@@ -40,8 +40,8 @@ const iconEntriesAtom = Atom.family((environmentId: EnvironmentId) =>
 );
 
 /**
- * Who sorted an email: the model's own icon, or a filter icon for the user's rules. A model this
- * environment no longer lists falls back to a generic bot.
+ * Who sorted an email: the model's own icon, or a filter icon for a rule no model read. A model
+ * this environment no longer lists falls back to a generic bot.
  */
 export function MailDecider({
   environmentId,
@@ -54,7 +54,8 @@ export function MailDecider({
 }) {
   const gt = useGT();
   const entries = useAtomValue(iconEntriesAtom(environmentId));
-  if (actor === "rule") {
+  // A rule with a condition was read by a model, so it shows that model like any other.
+  if (actor === "rule" && decidedBy === null) {
     return <ListFilterIcon aria-label={gt("Your rule")} className="size-3 shrink-0" />;
   }
   const entry = decidedBy === null ? undefined : entries.get(decidedBy.instanceId);

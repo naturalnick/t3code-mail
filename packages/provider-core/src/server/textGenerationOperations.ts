@@ -33,6 +33,8 @@ export const MailTriageOutput = Schema.Struct({
       confidence: Schema.Number,
       urgent: Schema.Boolean,
       injection: Schema.Boolean,
+      rule: Schema.String,
+      kind: Schema.String,
     }),
   ),
 });

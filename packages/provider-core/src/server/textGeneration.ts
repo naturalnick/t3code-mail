@@ -131,6 +131,10 @@ export interface MailTriageVerdict {
   confidence: number;
   urgent: boolean;
   injection: boolean;
+  /** The prompt's key for the user's rule this email meets, or "". */
+  rule: string;
+  /** A short plural name for this type of email. */
+  kind: string;
 }
 
 export interface MailTriageGenerationResult {

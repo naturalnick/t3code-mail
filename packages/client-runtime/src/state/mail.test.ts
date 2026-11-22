@@ -31,6 +31,7 @@ const row = (id: string, patch: Partial<MailThreadRow>): MailThreadRow => ({
   triagePending: false,
   why: null,
   decidedBy: null,
+  ruleId: null,
   ...patch,
 });
 

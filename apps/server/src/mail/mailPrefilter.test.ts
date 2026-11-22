@@ -111,7 +111,45 @@ describe("prefilter", () => {
       id: "acme",
       action: "settle",
       reason: "receipt",
+      sensitive: false,
     });
     expect(prefilter({ ...base, fromAddress: "x@notacme.dev" }, rules).rule).toBeNull();
+  });
+
+  it("leaves rules with a condition to the model, in scope only, unless an exact rule decides", () => {
+    const shipping: MailRule = {
+      id: "shipping",
+      enabled: true,
+      match: { domain: "shop.dev" },
+      when: "Shipping updates. Keep delivery confirmations.",
+      action: "settle",
+      reason: "fyi",
+    };
+    const anywhere: MailRule = {
+      id: "promos",
+      enabled: true,
+      match: {},
+      when: "Promotions",
+      action: "settle",
+      reason: "noise",
+      sensitive: true,
+    };
+    const shop = { ...base, fromAddress: "orders@shop.dev" };
+    expect(prefilter(shop, [shipping, anywhere])).toMatchObject({
+      rule: null,
+      conditional: [
+        { id: "shipping", when: shipping.when, sensitive: false },
+        { id: "promos", sensitive: true },
+      ],
+    });
+    expect(prefilter({ ...base, fromAddress: "x@other.dev" }, [shipping]).conditional).toEqual([]);
+    const { when: _when, ...unconditional } = shipping;
+    const exact: MailRule = { ...unconditional, id: "all-shop" };
+    expect(prefilter(shop, [shipping, exact])).toMatchObject({
+      rule: { id: "all-shop" },
+      conditional: [],
+    });
+    // A rule needs a scope or a condition.
+    expect(prefilter(shop, [{ ...exact, match: {} }]).rule).toBeNull();
   });
 });

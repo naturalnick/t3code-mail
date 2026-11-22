@@ -19,7 +19,6 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useEnvironmentScope } from "../../state/session";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { NumberField, NumberFieldGroup, NumberFieldInput } from "../ui/number-field";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
@@ -186,51 +185,19 @@ function NumericSetting({
   );
 }
 
-const trustLevels = { auto: msg("Auto"), suggest: msg("Suggest"), never: msg("Never") };
-const trustActions = [
-  ["auto", msg("Promote")],
-  ["suggest", msg("Suggest")],
-  ["never", msg("Never")],
-  ["reset", msg("Reset")],
-] as const;
-
-function MailTrust({ environmentId, settings }: SettingsProps) {
+/** Senders muted with Never show. Showing one again is the only way back, so it lives here. */
+function HiddenSenders({ environmentId }: { environmentId: EnvironmentId }) {
   const gt = useGT();
-  const m = useMessages();
   const searchable = useSearchableSetting();
   const query = useEnvironmentQuery(mailEnvironment.trust({ environmentId, input: {} }));
-  const save = useMailCommand(
-    environmentId,
-    mailEnvironment.updateSettings,
-    gt("Could not save trust threshold"),
-  );
   const change = useMailCommand(
     environmentId,
     mailEnvironment.setTrust,
-    gt("Could not update trust"),
+    gt("Could not show this sender again"),
   );
-  const threshold = gt("Consecutive approvals before auto-settle");
+  const hidden = query.data?.records.filter((record) => record.trust === "never") ?? [];
   return (
-    <SettingsSection {...searchable("mail-trust")}>
-      <SettingsRow
-        title={threshold}
-        description={gt(
-          "Manually promoting a sender lets their mail auto-settle even when a guardrail applies.",
-        )}
-        control={
-          <NumericSetting
-            key={settings.trustThreshold}
-            label={threshold}
-            min={1}
-            max={50}
-            disabled={save.disabled}
-            value={settings.trustThreshold}
-            onSave={(n) => {
-              if (n !== null) void save.run({ trustThreshold: n });
-            }}
-          />
-        }
-      />
+    <SettingsSection {...searchable("mail-hidden")}>
       {query.error ? (
         <SettingsRow
           title={query.error}
@@ -240,75 +207,27 @@ function MailTrust({ environmentId, settings }: SettingsProps) {
             </Button>
           }
         />
-      ) : !query.data?.records.length ? (
-        <SettingsRow
-          title={query.data ? gt("No trust records yet") : gt("Loading trust records…")}
-        />
+      ) : hidden.length === 0 ? (
+        <SettingsRow title={query.data ? gt("No hidden senders") : gt("Loading…")} />
       ) : (
-        <div className="overflow-x-auto px-3 py-2 sm:px-4">
-          <table className="w-full text-start text-xs">
-            <thead className="text-muted-foreground">
-              <tr>
-                {[
-                  gt("Sender or category"),
-                  gt("Level"),
-                  gt("Approvals"),
-                  gt("Rejections"),
-                  gt("Streak"),
-                  gt("Actions"),
-                ].map((label) => (
-                  <th key={label} scope="col" className="px-1 py-2 text-start font-medium">
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {query.data.records.map((record) => (
-                <tr key={record.key} className="border-t border-border/50">
-                  <th scope="row" className="px-1 py-2 text-start font-medium">
-                    {record.label}
-                    <div className="font-normal text-muted-foreground">
-                      {record.kind === "sender" ? gt("Sender") : gt("Category")}
-                    </div>
-                  </th>
-                  <td className="px-1">{m(trustLevels[record.trust])}</td>
-                  <td className="px-1">{record.approvals}</td>
-                  <td className="px-1">{record.rejections}</td>
-                  <td className="px-1">{record.streak}</td>
-                  <td className="px-1">
-                    <Menu>
-                      <MenuTrigger
-                        render={
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            disabled={change.disabled}
-                            aria-label={gt("Change trust for {label}", { label: record.label })}
-                          />
-                        }
-                      >
-                        {gt("Change")}
-                      </MenuTrigger>
-                      <MenuPopup align="end">
-                        {trustActions.map(([trust, label]) => (
-                          <MenuItem
-                            key={trust}
-                            onClick={async () => {
-                              if (await change.run({ key: record.key, trust })) query.refresh();
-                            }}
-                          >
-                            {m(label)}
-                          </MenuItem>
-                        ))}
-                      </MenuPopup>
-                    </Menu>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        hidden.map((record) => (
+          <SettingsRow
+            key={record.key}
+            title={record.label}
+            control={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={change.disabled}
+                onClick={async () => {
+                  if (await change.run({ key: record.key, trust: "suggest" })) query.refresh();
+                }}
+              >
+                {gt("Show again")}
+              </Button>
+            }
+          />
+        ))
       )}
     </SettingsSection>
   );
@@ -554,8 +473,9 @@ const MailSections = memo(function MailSections({
     <>
       <MailAccounts environmentId={environmentId} accounts={status.accounts} />
       <MailModels environmentId={environmentId} settings={settings} />
-      <MailTrust environmentId={environmentId} settings={settings} />
+
       <MailRules environmentId={environmentId} rules={settings.rules} />
+      <HiddenSenders environmentId={environmentId} />
       <MailAiOff environmentId={environmentId} senders={settings.aiExcludedSenders} />
       <Usage environmentId={environmentId} usage={status.usage} />
       <Behavior environmentId={environmentId} settings={settings} />

@@ -92,6 +92,9 @@ export function useMailRowMenu(
       settled
         ? { id: "unsettle", label: gt("Move back to Active") }
         : { id: "settle", label: gt("Settle") },
+      ...(thread.suggestion && !settled
+        ? [{ id: "dismiss_suggestion", label: gt("Dismiss suggestion") }]
+        : []),
       ...(settled || thread.workingReason === "waiting"
         ? []
         : [{ id: "wait_for_reply", label: gt("Wait for reply") }]),
@@ -150,6 +153,9 @@ export function useMailRowMenu(
             : { type: "settle" },
           gt("Settled"),
         );
+        return;
+      case "dismiss_suggestion":
+        void actions.act(ids, { type: "keep" }, gt("Suggestion dismissed"));
         return;
       case "wait_for_reply":
         void actions.act(ids, { type: "wait_for_reply" }, gt("Waiting for reply"));

@@ -3,11 +3,10 @@ import type {
   EnvironmentId,
   MailActionEntry,
   MailThreadId,
-  MailSettleReason,
   MailThreadRow,
 } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { T, useGT, useMessages } from "gt-react";
+import { T, useGT } from "gt-react";
 import {
   InboxIcon,
   ListFilterIcon,
@@ -46,21 +45,12 @@ import {
 import { SidebarContent, SidebarGroup, SidebarInput } from "../ui/sidebar";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
-import { settleReasonLabel } from "./mailPresentation";
 import { MailSidebarRow } from "./MailSidebarRow";
 import { useMailActions } from "./useMailActions";
 import { useMailIntentPrefetch } from "./useMailIntentPrefetch";
 import { useMailRowMenu } from "./useMailRowMenu";
 
-type SettledFilter = "all" | "ai" | MailSettleReason;
-const SETTLED_FILTER_REASONS: ReadonlyArray<MailSettleReason> = [
-  "fyi",
-  "receipt",
-  "noise",
-  "replied",
-  "done",
-  "archived",
-];
+type SettledFilter = "all" | "rule" | "user";
 const SETTLED_PAGE = 30;
 const SENT_PAGE = 30;
 const TRASH_PAGE = 30;
@@ -306,7 +296,6 @@ function SettledShelf(props: {
   renderRow: (thread: MailThreadRow) => ReactNode;
 }) {
   const gt = useGT();
-  const resolve = useMessages();
   const [filter, setFilter] = useState<SettledFilter>("all");
   const [cursors, setCursors] = useState<Array<{ at: string; id: MailThreadId }>>([]);
   const before = cursors.at(-1);
@@ -318,7 +307,7 @@ function SettledShelf(props: {
           input: {
             limit: SETTLED_PAGE,
             ...(before ? { before } : {}),
-            ...(filter === "ai" ? { byAi: true } : filter === "all" ? {} : { reason: filter }),
+            ...(filter === "all" ? {} : { by: filter }),
           },
         })
       : null,
@@ -329,9 +318,9 @@ function SettledShelf(props: {
   const filterLabel =
     filter === "all"
       ? gt("Settled", { $context: "sidebar section" })
-      : filter === "ai"
-        ? gt("Settled by AI")
-        : gt("Settled: {reason}", { reason: settleReasonLabel(filter, resolve) });
+      : filter === "rule"
+        ? gt("Settled by your rules")
+        : gt("Settled by you");
 
   return (
     <MailShelf
@@ -366,16 +355,14 @@ function SettledShelf(props: {
                 <MenuRadioItemIndicator />
                 <T>All settled</T>
               </MenuRadioItem>
-              <MenuRadioItem value="ai">
+              <MenuRadioItem value="rule">
                 <MenuRadioItemIndicator />
-                <T>Settled by AI</T>
+                <T>Settled by your rules</T>
               </MenuRadioItem>
-              {SETTLED_FILTER_REASONS.map((reason) => (
-                <MenuRadioItem key={reason} value={reason}>
-                  <MenuRadioItemIndicator />
-                  {settleReasonLabel(reason, resolve)}
-                </MenuRadioItem>
-              ))}
+              <MenuRadioItem value="user">
+                <MenuRadioItemIndicator />
+                <T>Settled by you</T>
+              </MenuRadioItem>
             </MenuRadioGroup>
           </MenuPopup>
         </Menu>

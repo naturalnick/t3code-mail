@@ -13,7 +13,7 @@ export function mailDecision(
       : { actor: "ai", why: thread.why };
   }
   if (thread.state === "settled" && thread.settledBy === "rule")
-    return { actor: "rule", why: null };
+    return { actor: "rule", why: thread.why };
   if (thread.state === "settled" && thread.settledBy === "ai")
     return { actor: "ai", why: thread.why };
   // Kept in Active by the model: its reason explains why the email is still here.

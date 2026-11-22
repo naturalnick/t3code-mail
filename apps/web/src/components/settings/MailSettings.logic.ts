@@ -26,6 +26,7 @@ export function mailUsageShare(
   return totalTokens > 0 && tokens <= totalTokens ? tokens / totalTokens : null;
 }
 
+/** Trims fields and drops empty ones. A rule needs a scope, a condition, or both. */
 export function normalizeRule(rule: MailRule): MailRule | null {
   const match = Object.fromEntries(
     Object.entries(rule.match).flatMap(([key, raw]) => {
@@ -33,7 +34,16 @@ export function normalizeRule(rule: MailRule): MailRule | null {
       return value ? [[key, value]] : [];
     }),
   );
-  return Object.keys(match).length === 0 ? null : { ...rule, match };
+  const { when: rawWhen, sensitive, ...rest } = rule;
+  // Never show is a hard block, so it takes no condition.
+  const when = rule.action === "never_show" ? "" : (rawWhen ?? "").trim();
+  if (Object.keys(match).length === 0 && !when) return null;
+  return {
+    ...rest,
+    match,
+    ...(when ? { when } : {}),
+    ...(sensitive && rule.action === "settle" ? { sensitive } : {}),
+  };
 }
 
 export function insertToneNotes(markdown: string, notes: string): string {

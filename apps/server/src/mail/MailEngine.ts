@@ -32,7 +32,6 @@ import * as MailStore from "./MailStore.ts";
 const DEFAULT_SETTINGS: MailSettings = {
   defaultModelSelection: null,
   escalationModelSelection: null,
-  trustThreshold: 3,
   weeklyTokenCap: 300_000,
   serverMirroring: false,
   recapEnabled: true,
@@ -214,8 +213,9 @@ const make = Effect.gen(function* () {
         subject: thread.subject,
         reason: thread.settledReason ?? "fyi",
         actor,
-        why: actor === "ai" ? (thread.verdict?.why ?? null) : null,
-        decidedBy: actor === "ai" ? (thread.verdict?.by ?? null) : null,
+        // A rule with a condition was checked by the model, which says why it applied.
+        why: actor === "ai" || actor === "rule" ? (thread.verdict?.why ?? null) : null,
+        decidedBy: actor === "ai" || actor === "rule" ? (thread.verdict?.by ?? null) : null,
       })),
       moreSettled: Math.max(0, day.total - day.settled.length),
     } satisfies MailRecap;

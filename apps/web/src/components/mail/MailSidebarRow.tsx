@@ -22,7 +22,7 @@ import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MailDecider } from "./MailDecider";
 import { mailDecision } from "./mailDecision";
-import { nudgeLabel, senderName, settleReasonLabel } from "./mailPresentation";
+import { nudgeLabel, senderName } from "./mailPresentation";
 import type { useMailActions } from "./useMailActions";
 
 function MailTime({ timestamp }: { timestamp: string }) {
@@ -67,25 +67,16 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   const recede = settled && !isActive;
   const unread = thread.unread && !settled;
   const suggestion = thread.state === "active" ? thread.suggestion : null;
-  // Who sorted it. A suggestion shows only who; the reason word is for settled rows.
+  // Who sorted it, shown as an icon with the reason on hover. Decisions from before the model
+  // gave reasons have nothing to say, so they show nothing.
   const sorted = suggestion !== null || settled ? mailDecision(thread) : null;
-  // Suggestions from before the model gave reasons have nothing to show on hover.
-  const decision = settled || sorted?.why || sorted?.actor === "rule" ? sorted : null;
+  const decision = sorted?.why || sorted?.actor === "rule" ? sorted : null;
   const decider = decision?.actor ?? null;
   // A settle suggestion already says what to do, so its next-step text would repeat it.
   const metaText =
     nudge ?? (thread.state === "active" && suggestion === null ? thread.suggestedAction : null);
-  const metaReason = settled ? thread.settledReason : null;
   const badgeNote =
-    decider === "rule"
-      ? suggestion
-        ? gt("Suggested by your rule")
-        : gt("Settled by your rule")
-      : decider === "ai"
-        ? (decision?.why ?? (suggestion ? gt("Suggested by AI") : gt("Settled by AI")))
-        : settled && thread.settledBy === "user"
-          ? gt("Settled by you")
-          : null;
+    decision?.why ?? (suggestion ? gt("Suggested by your rule") : gt("Settled by your rule"));
 
   const snooze = (until: string | null) =>
     void actions.act([thread.id], { type: "snooze", until, onReply: true }, gt("Snoozed"));
@@ -267,7 +258,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             />
           ) : null}
         </div>
-        {metaText !== null || metaReason !== null || decider !== null ? (
+        {metaText !== null || decider !== null ? (
           <div className="mt-0.5 flex h-4 min-w-0 items-center gap-1.5 text-xs">
             <span
               className={cn(
@@ -277,24 +268,17 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             >
               {metaText}
             </span>
-            {metaReason === null && decider === null ? null : badgeNote === null ? (
-              <span className={badgeClassName}>
-                {metaReason === null ? null : settleReasonLabel(metaReason, resolve)}
-              </span>
-            ) : (
+            {decider === null ? null : (
               <Tooltip>
                 <TooltipTrigger
                   // Above the row link, so hovering the badge shows why.
                   render={<span className={cn(badgeClassName, "relative z-[2]")} />}
                 >
-                  {decider ? (
-                    <MailDecider
-                      environmentId={environmentId}
-                      actor={decider}
-                      decidedBy={thread.decidedBy}
-                    />
-                  ) : null}
-                  {metaReason === null ? null : settleReasonLabel(metaReason, resolve)}
+                  <MailDecider
+                    environmentId={environmentId}
+                    actor={decider}
+                    decidedBy={thread.decidedBy}
+                  />
                 </TooltipTrigger>
                 <TooltipPopup side="top">{badgeNote}</TooltipPopup>
               </Tooltip>

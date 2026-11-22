@@ -100,6 +100,8 @@ const textGeneration = (reply: ModelReply, duringCall: DuringCall) =>
             confidence: 0.92,
             urgent: false,
             injection: false,
+            rule: "",
+            kind: "Routine updates",
             ...reply(input.modelSelection.model, input.prompt),
           })),
         };
@@ -307,163 +309,181 @@ it.effect("prefetches formatted bodies only for mail a reader is likely to open"
 );
 
 describe("MailService trust ramp", () => {
-  it.effect("suggests until approved three times, then settles on its own and undo demotes", () => {
-    const prompts: Array<string> = [];
-    return withMail(
-      Effect.gen(function* () {
-        const mail = yield* MailService.MailService;
-        yield* mail.updateSettings({
-          defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
-        });
-
-        for (const night of [1, 2, 3]) {
-          const threadId = yield* deliver({
-            subject: `Nightly build #${night}`,
-            body: `Build ${night} passed in 4m.`,
-            at: `2026-11-0${night}T06:00:00.000Z`,
+  it.effect(
+    "only suggests until the user saves a rule, then the rule settles what it covers",
+    () => {
+      const prompts: Array<string> = [];
+      return withMail(
+        Effect.gen(function* () {
+          const mail = yield* MailService.MailService;
+          yield* mail.updateSettings({
+            defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
           });
-          const row = yield* rowOf(threadId);
-          expect(row).toMatchObject({ state: "active", suggestedAction: "Settle" });
-          expect(row.suggestion).toMatchObject({ reason: "fyi" });
-          // A repeated approve (double tap, stale client) is not a second approval.
-          for (const _ of [1, 2]) {
-            yield* mail.act(
-              {
-                threadIds: [threadId],
-                action: {
-                  type: "approve",
-                  revisions: {
-                    [threadId]: (yield* rowOf(threadId)).suggestion?.revision ?? "already-settled",
+
+          for (const night of [1, 2, 3, 4]) {
+            const threadId = yield* deliver({
+              subject: `Nightly build #${night}`,
+              body: `Build ${night} passed in 4m.`,
+              at: `2026-11-0${night}T06:00:00.000Z`,
+            });
+            const row = yield* rowOf(threadId);
+            // Approvals teach the model, but never let it settle on its own.
+            expect(row).toMatchObject({ state: "active", suggestedAction: "Settle" });
+            expect(row.suggestion).toMatchObject({ reason: "fyi" });
+            // A repeated approve (double tap, stale client) is not a second approval.
+            for (const _ of [1, 2]) {
+              yield* mail.act(
+                {
+                  threadIds: [threadId],
+                  action: {
+                    type: "approve",
+                    revisions: {
+                      [threadId]:
+                        (yield* rowOf(threadId)).suggestion?.revision ?? "already-settled",
+                    },
                   },
                 },
-              },
-              { actor: "user" },
-            );
+                { actor: "user" },
+              );
+            }
+            expect((yield* rowOf(threadId)).state).toBe("settled");
           }
-          expect((yield* rowOf(threadId)).state).toBe("settled");
-          if (night === 1) {
-            const trust = yield* mail.listTrust;
-            expect(
-              trust.records.find((record) => record.key === "sender:updates@acme.dev"),
-            ).toMatchObject({ approvals: 1, streak: 1 });
+          expect(
+            (yield* mail.listTrust).records.find(
+              (record) => record.key === "sender:updates@acme.dev",
+            ),
+          ).toMatchObject({ approvals: 4, trust: "suggest" });
+          expect(prompts.at(-1)).toContain(
+            "the user approved settling 3 earlier email(s) from this sender as fyi",
+          );
+
+          const rule = {
+            id: "passing-builds",
+            enabled: true,
+            match: { from: "updates@acme.dev" },
+            when: "Builds that passed",
+            action: "settle",
+            reason: "fyi",
+          } as const;
+          yield* mail.updateSettings({ rules: [rule] });
+
+          const fifth = yield* deliver({
+            subject: "Nightly build #5",
+            body: "Build 5 passed in 4m.",
+            at: "2026-11-05T06:00:00.000Z",
+          });
+          expect(prompts.at(-1)).toContain("Rule r1: settle when: Builds that passed");
+          expect(yield* rowOf(fifth)).toMatchObject({
+            state: "settled",
+            settledBy: "rule",
+            ruleId: "passing-builds",
+            why: "A routine update; nothing to do.",
+            decidedBy: { instanceId: "codex", model: "luna" },
+          });
+          expect((yield* mail.getThread(fifth)).kind).toBe("Routine updates");
+          const recap = (yield* (yield* MailEngine.MailEngine).recap)!;
+          expect(recap.settled).toEqual([
+            expect.objectContaining({ threadId: fifth, actor: "rule", why: expect.any(String) }),
+          ]);
+
+          // Mail the rule's condition doesn't cover stays: the model keeps a failed build.
+          const failed = yield* deliver({
+            subject: "Nightly build #6",
+            body: "Build 6 FAILED: 3 tests broke.",
+            at: "2026-11-06T07:00:00.000Z",
+          });
+          expect(yield* rowOf(failed)).toMatchObject({ state: "active", suggestion: null });
+
+          const engine = yield* MailEngine.MailEngine;
+          const callsBefore = (yield* engine.usage).calls;
+          for (const entry of [
+            {
+              subject: "Build configuration",
+              body: "Can you choose a target?",
+              listUnsubscribe: false,
+            },
+            { subject: "New digest", body: "This is our first digest.", listUnsubscribe: true },
+          ]) {
+            yield* deliver({ ...entry, at: "2026-11-06T08:00:00.000Z" });
           }
-        }
+          expect((yield* engine.usage).calls).toBe(callsBefore + 2);
 
-        const fourth = yield* deliver({
-          subject: "Nightly build #4",
-          body: "Build 4 passed in 4m.",
-          at: "2026-11-04T06:00:00.000Z",
-        });
-        // Trust lets the model's settle apply on its own; the model still read the email.
-        expect(yield* rowOf(fourth)).toMatchObject({
-          state: "settled",
-          settledBy: "ai",
-          settledReason: "fyi",
-          why: "A routine update; nothing to do.",
-          decidedBy: { instanceId: "codex", model: "luna" },
-        });
-        expect(prompts.at(-1)).toContain(
-          "the user approved settling 3 earlier email(s) from this sender as fyi",
-        );
-        const recap = (yield* (yield* MailEngine.MailEngine).recap)!;
-        expect(recap.settled).toEqual([
-          expect.objectContaining({ threadId: fourth, actor: "ai", why: expect.any(String) }),
-        ]);
-        // Clients that predate the list still read the counts.
-        expect(recap).toMatchObject({ settledByAi: 1, topAiSenders: ["Acme Builds"] });
+          // Money in the text is a guardrail: the rule matches, but Mail asks first.
+          const invoice = yield* deliver({
+            subject: "Invoice for build minutes",
+            body: "Amount due: $42 by Friday.",
+            at: "2026-11-07T06:00:00.000Z",
+          });
+          expect(yield* rowOf(invoice)).toMatchObject({
+            state: "active",
+            guardrail: "money",
+            suggestion: { reason: "fyi" },
+          });
 
-        // A trusted sender's email the model would keep is kept.
-        const failed = yield* deliver({
-          subject: "Nightly build #5",
-          body: "Build 5 FAILED: 3 tests broke.",
-          at: "2026-11-04T07:00:00.000Z",
-        });
-        expect(yield* rowOf(failed)).toMatchObject({ state: "active", suggestion: null });
+          const log = yield* mail.listActions({ actor: "rule" });
+          const ruleSettle = log.actions.find((action) => action.threadId === fifth);
+          expect(ruleSettle).toMatchObject({ kind: "settle", undoable: true });
+          yield* mail.undo(ruleSettle!.id);
+          expect((yield* rowOf(fifth)).state).toBe("active");
+          // Back in Active, it leaves the recap.
+          expect(
+            (yield* (yield* MailEngine.MailEngine).recap)!.settled.map((item) => item.threadId),
+          ).not.toContain(fifth);
 
-        const engine = yield* MailEngine.MailEngine;
-        const callsBefore = (yield* engine.usage).calls;
-        for (const entry of [
-          {
-            subject: "Build configuration",
-            body: "Can you choose a target?",
-            listUnsubscribe: false,
-          },
-          { subject: "New digest", body: "This is our first digest.", listUnsubscribe: true },
-        ]) {
-          yield* deliver({ ...entry, at: "2026-11-04T08:00:00.000Z" });
-        }
-        expect((yield* engine.usage).calls).toBe(callsBefore + 2);
+          yield* mail.updateSettings({ rules: [{ ...rule, enabled: false }] });
+          const eighth = yield* deliver({
+            subject: "Nightly build #8",
+            body: "Build 8 passed in 4m.",
+            at: "2026-11-08T06:00:00.000Z",
+          });
+          expect(prompts.at(-1)).not.toContain("Rule r1");
+          expect(yield* rowOf(eighth)).toMatchObject({
+            state: "active",
+            suggestion: { reason: "fyi" },
+          });
 
-        // Money in the text is a guardrail: a graduated sender still asks first.
-        const invoice = yield* deliver({
-          subject: "Invoice for build minutes",
-          body: "Amount due: $42 by Friday.",
-          at: "2026-11-05T06:00:00.000Z",
-        });
-        expect(yield* rowOf(invoice)).toMatchObject({ state: "active", guardrail: "money" });
+          // With AI off for the sender, its mail never reaches a model and waits for the user.
+          yield* mail.setSenderAi({ sender: "acme.dev", enabled: false });
+          const callsBeforeOff = (yield* engine.usage).calls;
+          const unread = yield* deliver({
+            subject: "Nightly build #7",
+            body: "Build 7 passed in 4m.",
+            at: "2026-11-07T06:00:00.000Z",
+          });
+          expect((yield* engine.usage).calls).toBe(callsBeforeOff);
+          expect(yield* rowOf(unread)).toMatchObject({
+            state: "active",
+            suggestion: null,
+            why: null,
+            triagePending: false,
+          });
+          const chatId = ThreadId.make("fixture-chat-ai-off");
+          yield* (yield* MailStore.MailStore).setChatThread(unread, chatId);
+          const context = yield* (yield* MailChatContext.MailChatContext).forTurn(chatId, true);
+          expect(context).not.toContain("Build 7");
+          expect(context).toContain("turned AI off");
 
-        const log = yield* mail.listActions({ actor: "ai" });
-        const aiSettle = log.actions.find((action) => action.threadId === fourth);
-        expect(aiSettle).toMatchObject({ kind: "settle", undoable: true });
-        yield* mail.undo(aiSettle!.id);
-        expect((yield* rowOf(fourth)).state).toBe("active");
-        const trust = yield* mail.listTrust;
-        expect(
-          trust.records.find((record) => record.key === "sender:updates@acme.dev"),
-        ).toMatchObject({ trust: "suggest", streak: 0 });
-
-        // Back in Active, it leaves the recap.
-        expect(
-          (yield* (yield* MailEngine.MailEngine).recap)!.settled.map((item) => item.threadId),
-        ).not.toContain(fourth);
-
-        const sixth = yield* deliver({
-          subject: "Nightly build #6",
-          body: "Build 6 passed in 4m.",
-          at: "2026-11-06T06:00:00.000Z",
-        });
-        expect(yield* rowOf(sixth)).toMatchObject({
-          state: "active",
-          suggestion: { reason: "fyi" },
-        });
-
-        // With AI off for the sender, its mail never reaches a model and waits for the user.
-        yield* mail.setSenderAi({ sender: "acme.dev", enabled: false });
-        const callsBeforeOff = (yield* engine.usage).calls;
-        const unread = yield* deliver({
-          subject: "Nightly build #7",
-          body: "Build 7 passed in 4m.",
-          at: "2026-11-07T06:00:00.000Z",
-        });
-        expect((yield* engine.usage).calls).toBe(callsBeforeOff);
-        expect(yield* rowOf(unread)).toMatchObject({
-          state: "active",
-          suggestion: null,
-          why: null,
-          triagePending: false,
-        });
-        const chatId = ThreadId.make("fixture-chat-ai-off");
-        yield* (yield* MailStore.MailStore).setChatThread(unread, chatId);
-        const context = yield* (yield* MailChatContext.MailChatContext).forTurn(chatId, true);
-        expect(context).not.toContain("Build 7");
-        expect(context).toContain("turned AI off");
-
-        // Turning AI on acts on the exact entry, so an address can't silently lift its domain.
-        yield* mail.setSenderAi({ sender: "updates@acme.dev", enabled: true });
-        expect((yield* engine.settings).aiExcludedSenders).toEqual(["acme.dev"]);
-        yield* mail.setSenderAi({ sender: "acme.dev", enabled: true });
-        expect((yield* engine.settings).aiExcludedSenders).toEqual([]);
-        const rejected = yield* Effect.flip(
-          mail.setSenderAi({ sender: "not a sender", enabled: false }),
-        );
-        expect(rejected.code).toBe("invalid");
-      }),
-      (_model, prompt) => {
-        prompts.push(prompt);
-        return prompt.includes("FAILED") ? { decision: "keep", reason: "Build failed" } : {};
-      },
-    );
-  });
+          // Turning AI on acts on the exact entry, so an address can't silently lift its domain.
+          yield* mail.setSenderAi({ sender: "updates@acme.dev", enabled: true });
+          expect((yield* engine.settings).aiExcludedSenders).toEqual(["acme.dev"]);
+          yield* mail.setSenderAi({ sender: "acme.dev", enabled: true });
+          expect((yield* engine.settings).aiExcludedSenders).toEqual([]);
+          const rejected = yield* Effect.flip(
+            mail.setSenderAi({ sender: "not a sender", enabled: false }),
+          );
+          expect(rejected.code).toBe("invalid");
+        }),
+        (_model, prompt) => {
+          prompts.push(prompt);
+          return prompt.includes("FAILED")
+            ? { decision: "keep", reason: "Build failed" }
+            : prompt.includes("Rule r1")
+              ? { rule: "r1" }
+              : {};
+        },
+      );
+    },
+  );
 
   it.effect("leaves mail from before the account to the user until they send it to AI", () => {
     const prompts: Array<string> = [];
@@ -592,14 +612,25 @@ describe("MailService trust ramp", () => {
     { category: "invoice", guardrail: "money", subject: "Statement enclosed", list: false },
     { category: "security", guardrail: "security", subject: "Urgent sale update", list: true },
     { category: "legal", guardrail: "legal", subject: "Urgent bulletin", list: true },
-  ])("applies the model's $category guardrail before trust", (entry) =>
+  ])("applies the model's $category guardrail before a rule", (entry) =>
     withMail(
       Effect.gen(function* () {
         const mail = yield* MailService.MailService;
         yield* mail.updateSettings({
           defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
         });
-        yield* mail.setTrust({ key: `category:${entry.category}`, trust: "auto" });
+        yield* mail.updateSettings({
+          rules: [
+            {
+              id: "routine",
+              enabled: true,
+              match: {},
+              when: "Anything routine",
+              action: "settle",
+              reason: "fyi",
+            },
+          ],
+        });
         const threadId = yield* deliver({
           subject: entry.subject,
           body: "Please read the enclosed document.",
@@ -612,7 +643,7 @@ describe("MailService trust ramp", () => {
           suggestion: { reason: "fyi" },
         });
       }),
-      () => ({ category: entry.category }),
+      () => ({ category: entry.category, rule: "r1" }),
     ),
   );
 
@@ -625,7 +656,18 @@ describe("MailService trust ramp", () => {
           defaultModelSelection: { instanceId, model: "luna" },
           escalationModelSelection: { instanceId, model: "review" },
         });
-        yield* mail.setTrust({ key: "category:notification", trust: "auto" });
+        yield* mail.updateSettings({
+          rules: [
+            {
+              id: "routine",
+              enabled: true,
+              match: {},
+              when: "Anything routine",
+              action: "settle",
+              reason: "fyi",
+            },
+          ],
+        });
         const threadId = yield* deliver({
           subject: "Activity report",
           body: "The report is attached.",
@@ -637,7 +679,8 @@ describe("MailService trust ramp", () => {
           suggestion: { reason: "fyi" },
         });
       }),
-      (model) => (model === "review" ? { action: "Read report" } : { confidence: 0 }),
+      (model) =>
+        model === "review" ? { action: "Read report", rule: "r1" } : { confidence: 0, rule: "r1" },
     ),
   );
 
@@ -870,16 +913,14 @@ describe("MailService trust ramp", () => {
           },
           user,
         );
-        yield* mail.setTrust({ key, trust: "auto" });
+        yield* mail.setTrust({ key, trust: "never" });
         const level = (yield* mail.listActions({ actor: "user" })).actions[0]!;
         yield* mail.setTrust({ key, trust: "suggest" });
         expect((yield* mail.undo(level.id).pipe(Effect.flip)).code).toBe("invalid");
         yield* mail.undo(approved.actionIds[0]!);
         expect((yield* mail.listTrust).records.find((row) => row.key === key)).toMatchObject({
           trust: "suggest",
-          explicit: true,
           approvals: 0,
-          streak: 0,
         });
       }),
     ),

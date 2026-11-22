@@ -85,6 +85,7 @@ import * as MailEngine from "./MailEngine.ts";
 import {
   categoryGuardrail,
   matchesRule,
+  type MatchedRule,
   prefilter,
   type PrefilterResult,
 } from "./mailPrefilter.ts";
@@ -136,6 +137,7 @@ const SEND_DEDUPE_MS = 10 * 60_000;
 const TRASH_DAYS = 30;
 /** The model's reason travels with every sidebar row, so it stays one short line. */
 const WHY_CHARS = 140;
+const KIND_CHARS = 60;
 /** An address, or a domain with an optional leading @. */
 const SENDER_ENTRY = /^(?:[^\s@]+@|@)?[a-z\d-]+(?:\.[a-z\d-]+)+$/;
 
@@ -423,7 +425,6 @@ const make = Effect.gen(function* () {
       | { readonly type: "approve"; readonly reason: MailSettleReason }
       | { readonly type: "reject" },
   ) {
-    const settings = yield* engine.settings;
     const now = yield* nowIso;
     const { keys, sender, category } = yield* loadTrust(thread);
     const entries: Array<TrustUndoEntry> = [];
@@ -435,11 +436,7 @@ const make = Effect.gen(function* () {
       const before = record ?? emptyRecord(key, kind);
       const after =
         change.type === "approve"
-          ? recordApproval(before, {
-              threshold: settings.trustThreshold,
-              reason: change.reason,
-              bulk: thread.bulk,
-            })
+          ? recordApproval(before, { reason: change.reason })
           : recordRejection(before);
       yield* store.putTrust(after, now);
       entries.push({ key, kind, clock: yield* store.advanceTrustClock(key, "feedback") });
@@ -966,6 +963,7 @@ const make = Effect.gen(function* () {
                 // The wire keeps the older set so existing clients still decode it.
                 source: thread.verdict.source === "user_rule" ? "rule" : thread.verdict.source,
               },
+        kind: thread.verdict?.kind ?? null,
       } satisfies MailThreadDetail;
     },
     sqlSafe,
@@ -982,8 +980,7 @@ const make = Effect.gen(function* () {
     function* (input) {
       const page = yield* store.settledPage({
         before: input.before,
-        reason: input.reason,
-        byAi: input.byAi,
+        by: input.by,
         limit: input.limit ?? 50,
       });
       return {
@@ -1096,6 +1093,8 @@ const make = Effect.gen(function* () {
         readonly guardrail: PrefilterResult["guardrail"];
         readonly injection: boolean;
         readonly suggestOnly: boolean;
+        /** The conditional rule the model said this email meets, already checked in scope. */
+        readonly conditional?: (MatchedRule & { readonly when: string }) | null;
       },
     ) {
       const now = yield* nowIso;
@@ -1135,14 +1134,14 @@ const make = Effect.gen(function* () {
         verdict: { decision: input.verdict.decision, reason, confidence: input.verdict.confidence },
         guardrail,
         sender: trust.sender,
-        category: trust.category,
         rule: input.prefiltered.rule,
+        conditional: input.conditional ?? null,
       });
       const decision: TrustDecision =
         decided.type === "auto_settle" && decided.via !== "never_show" && input.suggestOnly
           ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
           : decided;
-      yield* saveNote(triageOutcome(decision, guardrail));
+      yield* saveNote(triageOutcome(decision, guardrail, input.conditional?.when ?? null));
       if (decision.type === "auto_settle") {
         const by: MailActor =
           decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
@@ -1292,6 +1291,7 @@ const make = Effect.gen(function* () {
         text: text || "(no text)",
         earlier,
         flags,
+        rules: [],
       },
     } satisfies Prepared;
   });
@@ -1356,6 +1356,7 @@ const make = Effect.gen(function* () {
               source: "user_rule",
               why: null,
               by: null,
+              ruleId: prepared.prefiltered.rule?.id ?? null,
             },
             prefiltered: prepared.prefiltered,
             suggestedAction: null,
@@ -1388,7 +1389,15 @@ const make = Effect.gen(function* () {
       }
       forModel.push({
         ...prepared,
-        item: { ...prepared.item, flags: [...prepared.item.flags, ...trustFacts(trust)] },
+        item: {
+          ...prepared.item,
+          flags: [...prepared.item.flags, ...trustFacts(trust)],
+          rules: prepared.prefiltered.conditional.map((rule, index) => ({
+            key: `r${index + 1}`,
+            action: rule.action === "keep" ? "keep" : "settle",
+            when: rule.when,
+          })),
+        },
       });
       continue;
     }
@@ -1487,6 +1496,10 @@ const make = Effect.gen(function* () {
         if (!deciding.has(prepared.thread.id)) continue;
         const better = escalatedBy.get(prepared.thread.id);
         const verdict = better ?? initial;
+        // Keys are per email, so a model can only pick a rule that is in this email's scope.
+        const conditional =
+          prepared.prefiltered.conditional[Number(/^r(\d+)$/.exec(verdict.rule.trim())?.[1]) - 1] ??
+          null;
         const modelCategory = MAIL_CATEGORIES.has(verdict.category as MailCategory)
           ? (verdict.category as MailCategory)
           : "other";
@@ -1508,7 +1521,10 @@ const make = Effect.gen(function* () {
                 instanceId: (better && escalate ? escalate : selection).instanceId,
                 model: (better && escalate ? escalate : selection).model,
               },
+              ruleId: conditional?.id ?? null,
+              kind: verdict.kind.trim().replace(/\s+/g, " ").slice(0, KIND_CHARS) || null,
             },
+            conditional,
             prefiltered: prepared.prefiltered,
             suggestedAction: verdict.action.trim().slice(0, 40) || null,
             category,
@@ -1523,7 +1539,7 @@ const make = Effect.gen(function* () {
               prepared.bodyMissing ||
               verdict.why.trim().length === 0 ||
               initial.confidence < LOW_CONFIDENCE ||
-              (prepared.repliedTo && !better),
+              (prepared.repliedTo && !better && conditional?.sensitive !== true),
           }),
         );
       }
@@ -2533,9 +2549,7 @@ const make = Effect.gen(function* () {
         reason: record.reason,
         approvals: record.approvals,
         rejections: record.rejections,
-        streak: record.streak,
         trust: record.trust,
-        explicit: record.explicit,
         updatedAt,
       })),
     })),

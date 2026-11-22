@@ -62,15 +62,15 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 - Each email shows as a row like a coding thread: sender, subject, suggested action, with Snooze and Settle on hover.
 - Tap opens the full email, thread, and details.
-- Settled view filterable by reason (FYI, receipt, noise, replied) and by "settled by AI."
-- **One-tap corrections:** "keep in Active" / "settle these" / "never show." Each one updates memory.
+- Settled view filterable by who settled it: your rules or you.
+- **One-tap answers:** "settle" / "auto-settle…" / "dismiss suggestion" / "never show." Each one updates memory.
 - **Follow-up nudges:** "you haven't replied in 3 days," "no reply to your email in 5 days."
 - Fast search across all mail from the local index, settled included; X-GM-RAW for server-side search on Gmail. Exact phrase must work.
 
 ## Sessions
 
 - One chat session per email thread, same as a T3 coding thread.
-- Settled when you reply, settle by hand, or the AI settles it (see Trust ramp).
+- Settled when you reply, settle by hand, or one of your rules settles it (see Rules).
 - A settled thread returns to Active on a new reply from someone else.
 - Session holds the thread, related past mail with that sender, and drafts.
 
@@ -82,20 +82,19 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - **L2, chat session:** runs only when the user opens the email or L1 marks it Active. Full context, drafts, lookups. User approves anything outgoing.
 - **Escalation:** L1 uses a smarter model when confidence is low or the sender matters.
 
-## Trust ramp
+## Rules
 
-- **Suggest mode (default for every sender and category):** AI proposes "settle"; user approves or rejects in one tap, singly or in batches.
-- **Graduation:** after N consistent approvals for a sender or category (default N=3, no rejections; user-adjustable in Mail settings), the AI settles that kind on its own.
-- **Visibility:** "Settled by AI" log with one-tap undo, plus a short daily recap.
-- **Demotion:** any undo or "keep in Active" drops that sender or category back to suggest mode.
-- **Hard guardrails, never auto-settled unless the user graduates them explicitly:** people you've replied to, urgent wording, money and invoices, security and account alerts, legal.
-- Low-confidence verdicts always fall back to suggest mode.
+- **Suggest by default:** the AI proposes "settle"; the user settles in one tap, singly or in batches. Nothing settles on its own until the user saves a rule.
+- **Auto-settle…** on a suggestion opens a rule prefilled with the sender and the model's short name for that kind of email. A rule has an exact scope (sender, domain, subject, list) and an optional plain-language "only when" the model checks, so "shipping updates, but not deliveries" is one rule.
+- **Visibility:** each automatic settle names its rule and why; "Settled by your rules" log with undo, a short daily recap, and Edit rule on the email.
+- **Hard guardrails, never auto-settled unless the rule says so:** people you've replied to, urgent wording, money and invoices, security and account alerts, legal.
+- Low-confidence or unclear matches fall back to a suggestion.
 
 ## Memory files
 
 - **EMAIL.md:** human-readable. Who matters, tone, signature, priorities, standing preferences. Compiled to short rules for L1 (cached, recompiled on change); relevant sections pulled into L2.
 - **Voice:** seed tone notes from the user's sent mail on setup.
-- **settle-memory (structured, e.g. JSON):** one record per sender or category: decision, reason, approvals, rejections, trust level, last change.
+- **settle-memory (structured, e.g. JSON):** one record per sender or category: approvals, dismissals, Never show, last change. The model reads it as context.
 - **Why split:** settle-memory grows with every email and is looked up by key (sender, domain, category), so only matching records load per batch. EMAIL.md stays short and readable. Neither file is ever loaded whole.
 - Action log stored separately; never sent to the model.
 
@@ -105,7 +104,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - **Key metric:** how fast email drains plan usage. Still a concern, but much smaller since it runs on the user's own AI subscriptions.
 - **Meter:** "Email used X% of your usage this week."
 - **User cap:** weekly budget. When hit, fall back to pre-filter and settle-memory only; pause L1.
-- Keep L1 cheap: pre-filter, clean, batch, small model, cache verdicts; graduated senders skip the model entirely.
+- Keep L1 cheap: pre-filter, clean, batch, small model, cache verdicts; exact rules skip the model entirely.
 
 ## Agents & API
 
@@ -155,7 +154,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 - Mail tab in T3 Code fork, one Gmail account, then multi-account.
 - Sync, pre-filter, L1 verdicts, T3 sidebar states, Active by default.
-- Suggest mode, graduation, demotion, settled-by-AI log with undo, daily recap.
+- Suggest mode, rules with an optional AI-checked condition, settled-by-rules log with undo, daily recap.
 - EMAIL.md and settle-memory.
 - Sender and subject rows, formatted email on tap.
 - Drafts with approve-to-send.
@@ -164,13 +163,13 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 ## Edge cases to handle
 
-- Urgent mail must never be auto-settled unless explicitly graduated.
+- Urgent mail must never be auto-settled unless a rule explicitly covers it.
 - CC-heavy threads: don't mark every reply Active.
 - Invoices and bills inside promo-looking mail.
 - Same email sent twice by an agent: dedupe sends, idempotent actions.
 - Agent-edited drafts: learn from the user's final edits.
 - Long threads and large attachments: summarize, don't send everything to the model.
-- A graduated sender suddenly sends something unusual: confidence check drops it to suggest.
+- A ruled sender suddenly sends something unusual: the rule's condition or a confidence check drops it to suggest.
 - Revoked app password or access mid-sync.
 - Gmail download cap hit during backfill: pause and resume, keep new mail flowing.
 - UIDVALIDITY change or lost sync state: fall back to full re-sync.

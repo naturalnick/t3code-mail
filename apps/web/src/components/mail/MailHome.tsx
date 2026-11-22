@@ -1,6 +1,7 @@
 import type { EnvironmentId, MailStatus } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { useGT, useMessages } from "gt-react";
+import { ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 import {
   mailEnvironment,
@@ -13,7 +14,9 @@ import { useMailCommand } from "../settings/MailSettings.commands";
 import { Button } from "../ui/button";
 import { MailPage } from "./MailPage";
 import { MailDecider } from "./MailDecider";
-import { actionLabel, senderName, settleReasonLabel } from "./mailPresentation";
+import { Checkbox } from "../ui/checkbox";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { actionLabel, senderName } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 
 function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
@@ -24,17 +27,16 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
   const query = useEnvironmentQuery(
     mailEnvironment.actions({
       environmentId,
-      input: { actor: "ai", limit: 20, ...(cursor === undefined ? {} : { beforeId: cursor }) },
+      input: { actor: "rule", limit: 20, ...(cursor === undefined ? {} : { beforeId: cursor }) },
     }),
   );
   const actions = useMailActions(environmentId);
   const entries = query.data?.actions ?? [];
   return (
-    <section className="grid min-w-0 grid-cols-1 gap-2">
-      <h2 className="text-sm font-medium">{gt("Settled by AI")}</h2>
+    <section className="grid min-w-0 grid-cols-1 gap-2 pt-2">
       {query.error && <p role="alert">{query.error}</p>}
       {query.data && entries.length === 0 && (
-        <p className="text-sm text-muted-foreground">{gt("No mail settled by AI yet.")}</p>
+        <p className="text-sm text-muted-foreground">{gt("No mail auto-settled via rules yet.")}</p>
       )}
       {entries.map((entry) => (
         <div key={entry.id} className="flex items-center gap-3 border-b py-2 text-sm">
@@ -138,7 +140,6 @@ function ExistingInbox({
 
 function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status: MailStatus }) {
   const gt = useGT();
-  const resolve = useMessages();
   const sections = useMailSections(environmentId);
   const actions = useMailActions(environmentId);
   const dismiss = useMailCommand(
@@ -146,9 +147,11 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
     mailEnvironment.dismissRecap,
     gt("Could not dismiss recap"),
   );
-  const [logOpen, setLogOpen] = useState(false);
+  // Unticked suggestions stay in Active; nothing else happens to them.
+  const [skipped, setSkipped] = useState<ReadonlySet<string>>(() => new Set());
   const recap = status.recap;
   const proposals = sections?.proposals.slice(0, 50) ?? [];
+  const chosen = proposals.filter((t) => !skipped.has(t.id));
   const needsSetup = status.accounts.length === 0 || status.settings.defaultModelSelection === null;
   const reauth = status.accounts.filter((a) => a.status === "auth_failed");
   return (
@@ -216,14 +219,8 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
                       <span className="font-medium">{item.from}</span> · {item.subject}
                     </Link>
                     <p className="truncate text-xs text-muted-foreground">
-                      {item.actor === "rule"
-                        ? gt("Settled as {reason} by your rule", {
-                            reason: settleReasonLabel(item.reason, resolve),
-                          })
-                        : (item.why ??
-                          gt("Settled as {reason}", {
-                            reason: settleReasonLabel(item.reason, resolve),
-                          }))}
+                      {item.why ??
+                        (item.actor === "rule" ? gt("Settled by your rule") : gt("Settled by AI"))}
                     </p>
                   </div>
                   <Button
@@ -233,7 +230,7 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
                     // Undo also tells Mail the settle was wrong, so it learns from the answer.
                     onClick={() => void actions.undo([item.actionId])}
                   >
-                    {gt("I wanted to see this")}
+                    {gt("Bring back")}
                   </Button>
                 </li>
               ))}
@@ -255,25 +252,35 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
             <Button
               size="sm"
               variant="outline"
-              disabled={actions.disabled}
+              disabled={actions.disabled || chosen.length === 0}
               onClick={() =>
                 void actions.act(
-                  proposals.map((t) => t.id),
+                  chosen.map((t) => t.id),
                   {
                     type: "approve",
                     revisions: Object.fromEntries(
-                      proposals.map((t) => [t.id, t.suggestion!.revision]),
+                      chosen.map((t) => [t.id, t.suggestion!.revision]),
                     ),
                   },
                   gt("Settled"),
                 )
               }
             >
-              {gt("Settle these ({count})", { count: proposals.length })}
+              {gt("Settle {count}", { count: chosen.length })}
             </Button>
           </div>
           {proposals.map((t) => (
             <div key={t.id} className="flex items-center gap-2 border-b py-1.5 text-sm">
+              <Checkbox
+                aria-label={gt("Settle {subject}", { subject: t.subject || senderName(t.from) })}
+                checked={!skipped.has(t.id)}
+                onCheckedChange={(checked) => {
+                  const next = new Set(skipped);
+                  if (checked) next.delete(t.id);
+                  else next.add(t.id);
+                  setSkipped(next);
+                }}
+              />
               <Link
                 to="/mail/$mailThreadId"
                 params={{ mailThreadId: t.id }}
@@ -281,31 +288,21 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
               >
                 {senderName(t.from)} · {t.subject}
               </Link>
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled={actions.disabled}
-                onClick={() => void actions.act([t.id], { type: "keep" }, gt("Kept in Active"))}
-              >
-                {gt("Keep in Active")}
-              </Button>
             </div>
           ))}
         </section>
       )}
       {status.accounts.length > 0 && (
-        <div>
-          <Button
-            variant="outline"
-            size="sm"
-            aria-expanded={logOpen}
-            onClick={() => setLogOpen(!logOpen)}
-          >
-            {gt("Settled by AI")}
-          </Button>
-        </div>
+        <Collapsible>
+          <CollapsibleTrigger className="flex cursor-pointer items-center gap-1 text-sm font-medium hover:text-foreground data-panel-open:[&_svg]:rotate-90">
+            <ChevronRightIcon className="size-4 transition-transform" aria-hidden />
+            {gt("Auto-settled")}
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <AiLog environmentId={environmentId} />
+          </CollapsiblePanel>
+        </Collapsible>
       )}
-      {logOpen && <AiLog environmentId={environmentId} />}
     </>
   );
 }

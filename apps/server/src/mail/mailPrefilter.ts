@@ -30,11 +30,17 @@ export interface PrefilterResult {
   readonly category: MailCategory;
   readonly guardrail: MailGuardrail | null;
   readonly bulk: boolean;
-  readonly rule: {
-    readonly id: string;
-    readonly action: MailRuleAction;
-    readonly reason: MailSettleReason;
-  } | null;
+  /** A rule with no condition that matched; it decides without the model. */
+  readonly rule: MatchedRule | null;
+  /** Rules in scope whose plain-language condition the model checks. */
+  readonly conditional: ReadonlyArray<MatchedRule & { readonly when: string }>;
+}
+
+export interface MatchedRule {
+  readonly id: string;
+  readonly action: MailRuleAction;
+  readonly reason: MailSettleReason;
+  readonly sensitive: boolean;
 }
 
 const OTP =
@@ -115,7 +121,8 @@ export function matchesRule(
 ): boolean {
   if (!rule.enabled) return false;
   const { from, domain, subjectContains, listId } = rule.match;
-  if (!from && !domain && !subjectContains && !listId) return false;
+  // A rule with a condition may cover all mail; without one it needs a scope.
+  if (!from && !domain && !subjectContains && !listId) return Boolean(rule.when);
   const address = input.fromAddress.toLowerCase();
   if (from && !address.includes(from.toLowerCase())) return false;
   if (domain) {
@@ -140,12 +147,23 @@ export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>)
     precedence === "junk";
   const category = categorize(input, bulk);
   const guardrail = guardrailFor(input, category);
-  const matched = rules.find((rule) => matchesRule(rule, input));
-  const rule = matched ? { id: matched.id, action: matched.action, reason: matched.reason } : null;
+  const matched = rules.filter((rule) => matchesRule(rule, input));
+  const decided = (rule: MailRule): MatchedRule => ({
+    id: rule.id,
+    action: rule.action,
+    reason: rule.reason,
+    sensitive: rule.sensitive === true,
+  });
+  const exact = matched.find((rule) => !rule.when);
   return {
     category,
     guardrail,
     bulk,
-    rule,
+    rule: exact ? decided(exact) : null,
+    conditional: exact
+      ? []
+      : matched.flatMap((rule) =>
+          rule.when && rule.action !== "never_show" ? [{ ...decided(rule), when: rule.when }] : [],
+        ),
   };
 }
