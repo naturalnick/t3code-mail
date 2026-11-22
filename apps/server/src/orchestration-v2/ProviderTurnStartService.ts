@@ -4,6 +4,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import {
   CommandId,
+  MAIL_SESSION_PROJECT_ID,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   latestProviderTurnForAttempt,
   withMessageSenderNote,
@@ -33,6 +34,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
+import { MailChatContext } from "../mail/MailChatContext.ts";
 import * as ServerConfig from "../config.ts";
 import {
   CLAUDE_PROVIDER,
@@ -275,6 +277,7 @@ export const layer: Layer.Layer<
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
+    const mail = yield* Effect.serviceOption(MailChatContext);
     const eventSink = yield* EventSink.EventSinkV2;
     const turnAnalytics = yield* ProviderUsageAnalytics.ProviderTurnAnalytics;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
@@ -2025,6 +2028,10 @@ export const layer: Layer.Layer<
           ],
         });
       });
+      const mailChat =
+        projection.thread.projectId === MAIL_SESSION_PROJECT_ID
+          ? Option.getOrUndefined(mail)
+          : undefined;
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const delivery = yield* deliverContextHandoffs({
@@ -2051,7 +2058,18 @@ export const layer: Layer.Layer<
             sideChatHandoff === undefined || compact || goalCommand
               ? ""
               : sideChatHandoff.summaryText;
-          const context = [delivery.context, sideChatContext, restartNote]
+          const mailContext =
+            mailChat &&
+            !compact &&
+            !goalCommand &&
+            !turnInput.resume &&
+            !isProviderCommand(providerMessage)
+              ? yield* mailChat.forTurn(
+                  projection.thread.id,
+                  run.ordinal === 1 || providerThread.nativeThreadRef === null,
+                )
+              : "";
+          const context = [delivery.context, sideChatContext, restartNote, mailContext]
             .filter((part) => part !== "")
             .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
@@ -2141,6 +2159,7 @@ export const layer: Layer.Layer<
         ),
       );
       const deliverySession =
+        mailChat === undefined &&
         effectiveHandoffs.length === 0 &&
         retryHandoff.handoffs.length === 0 &&
         retryHandoff.attachments.length === 0 &&

@@ -4,7 +4,7 @@ Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines
 
 ## Implemented
 
-- Web and desktop share the Mail tab, five sidebar sections, local search, Gmail server search, daily recap and action history. A mail thread opens one ordinary T3 chat with the existing model picker and subagent controls.
+- Web and desktop share the Mail tab, five sidebar sections, local search, Gmail server search, daily recap and action history. Open chat shows the email’s saved triage decisions in an ordinary T3 chat with the existing model picker and subagent controls. The first user question starts the model turn. Older email can show its last saved verdict when available.
 - IMAP sync prioritizes recent mail and backfills older messages. Mailbox rebuilds preserve pins, snoozes and chat associations. Queued archive and read operations target the messages present when the user acted.
 - Triage checks rules before calling the selected provider, batches short summaries and checks the weekly budget before each automatic triage call. Users can adjust the default three-approval threshold, review automatic settles and undo them. Protected categories require explicit trust.
 - Draft editing and send approval check the revision the user reviewed. Outside agents can read, search, leave drafts and propose settles through the CLI or MCP. Sending requires approval in the app.
@@ -13,8 +13,8 @@ Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines
 ## Verification and remaining coverage
 
 - A local GreenMail server delivered an explicitly approved synthetic reply to INBOX and Sent. A minimized Electron window received new mail and recovered from a simulated suspend and wake. The temporary Docker VM, containers and desktop profiles were removed.
-- An isolated web client showed batch approval moving a suggestion from Active to Settled with an undo action. Browser fixtures covered draft conflicts, explicit approval, action undo and chat navigation.
-- Focused server, settings, client type and translation checks passed. The final single-worker run passed 171 tests across Mail, chat launch, provider text generation and migration reconciliation. The server regression suite covers trust graduation and demotion, weekly caps, account isolation, UIDVALIDITY changes, undo after later edits and concurrent send and chat operations.
+- An isolated web client showed batch approval moving a suggestion from Active to Settled with an undo action. Browser fixtures covered draft conflicts, explicit approval, action undo and opening and reopening a chat without a prompt. A single-worker run passed 196 tests across MailService, chat launch and provider turn startup, including delivery of saved mail context on the first question.
+- Focused server, settings, client type and translation checks passed. An earlier single-worker run passed 171 tests across Mail, chat launch, provider text generation and migration reconciliation. The server regression suite covers trust graduation and demotion, weekly caps, account isolation, UIDVALIDITY changes, undo after later edits and concurrent send and chat operations.
 - Inbox lists and email conversations now show the newest mail first. The formatted reader retrieves the HTML alternative and its inline images on demand, including for previously synced mail. Synthetic browser fixtures verified responsive layout, formatting and image consent.
 - The final Astra review identified four additional issues. Regression cases reproduced all four before the fixes and passed afterward: explicit trust provenance, stale batch approval, partial SMTP delivery and quota-limited body downloads.
 - Gmail extensions have no live Gmail verification. Physical sleep and switching macOS Spaces were not exercised. Model evals used synthetic dry runs because the eval runner lacked a configured live provider. The broad changed-package check was interrupted to relieve host memory pressure.

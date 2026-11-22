@@ -3,6 +3,7 @@ import * as MailEngine from "../mail/MailEngine.ts";
 import * as MailService from "../mail/MailService.ts";
 import * as MailStore from "../mail/MailStore.ts";
 import * as MailSync from "../mail/MailSync.ts";
+import * as MailChatContext from "../mail/MailChatContext.ts";
 import { MailToolkit } from "../mcp/toolkits/mail/tools.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -345,6 +346,7 @@ function makeHarness(options: HarnessOptions = {}) {
   );
   return {
     layer: Layer.mergeAll(
+      layerOrchestrator,
       layerLaunch,
       layerRegistry,
       layerThreadManagement,
@@ -393,7 +395,7 @@ function launchInput(input: {
   };
 }
 
-it.effect("recovers a mail chat after a tracking failure and delivers new mail once", () => {
+it.effect("opens mail triage history without starting a turn and delivers a follow-up once", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -413,6 +415,7 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
       Layer.provide(Layer.mock(MailSync.MailSync)({})),
       Layer.provide(MailCredentials.layerMemory),
       Layer.provideMerge(MailEngine.layer),
+      Layer.provideMerge(MailChatContext.layer),
       Layer.provideMerge(MailStore.layerMemory(mailDir)),
     );
     yield* Effect.gen(function* () {
@@ -435,7 +438,7 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
               uid,
               messageId: `<msg-${uid}@example.org>`,
               gmailThreadId: "meeting",
-              labels: null,
+              labels: ["\\Inbox"],
               from: { name: "Ada", address: "ada@example.org" },
               to: [],
               cc: [],
@@ -459,6 +462,12 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
         return result.threads[0]!;
       });
       const threadId = yield* deliver(1, "Meet on Thursday.");
+      yield* store.setTriage(threadId, {
+        triageState: "done",
+        triagedCount: 1,
+        line: "Ada wants to meet on Thursday.",
+        verdict: { decision: "keep", source: "model", confidence: 0.92, reason: "question" },
+      });
       const open = mail.openSession({ threadId, modelSelection });
       yield* store.sql.unsafe(
         "CREATE TRIGGER fail_link BEFORE UPDATE OF chat_thread_id ON mail_threads BEGIN SELECT RAISE(ABORT, 'fixture'); END",
@@ -480,8 +489,17 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
       const projection = threads.getThreadProjection(accepted.id);
       const first = yield* projection;
       assert.lengthOf(first.messages, 1);
-      assert.include(first.messages[0]!.text, "Meet on Thursday.");
-      for (const match of first.messages[0]!.text.matchAll(/`([^`]+)`/g)) {
+      assert.lengthOf(first.runs, 0);
+      assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
+      assert.equal((yield* store.getThread(threadId))?.state, "active");
+      assert.equal(first.messages[0]!.role, "assistant");
+      assert.include(first.messages[0]!.text, "Ada wants to meet on Thursday");
+      assert.equal(first.visibleTurnItems[0]?.item.type, "assistant_message");
+      const context = yield* MailChatContext.MailChatContext;
+      const firstPrompt = yield* context.forTurn(accepted.id, true);
+      assert.include(firstPrompt, "Meet on Thursday.");
+      assert.include(firstPrompt, "Ada wants to meet on Thursday");
+      for (const match of firstPrompt.matchAll(/`([^`]+)`/g)) {
         assert.property(MailToolkit.tools, match[1]!);
       }
 
@@ -490,6 +508,7 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
       assert.lengthOf(yield* list, 1);
       lookupFails = false;
       yield* deliver(2, "Actually, meet on Friday.");
+      yield* store.setKv(`chat-context:${accepted.id}`, "initial");
       const followUp = mail.openSession({ threadId, prompt: "When is the meeting?" });
       yield* store.sql.unsafe(
         "CREATE TRIGGER fail_context BEFORE UPDATE ON mail_kv BEGIN SELECT RAISE(ABORT, 'fixture'); END",
@@ -500,14 +519,25 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
       yield* open;
       const updated = yield* projection;
       assert.lengthOf(updated.messages, 2);
-      assert.include(updated.messages[1]!.text, "When is the meeting?");
-      assert.include(updated.messages[1]!.text, "Actually, meet on Friday.");
+      assert.equal(updated.messages[1]!.text, "When is the meeting?");
+      assert.lengthOf(updated.runs, 1);
+      assert.include(yield* context.forTurn(accepted.id, true), "Actually, meet on Friday.");
 
       yield* deliver(3, "Confirmed for Saturday.");
+      yield* mail.setTrust({ key: "sender:ada@example.org", trust: "never" });
+      yield* mail.drainTriage;
+      const live = (yield* projection).visibleTurnItems.findLast(
+        ({ item }) => item.type === "assistant_message",
+      )?.item;
+      assert.equal(live?.type, "assistant_message");
+      if (live?.type !== "assistant_message") assert.fail("Missing saved triage");
+      assert.include(live.text, "Sender preference");
+      assert.include(live.text, "Confirmed for Saturday");
       yield* Effect.all([open, open], { concurrency: "unbounded" });
       const refreshed = yield* projection;
       assert.lengthOf(refreshed.messages, 3);
-      assert.include(refreshed.messages[2]!.text, "Confirmed for Saturday.");
+      assert.lengthOf(refreshed.runs, 1);
+      assert.include(yield* context.forTurn(accepted.id, true), "Confirmed for Saturday.");
 
       yield* threads.dispatch({
         type: "thread.delete",
@@ -519,7 +549,7 @@ it.effect("recovers a mail chat after a tracking failure and delivers new mail o
       assert.notEqual(replacement.threadId, accepted.id);
       assert.equal(replacement.threadId, reopened.threadId);
       assert.lengthOf(yield* list, 1);
-      assert.lengthOf((yield* threads.getThreadProjection(replacement.threadId)).messages, 1);
+      assert.lengthOf((yield* threads.getThreadProjection(replacement.threadId)).messages, 2);
     }).pipe(Effect.provide(layer));
   }).pipe(
     Effect.provide(

@@ -57,6 +57,8 @@ import { speechStreamRouteLayer } from "./speech/stream.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as IssueService from "./issue/IssueService.ts";
+import * as MailChatContext from "./mail/MailChatContext.ts";
+import * as MailStore from "./mail/MailStore.ts";
 import * as MailService from "./mail/MailService.ts";
 import * as IssueTrackerConnections from "./issue/IssueTrackerConnections.ts";
 import * as IssueTrackerBindings from "./persistence/IssueTrackerBindings.ts";
@@ -637,6 +639,7 @@ const layerTaskFolders = TaskFolders.layer.pipe(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(MailChatContext.layer.pipe(Layer.provide(MailStore.layer))),
   Layer.provide(UsageLimitSources.layerResetFallback),
   Layer.provide(layerTaskFolders),
   Layer.provide(layerScheduledTaskWebhookOrigin),
@@ -920,6 +923,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // One mail service for WebSocket clients and /mcp agents.
   Layer.provide(
     MailService.layerLive.pipe(
+      Layer.provide(RuntimeLayer.layerEventSink),
       Layer.provide(layerServerSettings),
       Layer.provide(layerHostPowerMonitor),
     ),

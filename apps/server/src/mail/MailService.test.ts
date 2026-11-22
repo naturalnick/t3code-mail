@@ -1,3 +1,4 @@
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { MailAccountId, ProviderInstanceId, ThreadId, type MailThreadId } from "@t3tools/contracts";
@@ -23,6 +24,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ImapSession from "./imapSession.ts";
 import type { ParsedMessage } from "./imapSession.ts";
 import { enqueueOp, replayOp } from "./mailServerOp.ts";
+import * as MailChatContext from "./MailChatContext.ts";
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
 import * as MailService from "./MailService.ts";
@@ -97,13 +99,9 @@ const textGeneration = (reply: ModelReply) =>
   });
 
 let randomCounter = 0;
-const testLayer = (
-  mailDir: string,
-  reply: ModelReply,
-  onPrompt?: (prompt: string) => void,
-  credentials = MailCredentials.layerMemory,
-) =>
+const testLayer = (mailDir: string, reply: ModelReply, credentials = MailCredentials.layerMemory) =>
   MailService.layer.pipe(
+    Layer.provide(Layer.mock(EventSink.EventSinkV2)({})),
     Layer.provideMerge(
       Layer.unwrap(
         Effect.map(MailStore.MailStore, (store) =>
@@ -119,6 +117,7 @@ const testLayer = (
     ),
     Layer.provideMerge(MailEngine.layer),
     Layer.provideMerge(credentials),
+    Layer.provideMerge(MailChatContext.layer),
     Layer.provideMerge(MailStore.layerMemory(mailDir)),
     Layer.provideMerge(Sqlite.layerMemory),
     Layer.provide(textGeneration(reply)),
@@ -126,7 +125,6 @@ const testLayer = (
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
         launch: (input) =>
           Effect.sync(() => {
-            onPrompt?.(input.initialMessage?.text ?? "");
             const threadId = input.threadId ?? ThreadId.make(input.commandId);
             return {
               threadId,
@@ -169,16 +167,16 @@ const withMail = <A, E>(
     | MailService.MailService
     | MailEngine.MailEngine
     | MailStore.MailStore
+    | MailChatContext.MailChatContext
     | MailCredentials.MailCredentials
   >,
-  onPrompt?: (prompt: string) => void,
   reply: ModelReply = () => ({}),
   credentials = MailCredentials.layerMemory,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const mailDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-mail-" });
-    return yield* body.pipe(Effect.provide(testLayer(mailDir, reply, onPrompt, credentials)));
+    return yield* body.pipe(Effect.provide(testLayer(mailDir, reply, credentials)));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 /** Delivers one message the way sync does: ingest, fetch its body, then triage. */
@@ -366,7 +364,6 @@ describe("MailService trust ramp", () => {
           suggestion: { reason: "fyi" },
         });
       }),
-      undefined,
       () => ({ category: entry.category }),
     ),
   );
@@ -392,7 +389,6 @@ describe("MailService trust ramp", () => {
           suggestion: { reason: "fyi" },
         });
       }),
-      undefined,
       (model) => (model === "review" ? { summary: "Reviewed report" } : { confidence: 0 }),
     ),
   );
@@ -1007,7 +1003,9 @@ describe("MailService model usage and replies", () => {
               at,
             });
             if (account !== accountId) expect((yield* mail.getThread(next)).related).toEqual([]);
-            yield* mail.openSession({ threadId: next, modelSelection });
+            const chatId = ThreadId.make(`fixture-chat-${next}`);
+            yield* store.setChatThread(next, chatId);
+            prompts.push(yield* (yield* MailChatContext.MailChatContext).forTurn(chatId, true));
           }
           expect(prompts).toHaveLength(3);
           expect(prompts[0]).toContain(before);
@@ -1021,7 +1019,6 @@ describe("MailService model usage and replies", () => {
             expect(prompt).not.toContain("Private group wording");
           }
         }),
-        (prompt) => prompts.push(prompt),
       );
     },
   );
@@ -1214,7 +1211,6 @@ describe("MailService accounts", () => {
           expect(filePassword).toBeUndefined();
         }),
         undefined,
-        undefined,
         credentials,
       );
     },
@@ -1258,7 +1254,6 @@ describe("MailService accounts", () => {
           expect(copies.size).toBe(0);
           expect(yield* store.getAccount(accountId)).toBeNull();
         }),
-        undefined,
         undefined,
         credentials,
       );

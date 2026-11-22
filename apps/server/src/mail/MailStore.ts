@@ -308,6 +308,16 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       BEGIN DELETE FROM mail_display_bodies WHERE id = OLD.id; END`,
   ],
   [`CREATE INDEX mail_threads_state_latest ON mail_threads (state, last_message_at DESC, id DESC)`],
+  [
+    `CREATE INDEX mail_threads_chat ON mail_threads(chat_thread_id) WHERE chat_thread_id IS NOT NULL`,
+    `CREATE TABLE mail_triage_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, at TEXT NOT NULL,
+      text TEXT NOT NULL, published_chat TEXT
+    )`,
+    `CREATE INDEX mail_triage_notes_thread ON mail_triage_notes(thread_id, id)`,
+    `CREATE TRIGGER delete_mail_triage_notes AFTER DELETE ON mail_threads
+      BEGIN DELETE FROM mail_triage_notes WHERE thread_id = OLD.id; END`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -1144,6 +1154,27 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<Row>`SELECT * FROM mail_threads WHERE id = ${id}`.pipe(
       Effect.map((rows) => (rows[0] ? toThread(rows[0]) : null)),
     );
+  const getChatMail = (chatId: string) =>
+    sql<Row>`SELECT * FROM mail_threads WHERE chat_thread_id = ${chatId} LIMIT 1`.pipe(
+      Effect.map((rows) => (rows[0] ? toThread(rows[0]) : null)),
+    );
+  const addTriageNote = (threadId: MailThreadId, at: string, text: string) =>
+    sql`INSERT INTO mail_triage_notes(thread_id, at, text) VALUES (${threadId}, ${at}, ${text})`.pipe(
+      Effect.asVoid,
+    );
+  const latestTriageNote = (threadId: MailThreadId) =>
+    sql<{
+      text: string;
+    }>`SELECT text FROM mail_triage_notes WHERE thread_id = ${threadId} ORDER BY id DESC LIMIT 1`.pipe(
+      Effect.map((rows) => rows[0]?.text),
+    );
+  const unpublishedTriageNotes = (threadId: MailThreadId, chatId: string) =>
+    sql<{ id: number; at: string; text: string }>`SELECT id, at, text FROM mail_triage_notes
+      WHERE thread_id = ${threadId} AND published_chat IS NOT ${chatId} ORDER BY id LIMIT 50`;
+  const markTriageNotePublished = (id: number, chatId: string) =>
+    sql`UPDATE mail_triage_notes SET published_chat = ${chatId} WHERE id = ${id}`.pipe(
+      Effect.asVoid,
+    );
   const getThreads = (ids: ReadonlyArray<MailThreadId>) =>
     ids.length === 0
       ? Effect.succeed([] as ReadonlyArray<ThreadRecord>)
@@ -1617,6 +1648,11 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     mirrorTargets,
     getThread,
     getThreads,
+    getChatMail,
+    addTriageNote,
+    latestTriageNote,
+    unpublishedTriageNotes,
+    markTriageNotePublished,
     insertThread,
     refreshThreadAggregate,
     patchThread,

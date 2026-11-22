@@ -19,7 +19,7 @@ Mail learns from consecutive approvals for a sender or category. Adjust the appr
 
 Formatted messages preserve the sender’s layout. Choose **Load remote images** to display pictures hosted by the sender for that message.
 
-Open a thread and choose **Draft reply**, or ask an agent for a draft with **Start mail chat**. Select **Review and send** to check the recipients and text, then **Approve and send**. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next approval.
+Choose **Open chat** on an email to see its saved triage history. Each entry shows what Mail decided and whether a model, rule or learned preference made the decision. Opening the chat uses no model tokens. Ask a follow-up there to work with the email, or choose **Draft reply** to write a reply yourself. Select **Review and send** to check the recipients and text, then **Approve and send**. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next approval.
 
 ## Use the CLI or an MCP agent
 

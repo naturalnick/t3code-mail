@@ -66,6 +66,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TxReentrantLock from "effect/TxReentrantLock";
 
+import * as EventSink from "../orchestration-v2/EventSink.ts";
+import { publishTriageNotes, triageOutcome, triageText } from "./mailChatHistory.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -81,12 +83,10 @@ import {
   type PrefilterResult,
 } from "./mailPrefilter.ts";
 import {
-  buildSessionPrompt,
   buildTriagePrompt,
   buildVoicePrompt,
   compileEmailMd,
   EMAIL_MD_TEMPLATE,
-  relevantEmailMd,
   type TriageItem,
 } from "./mailPrompts.ts";
 import * as MailStore from "./MailStore.ts";
@@ -125,7 +125,6 @@ const L1_BATCH = 12;
 const L1_TEXT_CHARS = 1_200;
 const GUARDRAIL_TEXT_CHARS = 200_000;
 const TRIAGE_RETRY_MINUTES = 10;
-const SESSION_MESSAGE_CHARS = 3_000;
 const SEND_DEDUPE_MS = 10 * 60_000;
 const DRAFT_CHANGED = "The draft changed after you reviewed it. Review it again before sending.";
 const MAYBE_SENT = "It may have been sent; check Sent before sending again.";
@@ -300,6 +299,8 @@ const make = Effect.gen(function* () {
   const credentials = yield* MailCredentials.MailCredentials;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const projects = yield* ProjectService.ProjectService;
+  const sink = yield* EventSink.EventSinkV2;
+  const sessionLock = yield* KeyedLock.make<MailThreadId>();
   const launcher = yield* ThreadLaunchService.ThreadLaunchService;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -878,92 +879,128 @@ const make = Effect.gen(function* () {
         ),
     );
 
-  const applyDecision = Effect.fn("MailService.applyDecision")(function* (
-    seen: MailStore.ThreadRecord,
-    input: {
-      readonly verdict: MailStore.ThreadVerdict;
-      readonly prefiltered: PrefilterResult;
-      readonly line: string;
-      readonly suggestedAction: string | null;
-      readonly category: MailCategory;
-      readonly guardrail: PrefilterResult["guardrail"];
-      readonly injection: boolean;
-      readonly suggestOnly: boolean;
+  const publishLinkedHistory = Effect.fn("MailService.publishLinkedHistory")(
+    function* (mailId: MailThreadId, chatId: string) {
+      const current = yield* store.getThread(mailId);
+      if (current?.chatThreadId !== chatId) return;
+      const shell = yield* threadManagement.getThreadShell(ThreadId.make(chatId));
+      if (shell?.projectId === MAIL_SESSION_PROJECT_ID)
+        yield* publishTriageNotes(store, sink, mailId, shell.id);
     },
-  ) {
-    const now = yield* nowIso;
-    const thread = yield* store.getThread(seen.id);
-    if (thread === null || !isFresh(seen, thread)) return;
-    const guardrail = input.guardrail;
-    yield* store.setTriage(thread.id, {
-      line: input.line,
-      suggestedAction: input.suggestedAction,
-      category: input.category,
-      guardrail,
-      bulk: input.prefiltered.bulk,
-      verdict: input.verdict,
-      triageState: "done",
-      triagedCount: thread.incomingCount,
-      injection: input.injection,
-    });
-    // The user may have moved it while L1 ran; their choice wins.
-    if (thread.state !== "active" || thread.pinnedAt !== null) return;
-    const trust = yield* loadTrust({ fromAddress: thread.fromAddress, category: input.category });
-    const reason = SETTLE_REASONS.has(input.verdict.reason as MailSettleReason)
-      ? (input.verdict.reason as MailSettleReason)
-      : null;
-    const decided = decide({
-      verdict: { decision: input.verdict.decision, reason, confidence: input.verdict.confidence },
-      guardrail,
-      sender: trust.sender,
-      category: trust.category,
-      rule: input.prefiltered.rule,
-    });
-    const decision: TrustDecision =
-      decided.type === "auto_settle" && decided.via !== "never_show" && input.suggestOnly
-        ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
-        : decided;
-    if (decision.type === "auto_settle") {
-      const by: MailActor =
-        decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
-      const entries: Array<TrustUndoEntry> = [];
-      for (const [key, kind] of [
-        [trust.keys.sender, "sender"],
-        [trust.keys.category, "category"],
-      ] as const) {
-        if (key) entries.push({ key, kind, clock: yield* store.trustClock(key) });
+    (effect, mailId) => sessionLock.withLock(mailId, effect),
+    Effect.catch((error) =>
+      Effect.logWarning("Mail triage history will retry on chat open", { error }),
+    ),
+  );
+
+  const applyDecision = Effect.fn("MailService.applyDecision")(
+    function* (
+      seen: MailStore.ThreadRecord,
+      input: {
+        readonly verdict: MailStore.ThreadVerdict;
+        readonly model?: string;
+        readonly prefiltered: PrefilterResult;
+        readonly line: string;
+        readonly suggestedAction: string | null;
+        readonly category: MailCategory;
+        readonly guardrail: PrefilterResult["guardrail"];
+        readonly injection: boolean;
+        readonly suggestOnly: boolean;
+      },
+    ) {
+      const now = yield* nowIso;
+      const thread = yield* store.getThread(seen.id);
+      if (thread === null || !isFresh(seen, thread)) return;
+      const guardrail = input.guardrail;
+      yield* store.setTriage(thread.id, {
+        line: input.line,
+        suggestedAction: input.suggestedAction,
+        category: input.category,
+        guardrail,
+        bulk: input.prefiltered.bulk,
+        verdict: input.verdict,
+        triageState: "done",
+        triagedCount: thread.incomingCount,
+        injection: input.injection,
+      });
+      // The user may have moved it while L1 ran; their choice wins.
+      const saveNote = (outcome: string) =>
+        store.addTriageNote(
+          thread.id,
+          now,
+          triageText(input.verdict.source, input.model, input.line, outcome),
+        );
+      if (thread.state !== "active" || thread.pinnedAt !== null) {
+        yield* saveNote("Reviewed. Kept your existing thread state.");
+        return thread.chatThreadId;
       }
-      const mirrorUndo = yield* mirror(thread, "archive");
-      yield* recordThreadAction(
-        thread,
-        settledPatch(now, decision.reason, by),
-        {
-          at: now,
-          actor: by,
-          actorLabel: null,
-          kind: "settle",
-          reason: decision.reason,
-        },
-        { trust: { effect: "ai_settle", entries }, ...(mirrorUndo ? { mirror: mirrorUndo } : {}) },
-      );
-    } else {
-      const suggestion = decision.type === "suggest" ? decision : null;
-      yield* recordThreadAction(
-        thread,
-        {
-          suggestionReason: suggestion?.reason ?? null,
-          suggestionConfidence: suggestion?.confidence ?? null,
-        },
-        {
-          at: now,
-          actor: "ai",
-          actorLabel: null,
-          kind: suggestion ? "propose" : "reject",
-          reason: suggestion?.reason ?? null,
-        },
-      );
-    }
-  }, store.transaction);
+      const trust = yield* loadTrust({ fromAddress: thread.fromAddress, category: input.category });
+      const reason = SETTLE_REASONS.has(input.verdict.reason as MailSettleReason)
+        ? (input.verdict.reason as MailSettleReason)
+        : null;
+      const decided = decide({
+        verdict: { decision: input.verdict.decision, reason, confidence: input.verdict.confidence },
+        guardrail,
+        sender: trust.sender,
+        category: trust.category,
+        rule: input.prefiltered.rule,
+      });
+      const decision: TrustDecision =
+        decided.type === "auto_settle" && decided.via !== "never_show" && input.suggestOnly
+          ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
+          : decided;
+      yield* saveNote(triageOutcome(decision, guardrail));
+      if (decision.type === "auto_settle") {
+        const by: MailActor =
+          decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
+        const entries: Array<TrustUndoEntry> = [];
+        for (const [key, kind] of [
+          [trust.keys.sender, "sender"],
+          [trust.keys.category, "category"],
+        ] as const) {
+          if (key) entries.push({ key, kind, clock: yield* store.trustClock(key) });
+        }
+        const mirrorUndo = yield* mirror(thread, "archive");
+        yield* recordThreadAction(
+          thread,
+          settledPatch(now, decision.reason, by),
+          {
+            at: now,
+            actor: by,
+            actorLabel: null,
+            kind: "settle",
+            reason: decision.reason,
+          },
+          {
+            trust: { effect: "ai_settle", entries },
+            ...(mirrorUndo ? { mirror: mirrorUndo } : {}),
+          },
+        );
+      } else {
+        const suggestion = decision.type === "suggest" ? decision : null;
+        yield* recordThreadAction(
+          thread,
+          {
+            suggestionReason: suggestion?.reason ?? null,
+            suggestionConfidence: suggestion?.confidence ?? null,
+          },
+          {
+            at: now,
+            actor: "ai",
+            actorLabel: null,
+            kind: suggestion ? "propose" : "reject",
+            reason: suggestion?.reason ?? null,
+          },
+        );
+      }
+      return thread.chatThreadId;
+    },
+    store.transaction,
+    (saved, seen) =>
+      saved.pipe(
+        Effect.flatMap((chatId) => (chatId ? publishLinkedHistory(seen.id, chatId) : Effect.void)),
+      ),
+  );
 
   interface Prepared {
     readonly thread: MailStore.ThreadRecord;
@@ -1116,7 +1153,7 @@ const make = Effect.gen(function* () {
                 prepared.prefiltered.rule?.reason ??
                 "fyi",
               confidence: ruleVerdict?.confidence ?? 0.9,
-              source: fromMemory ? "memory" : "rule",
+              source: fromMemory && !prepared.prefiltered.rule ? "memory" : "rule",
             },
             prefiltered: prepared.prefiltered,
             line: firstLine(prepared.text) || thread.subject,
@@ -1198,6 +1235,7 @@ const make = Effect.gen(function* () {
             : prepared.prefiltered.category;
         yield* commit(
           applyDecision(prepared.thread, {
+            model: (better && escalate ? escalate : selection).model,
             verdict: {
               decision: verdict.decision,
               reason: verdict.reason,
@@ -1635,7 +1673,6 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
-  const sessionLock = yield* KeyedLock.make<MailThreadId>();
   const sessionDigest = (...parts: ReadonlyArray<string | null>) =>
     NodeCrypto.createHash("sha256").update(JSON.stringify(parts)).digest("hex");
   const chatUnavailable = () =>
@@ -1674,63 +1711,7 @@ const make = Effect.gen(function* () {
       // A confirmed deletion starts a new chain. A lost launch result replays the same claim.
       const threadId =
         shell?.id ?? ThreadId.make(`mail-chat-${sessionDigest(thread.id, linkedId)}`);
-      const trackingKey = `chat-context:${threadId}`;
-      const previous = yield* store.getKv(trackingKey);
-      const messages = yield* store.threadMessages(thread.id, 8);
-      const transcript = messages
-        .map(
-          (message) =>
-            `From: ${message.outgoing ? "the user" : `${message.from.name} <${message.from.address}>`}\nDate: ${message.date}\nSubject: ${message.subject}\n\n${cleanForModel(message.body ?? "(body not downloaded)", SESSION_MESSAGE_CHARS)}`,
-        )
-        .join("\n\n---\n\n");
-      const revision = sessionDigest(transcript, ...messages.map((message) => String(message.id)));
-      const contextSent = previous?.startsWith(`${revision}:`) === true;
-      if (shell && contextSent && !input.prompt) return { projectId, threadId, created: false };
-      const receipt = sessionDigest(threadId, previous, revision, input.prompt ?? null);
-      const messageId = MessageId.make(`${revision}:${receipt}`);
-      const related = (yield* store.relatedThreads(
-        thread.accountId,
-        thread.fromAddress,
-        thread.id,
-        5,
-      ))
-        .map((entry) => `- ${entry.lastMessageAt.slice(0, 10)} ${entry.subject} (${entry.state})`)
-        .join("\n");
-      const emailMd = relevantEmailMd(yield* readEmailMdText, [
-        thread.fromName,
-        thread.fromAddress,
-        domainOf(thread.fromAddress),
-      ]);
-      const edits =
-        thread.lastIncomingAt === null
-          ? []
-          : yield* store.recentReplyEdits(
-              thread.accountId,
-              thread.fromAddress.trim().toLowerCase(),
-            );
-      const request =
-        input.prompt ??
-        (shell
-          ? "Update me on what changed in this email thread."
-          : "Read this email thread. Tell me in two lines what it needs from me, then leave a reply draft if one is needed.");
-      const text = buildSessionPrompt({
-        mailThreadId: thread.id,
-        subject: thread.subject,
-        participants: [...new Set(messages.map((message) => message.from.address))].join(", "),
-        transcript,
-        related,
-        emailMd: [
-          emailMd,
-          edits.length > 0
-            ? `How the user edited earlier AI drafts (match the "after" style):\n${edits.map((edit) => `before: ${edit.before}\nafter: ${edit.after}`).join("\n\n")}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
-        request,
-      });
       let created = false;
-      let send = shell !== null;
       if (shell === null) {
         const modelSelection =
           input.modelSelection ??
@@ -1750,7 +1731,6 @@ const make = Effect.gen(function* () {
             runtimeMode: "approval-required",
             interactionMode: "default",
             workspaceStrategy: { type: "root" },
-            initialMessage: { messageId, text, attachments: [] },
             createdBy: "user",
             creationSource: "server",
           })
@@ -1761,21 +1741,52 @@ const make = Effect.gen(function* () {
             ),
           );
         created = !launched.resumed;
-        // New mail or a different request may have arrived since the unacknowledged launch.
-        send =
-          launched.resumed &&
-          !launched.projection.messages.some((message) =>
-            input.prompt ? message.id === messageId : message.id.startsWith(`${revision}:`),
-          );
       }
-      if (send) {
+      if (threadId !== linkedId) {
+        yield* store.setChatThread(thread.id, threadId);
+        yield* engine.publishThreads([thread.id]);
+      }
+      yield* store.transaction(
+        Effect.gen(function* () {
+          if (yield* store.latestTriageNote(thread.id)) return;
+          const current = yield* store.getThread(thread.id);
+          if (
+            !current?.verdict ||
+            current.triageState !== "done" ||
+            current.triagedCount !== current.incomingCount
+          )
+            return;
+          const outcome =
+            current.verdict.decision === "keep"
+              ? "Recommended keeping this in Active."
+              : "Recommended settling this email.";
+          yield* store.addTriageNote(
+            thread.id,
+            current.lastMessageAt,
+            triageText(current.verdict.source, undefined, current.line, outcome),
+          );
+        }),
+      );
+      yield* publishTriageNotes(store, sink, thread.id, threadId).pipe(
+        Effect.mapError(chatUnavailable),
+      );
+      if (input.prompt) {
+        const trackingKey = `chat-context:${threadId}`;
+        const previous = yield* store.getKv(trackingKey);
+        const receipt = sessionDigest(
+          threadId,
+          previous,
+          thread.lastMessageAt,
+          String(thread.messageCount),
+          input.prompt,
+        );
         yield* threadManagement
           .sendToThread({
             commandId: CommandId.make(`mail:send:${receipt}`),
-            messageId,
+            messageId: MessageId.make(receipt),
             projectId,
             threadId,
-            text: contextSent && input.prompt ? input.prompt : text,
+            text: input.prompt,
             attachments: [],
             ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
             mode: "auto",
@@ -1783,19 +1794,8 @@ const make = Effect.gen(function* () {
             creationSource: "server",
           })
           .pipe(Effect.mapError(chatUnavailable));
+        yield* store.setKv(trackingKey, receipt);
       }
-      yield* store.transaction(
-        Effect.gen(function* () {
-          if (threadId !== linkedId) yield* store.setChatThread(thread.id, threadId);
-          yield* store.setKv(trackingKey, messageId);
-          yield* store.patchThread(thread.id, {
-            state: "working",
-            stateAt: yield* nowIso,
-            workingReason: "drafting",
-          });
-        }),
-      );
-      yield* engine.publishThreads([thread.id]);
       return { projectId, threadId, created };
     },
     (effect, input) =>

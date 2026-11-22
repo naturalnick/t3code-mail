@@ -70,7 +70,7 @@ export function MailThreadControls({
           }}
         >
           <MessageSquareIcon />
-          {thread.chatThreadId ? gt("Open chat") : gt("Start mail chat")}
+          {gt("Open chat")}
         </Button>
       )}
       {thread.state === "settled" ? (

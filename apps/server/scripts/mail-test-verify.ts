@@ -1,3 +1,4 @@
+import * as EventSink from "../src/orchestration-v2/EventSink.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- assertions and output for the Docker fixture.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -150,6 +151,7 @@ export async function verifyGreenMail(input: {
       yield* check.pipe(
         Effect.provide(
           MailService.layer.pipe(
+            Layer.provide(Layer.mock(EventSink.EventSinkV2)({})),
             Layer.provide(MailSync.layer),
             Layer.provide(MailEngine.layer),
             Layer.provide(MailCredentials.layerMemory),

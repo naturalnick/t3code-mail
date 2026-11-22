@@ -1,3 +1,5 @@
+import { MAIL_SESSION_PROJECT_ID } from "@t3tools/contracts";
+import { MailChatContext } from "../mail/MailChatContext.ts";
 import {
   serializeAssistantCitation,
   expandAssistantCitationsForProvider,
@@ -456,6 +458,7 @@ it.each([
 });
 
 function makeLocalCommandHarness(input: {
+  readonly mailContext?: string;
   readonly text: string;
   readonly manualContinuation?: boolean;
   readonly nativeResumeUnsupported?: boolean;
@@ -581,7 +584,9 @@ function makeLocalCommandHarness(input: {
     thread: {
       id: threadId,
       activeProviderThreadId: providerThreadId,
-      projectId: ProjectId.make("project-native-account-command"),
+      projectId: input.mailContext
+        ? MAIL_SESSION_PROJECT_ID
+        : ProjectId.make("project-native-account-command"),
       branch: input.worktreePath === undefined ? null : "feature/restore",
       worktreePath: input.worktreePath ?? null,
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
@@ -1173,7 +1178,7 @@ function makeLocalCommandHarness(input: {
           startTurn(ProviderAdapter.resumeTurnInput(input)),
   };
   const open = vi.fn(() =>
-    input.sideChat !== undefined
+    input.sideChat !== undefined || input.mailContext !== undefined
       ? Effect.succeed(sideChatSession as never)
       : input.interruptOpen === true
         ? Effect.interrupt
@@ -1209,7 +1214,7 @@ function makeLocalCommandHarness(input: {
       input: RunExecutionService.RunExecutionServiceV2StartRootRunInput,
     ) => Effect.Effect<void, RunExecutionService.RunExecutionServiceV2Error>
   >((runInput) =>
-    input.sideChat !== undefined
+    input.sideChat !== undefined || input.mailContext !== undefined
       ? (runInput.resume
           ? runInput.session.resumeTurn!({
               ...runInput,
@@ -1333,6 +1338,7 @@ function makeLocalCommandHarness(input: {
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Layer.succeed(MailChatContext, { forTurn: () => Effect.succeed(input.mailContext ?? "") }),
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff,
         }),
@@ -1450,6 +1456,21 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect("includes saved mail context when the user starts an ordinary chat turn", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "What needs my attention?",
+      mailContext: "Mail triage: a new app password was created.",
+    });
+    harness.tryHandlePromptCommand.mockReturnValue(Effect.succeed(false));
+    yield* harness.start;
+    const delivered = harness.startTurn.mock.calls[0]?.[0].message.text;
+    expect(delivered).toContain("a new app password was created.");
+    expect(delivered).toContain("What needs my attention?");
+    expect(harness.projection().messages[0]?.text).toBe("What needs my attention?");
+  }),
+);
 
 function layerStartEffectWorker(
   harness: ReturnType<typeof makeLocalCommandHarness>,
