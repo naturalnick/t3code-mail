@@ -30,7 +30,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlError from "effect/sql/SqlError";
 
 import * as ServerConfig from "../config.ts";
-import type { TrustRecord } from "./mailTrust.ts";
+import type { TrustRecord, TrustUndo } from "./mailTrust.ts";
 
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
 const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -95,6 +95,7 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       text_part TEXT,
       body TEXT,
       body_state TEXT NOT NULL,
+      body_attempts INTEGER NOT NULL DEFAULT 0,
       removed INTEGER NOT NULL DEFAULT 0,
       UNIQUE (account_id, mailbox, uid)
     )`,
@@ -179,8 +180,14 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       status TEXT NOT NULL,
       error TEXT,
       message_id TEXT,
+      revision INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL,
       sent_at TEXT
+    )`,
+    `CREATE TABLE mail_contacts (
+      account_id TEXT NOT NULL,
+      address TEXT NOT NULL,
+      PRIMARY KEY (account_id, address)
     )`,
     `CREATE INDEX mail_drafts_thread ON mail_drafts (thread_id)`,
     `CREATE TABLE mail_usage (
@@ -345,7 +352,7 @@ export interface ActionRecord {
   readonly reason: string | null;
   readonly undo: {
     readonly threadPatch?: ThreadStatePatch;
-    readonly trust?: ReadonlyArray<TrustRecord>;
+    readonly trust?: TrustUndo;
     /** A draft an agent left; undo discards it unless it was sent. */
     readonly draftId?: MailDraftId;
   } | null;
@@ -569,6 +576,7 @@ const toDraft = (row: Row): DraftRecord => ({
   sentAt: strOrNull(row.sent_at),
   originalBody: strOrNull(row.original_body),
   messageId: strOrNull(row.message_id),
+  revision: num(row.revision),
 });
 
 export const draftView = ({ originalBody: _o, messageId: _m, ...draft }: DraftRecord): MailDraft =>
@@ -748,10 +756,23 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           WHERE id = ${existing[0].id}`;
       return { id: num(existing[0].id), inserted: false };
     }
-    // The local copy of a message we sent is replaced by the server's.
+    if (message.outgoing) {
+      const recipients = [...message.to, ...message.cc].map((entry) => entry.address.toLowerCase());
+      for (const address of new Set(recipients)) {
+        yield* sql`INSERT OR IGNORE INTO mail_contacts (account_id, address)
+            VALUES (${message.accountId}, ${address})`;
+      }
+    }
+    // The server's copy of a message sent from here takes over the local row, body and all.
     if (message.messageId !== null && message.outgoing) {
-      yield* sql`DELETE FROM mail_messages WHERE account_id = ${message.accountId}
-          AND mailbox = '__local' AND message_id = ${message.messageId}`;
+      const local = yield* sql<{ id: number }>`UPDATE mail_messages
+          SET mailbox = ${message.mailbox}, uid = ${message.uid},
+            labels = ${message.labels === null ? null : toJson(message.labels)},
+            in_inbox = ${message.inInbox ? 1 : 0}
+          WHERE account_id = ${message.accountId} AND mailbox = '__local'
+            AND message_id = ${message.messageId}
+          RETURNING id`;
+      if (local[0]) return { id: num(local[0].id), inserted: false };
     }
     const rows = yield* sql<{
       id: number;
@@ -776,6 +797,12 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         VALUES (${id}, ${message.subject}, ${`${message.from.name} ${message.from.address}`}, '')`;
     return { id, inserted: true };
   });
+
+  /** A failed download stays pending for a few more tries before the text counts as missing. */
+  const bodyFetchFailed = (id: number, maxAttempts: number) =>
+    sql`UPDATE mail_messages SET body_attempts = body_attempts + 1,
+        body_state = CASE WHEN body_attempts + 1 >= ${maxAttempts} THEN 'unavailable' ELSE body_state END
+      WHERE id = ${id}`.pipe(Effect.asVoid);
 
   const setMessageBody = Effect.fnUntraced(function* (id: number, body: string | null) {
     yield* sql`UPDATE mail_messages SET body = ${body}, body_state = ${body === null ? "unavailable" : "loaded"} WHERE id = ${id}`;
@@ -1025,22 +1052,9 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const repliedToAddresses = (accountId: MailAccountId, addresses: ReadonlyArray<string>) =>
     addresses.length === 0
       ? Effect.succeed(new Set<string>())
-      : sql<{ to_json: string; cc_json: string }>`SELECT to_json, cc_json FROM mail_messages
-          WHERE account_id = ${accountId} AND outgoing = 1`.pipe(
-          Effect.map((rows) => {
-            const wanted = new Set(addresses.map((address) => address.toLowerCase()));
-            const found = new Set<string>();
-            for (const row of rows) {
-              for (const entry of [
-                ...json<ReadonlyArray<MailAddress>>(row.to_json, []),
-                ...json<ReadonlyArray<MailAddress>>(row.cc_json, []),
-              ]) {
-                const address = entry.address.toLowerCase();
-                if (wanted.has(address)) found.add(address);
-              }
-            }
-            return found;
-          }),
+      : sql<{ address: string }>`SELECT address FROM mail_contacts WHERE account_id = ${accountId}
+          AND address IN ${sql.in(addresses.map((address) => address.toLowerCase()))}`.pipe(
+          Effect.map((rows) => new Set(rows.map((row) => row.address))),
         );
 
   const sentSamples = (limit: number) =>
@@ -1144,23 +1158,49 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<Row>`SELECT * FROM mail_drafts WHERE id = ${id}`.pipe(
       Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)),
     );
-  const putDraft = (draft: DraftRecord) =>
-    sql`INSERT INTO mail_drafts (id, thread_id, account_id, to_json, cc_json, subject, body, origin,
-        original_body, status, error, message_id, updated_at, sent_at)
+  /** Saves an edit. Every save bumps the revision, so a send approves exactly one version. */
+  const saveDraftContent = (draft: DraftRecord) =>
+    sql<Row>`INSERT INTO mail_drafts (id, thread_id, account_id, to_json, cc_json, subject, body,
+        origin, original_body, status, error, message_id, revision, updated_at, sent_at)
       VALUES (${draft.id}, ${draft.threadId}, ${draft.accountId}, ${toJson(draft.to)},
         ${toJson(draft.cc)}, ${draft.subject}, ${draft.body}, ${draft.origin},
-        ${draft.originalBody}, ${draft.status}, ${draft.error}, ${draft.messageId},
-        ${draft.updatedAt}, ${draft.sentAt})
+        ${draft.originalBody}, 'draft', NULL, NULL, 0, ${draft.updatedAt}, NULL)
       ON CONFLICT (id) DO UPDATE SET to_json = excluded.to_json, cc_json = excluded.cc_json,
-        subject = excluded.subject, body = excluded.body, status = excluded.status,
-        error = excluded.error, message_id = excluded.message_id, updated_at = excluded.updated_at,
-        sent_at = excluded.sent_at`.pipe(Effect.asVoid);
-  /** Claims a draft for sending once; a second claim with the same body finds it already taken. */
-  const claimDraftForSend = (id: MailDraftId, body: string, now: string) =>
-    sql<{ id: string }>`UPDATE mail_drafts SET status = 'sending', error = NULL, updated_at = ${now}
-      WHERE id = ${id} AND status IN ('draft', 'failed') AND body = ${body} RETURNING id`.pipe(
-      Effect.map((rows) => rows.length > 0),
-    );
+        subject = excluded.subject, body = excluded.body, status = 'draft', error = NULL,
+        message_id = NULL, revision = mail_drafts.revision + 1, updated_at = excluded.updated_at
+      WHERE mail_drafts.status IN ('draft', 'failed')
+      RETURNING *`.pipe(Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)));
+  /**
+   * Claims one reviewed revision for sending; a retry or a second tap finds it taken. The
+   * Message-ID is fixed on the first claim so a resend after an unclear failure reuses it.
+   */
+  const claimDraftForSend = (id: MailDraftId, revision: number, messageId: string, now: string) =>
+    sql<Row>`UPDATE mail_drafts SET status = 'sending', error = NULL, updated_at = ${now},
+        message_id = COALESCE(message_id, ${messageId})
+      WHERE id = ${id} AND status IN ('draft', 'failed') AND revision = ${revision}
+      RETURNING *`.pipe(Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)));
+  const finishDraftSend = (
+    id: MailDraftId,
+    result: {
+      readonly status: "sent" | "failed";
+      readonly error: string | null;
+      readonly at: string;
+    },
+  ) =>
+    sql`UPDATE mail_drafts SET status = ${result.status}, error = ${result.error},
+        updated_at = ${result.at}, sent_at = ${result.status === "sent" ? result.at : null}
+      WHERE id = ${id} AND status = 'sending'`.pipe(Effect.asVoid);
+  /** A send cut off by a crash or restart may or may not have reached the server. */
+  const recoverInterruptedSends = (now: string, error: string) =>
+    sql`UPDATE mail_drafts SET status = 'failed', error = ${error}, updated_at = ${now}
+      WHERE status = 'sending'`.pipe(Effect.asVoid);
+  /** Threads whose last message was expunged or reset away. */
+  const deleteEmptyThreads = (accountId: MailAccountId) =>
+    sql<{ id: string }>`DELETE FROM mail_threads WHERE account_id = ${accountId}
+        AND NOT EXISTS (SELECT 1 FROM mail_messages
+          WHERE mail_messages.thread_id = mail_threads.id AND mail_messages.removed = 0)
+      RETURNING id`.pipe(Effect.map((rows) => rows.map((row) => MailThreadId.make(row.id))));
+
   const deleteDraft = (id: MailDraftId) =>
     sql`DELETE FROM mail_drafts WHERE id = ${id} AND status != 'sending'`.pipe(Effect.asVoid);
 
@@ -1223,6 +1263,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     findThreadIdByMessageIds,
     upsertMessage,
     setMessageBody,
+    bodyFetchFailed,
     pendingBodies,
     updateFlags,
     markRemoved,
@@ -1264,8 +1305,12 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     draftsForThread,
     threadsWithDrafts,
     getDraft,
-    putDraft,
+    deleteEmptyThreads,
+    transaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => sql.withTransaction(effect),
+    saveDraftContent,
     claimDraftForSend,
+    finishDraftSend,
+    recoverInterruptedSends,
     deleteDraft,
     insertUsage,
     usageSince,

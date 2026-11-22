@@ -64,8 +64,13 @@ export async function sendRaw(
   }
 }
 
+/** Failures that happen before the server could have accepted the message. */
+const DEFINITE_CODES = new Set(["EAUTH", "ENOAUTH", "ECONNECTION", "EDNS", "ETLS", "EENVELOPE"]);
+
 export function classifySmtpError(error: unknown): {
   readonly auth: boolean;
+  /** False when the connection broke mid-send, so the message may have gone out. */
+  readonly definite: boolean;
   readonly detail: string;
 } {
   const record = (error ?? {}) as Record<string, unknown>;
@@ -73,5 +78,11 @@ export function classifySmtpError(error: unknown): {
     (typeof record.response === "string" && record.response) ||
     (typeof record.message === "string" && record.message) ||
     "The mail server refused the message.";
-  return { auth: record.code === "EAUTH" || record.responseCode === 535, detail };
+  return {
+    auth: record.code === "EAUTH" || record.responseCode === 535,
+    definite:
+      typeof record.responseCode === "number" ||
+      (typeof record.code === "string" && DEFINITE_CODES.has(record.code)),
+    detail,
+  };
 }

@@ -260,10 +260,18 @@ async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+const isLoopback = (host: string) => host === "127.0.0.1" || host === "localhost" || host === "::1";
+
+/** App passwords never cross the network in the clear: without implicit TLS, STARTTLS is required. */
+const transportSecurity = (config: ImapConfig) => ({
+  ...(config.secure || isLoopback(config.host) ? {} : { doSTARTTLS: true }),
+  tls: { rejectUnauthorized: !isLoopback(config.host) },
+});
+
 export interface SessionEvents {
   readonly onExists: () => void;
   readonly onFlags: (change: { uid: number | undefined; seq: number }) => void;
-  readonly onExpunge: (uid: number | undefined) => void;
+  readonly onExpunge: (path: string, uid: number | undefined) => void;
   readonly onClose: () => void;
 }
 
@@ -284,12 +292,12 @@ export class ImapSession {
       disableAutoIdle: true,
       qresync: true,
       clientInfo: { name: "T3 Code Mail" },
-      tls: { rejectUnauthorized: config.host !== "127.0.0.1" && config.host !== "localhost" },
+      ...transportSecurity(config),
     });
     this.client.on("exists", () => events.onExists());
     this.client.on("flags", (data) => events.onFlags({ uid: data.uid, seq: data.seq }));
     this.client.on("expunge", (data) =>
-      events.onExpunge(data.vanished || this.qresync ? data.uid : undefined),
+      events.onExpunge(data.path, data.vanished || this.qresync ? data.uid : undefined),
     );
     this.client.on("close", () => events.onClose());
     // imapflow emits at most one error per connection and closes after it; close drives reconnects.
@@ -367,16 +375,21 @@ export class ImapSession {
   }
 
   /** Messages with UID above `afterUid`, oldest first, at most `limit`. */
+  /** The oldest `limit` messages above `afterUid`, so the cursor never skips one. */
   async fetchNewer(afterUid: number, limit: number): Promise<ReadonlyArray<ParsedMessage>> {
+    const found = await this.client.search({ uid: `${afterUid + 1}:*` }, { uid: true });
+    // `n:*` always matches the newest message, even when its UID is below n.
+    const uids = [...(found || [])].filter((uid) => uid > afterUid).sort((a, b) => a - b);
+    return this.fetchUids(uids.slice(0, limit));
+  }
+
+  async fetchUids(uids: ReadonlyArray<number>): Promise<ReadonlyArray<ParsedMessage>> {
+    if (uids.length === 0) return [];
     const messages: Array<ParsedMessage> = [];
-    for await (const message of this.client.fetch(`${afterUid + 1}:*`, FETCH_QUERY, {
-      uid: true,
-    })) {
-      // `n:*` always returns the newest message, even when its UID is below n.
-      if (message.uid > afterUid) messages.push(parseFetched(message));
+    for await (const message of this.client.fetch(uids.join(","), FETCH_QUERY, { uid: true })) {
+      messages.push(parseFetched(message));
     }
-    messages.sort((a, b) => a.uid - b.uid);
-    return messages.slice(0, limit);
+    return messages.sort((a, b) => a.uid - b.uid);
   }
 
   /** The newest `count` messages by sequence number: the recent-first start of a sync. */
@@ -395,12 +408,7 @@ export class ImapSession {
     if (belowUid <= 1) return [];
     const uids = await this.client.search({ uid: `1:${belowUid - 1}` }, { uid: true });
     if (!uids || uids.length === 0) return [];
-    const page = [...uids].sort((a, b) => a - b).slice(-count);
-    const messages: Array<ParsedMessage> = [];
-    for await (const message of this.client.fetch(page.join(","), FETCH_QUERY, { uid: true })) {
-      messages.push(parseFetched(message));
-    }
-    return messages.sort((a, b) => a.uid - b.uid);
+    return this.fetchUids([...uids].sort((a, b) => a - b).slice(-count));
   }
 
   /** Flag and label changes: CONDSTORE since a modseq, else a re-read of the recent window. */
@@ -543,7 +551,7 @@ export async function verifyLogin(config: ImapConfig): Promise<{ readonly gmail:
     logger: false,
     emitLogs: false,
     disableAutoIdle: true,
-    tls: { rejectUnauthorized: config.host !== "127.0.0.1" && config.host !== "localhost" },
+    ...transportSecurity(config),
   });
   client.on("error", () => {});
   try {

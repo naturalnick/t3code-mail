@@ -15,7 +15,10 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - L1 batches up to 12 threads per call, debounced 2 s after a sync burst; the newest message of each thread is cleaned and cut to 1,200 characters; older messages contribute only their sender and first line.
 - Escalation: a verdict under 0.6 confidence, or from a sender on the "people you've replied to" list, re-runs with the escalation model when one is set; otherwise it stays a suggestion.
 - Trust keys are `sender:<address>` and `category:<name>`. Graduation needs N consecutive approvals (a streak, default 3); any rejection or undo resets the streak and demotes to suggest.
-- Guardrails (replied-to people, urgent wording, money/invoices, security alerts, legal) block auto-settle unless the sender key was explicitly promoted by the user in Settings.
+- Only approving a pending suggestion counts toward graduation. A plain settle of mail the AI never flagged, or a repeated approve, does not.
+- Undo reverses only its own action's trust effect (one approval, one rejection, one level change) on the keys recorded at the time, so later approvals and a sender change on the thread are kept.
+- Guardrails (replied-to people, urgent wording, money/invoices, security alerts, legal) block auto-settle unless the sender key was explicitly promoted by the user in Settings. They read the whole cleaned message, not the model's 1,200-character cut, and a user "settle" rule that hits a guardrail becomes a suggestion.
+- Nothing auto-settles when the newest message's body could not be downloaded (after 3 tries), except "never show" senders; it stays a suggestion.
 - Graduated senders skip the model only when the message has no guardrail hit and looks like their previous mail (same bulk/list shape); otherwise L1 runs and low confidence falls back to suggest.
 - "Never show" is an explicit user rule: that sender settles immediately as noise, logged with undo.
 - Replying settles the thread with reason "replied". If the reply asks a question, the thread goes to Working (waiting on their reply) instead, and a nudge returns it to Active after the configured days.
@@ -24,9 +27,13 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - The daily recap is computed locally from the action log (no model call) and shown at the top of the Mail home once per day.
 - Mobile Mail is Later per the spec (iOS app); contracts and client-runtime state are shared so mobile can add the tab without server changes.
 - Mail chat sessions start in approval-required mode: the agent can read mail and leave drafts through MCP, but shell or file edits still ask first, since an email is untrusted input.
-- First sync keeps the newest 200 inbox threads Active and triages them, so the first run is a batch of settle proposals to approve (seeds memory). Older mail that backfill brings in lands settled ("archived" by mail).
+- First sync fetches the newest 200 messages plus (on Gmail) the newest 200 inbox messages, and triages them, so the first run is a batch of settle proposals to approve (seeds memory). Backfill brings older mail in settled, except inbox mail from the last 30 days, which stays Active for triage.
 - EMAIL.md is loaded into prompts by section: Who matters and Standing preferences always, Tone and signature only for drafting sessions, compiled to at most 1,500 characters.
 - RPC scopes: reads use the orchestration read scope; acting on mail, drafts, send and sessions use operate; accounts, settings, trust and EMAIL.md writes use settings-write.
 - Nudges are stored as short codes (`waiting:N`, `unanswered:N`) and rendered by the client, so the server never stores translated copy.
 - A mail session that ends without leaving a draft returns its thread from Working to Active on the next minute tick.
 - With server mirroring on, a reply sent from T3 archives the thread on the server like any other settle; replies sent from another client leave the server copy where that client put it.
+- Sending approves one draft revision: every save bumps it, and send carries the revision the user saw. A draft keeps its Message-ID across retries. A failure that may have reached the server (connection lost mid-send, or a restart while sending) says "It may have been sent; check Sent" instead of retrying on its own.
+- IMAP and SMTP require TLS (implicit or STARTTLS) except on loopback, where the local test server runs.
+- Model calls for mail run outside the lock that serializes user actions; a verdict is discarded if new mail reached the thread while the model ran, and failed or capped triage retries every 10 minutes.
+- Mail model calls run with an empty working folder (`<state>/mail/model`) because some harnesses (OpenCode) keep a read tool on for text generation.

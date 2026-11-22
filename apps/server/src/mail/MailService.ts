@@ -97,9 +97,13 @@ import {
   LOW_CONFIDENCE,
   recordApproval,
   recordRejection,
+  reverseTrust,
   senderKey,
   setLevel,
+  type TrustDecision,
   type TrustRecord,
+  type TrustUndo,
+  type TrustUndoEntry,
 } from "./mailTrust.ts";
 import { buildRaw, classifySmtpError, sendRaw } from "./smtpSend.ts";
 
@@ -107,9 +111,13 @@ type MailStreamEventType = MailStreamEvent;
 
 const L1_BATCH = 12;
 const L1_TEXT_CHARS = 1_200;
+const GUARDRAIL_TEXT_CHARS = 200_000;
+const TRIAGE_RETRY_MINUTES = 10;
 const SESSION_MESSAGE_CHARS = 3_000;
 const SEND_DEDUPE_MS = 10 * 60_000;
 const MAX_DRAFT_EDITS = 5;
+const DRAFT_CHANGED = "The draft changed after you reviewed it. Review it again before sending.";
+const MAYBE_SENT = "It may have been sent; check Sent before sending again.";
 
 const MAIL_CATEGORIES = new Set<MailCategory>([
   "person",
@@ -288,8 +296,13 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
   const stateLock = yield* Semaphore.make(1);
+  const commit = stateLock.withPermits(1);
+  // Model calls run under this one, never under stateLock, so user actions never wait on a model.
+  const triageLock = yield* Semaphore.make(1);
 
   const emailMdPath = path.join(store.workspaceDir, "EMAIL.md");
+  // Mail model calls run in an empty folder: some harnesses keep a read tool enabled.
+  const modelDir = path.join(store.mailDir, "model");
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const isoBefore = (now: DateTime.Utc, days: number) =>
     DateTime.formatIso(DateTime.subtract(now, { days }));
@@ -332,7 +345,7 @@ const make = Effect.gen(function* () {
     };
   });
 
-  /** Applies an approval or rejection to both keys; returns the records as they were, for undo. */
+  /** Applies an approval or rejection to both keys and returns what undo needs to reverse it. */
   const updateTrust = Effect.fn("MailService.updateTrust")(function* (
     thread: MailStore.ThreadRecord,
     change:
@@ -342,27 +355,27 @@ const make = Effect.gen(function* () {
     const settings = yield* engine.settings;
     const now = yield* nowIso;
     const { keys, sender, category } = yield* loadTrust(thread);
-    const before: Array<TrustRecord> = [];
+    const entries: Array<TrustUndoEntry> = [];
     const apply = Effect.fnUntraced(function* (
       record: TrustRecord | null,
       key: string,
       kind: TrustRecord["kind"],
     ) {
-      const current = record ?? emptyRecord(key, kind);
-      before.push(current);
-      const next =
+      const before = record ?? emptyRecord(key, kind);
+      const after =
         change.type === "approve"
-          ? recordApproval(current, {
+          ? recordApproval(before, {
               threshold: settings.trustThreshold,
               reason: change.reason,
               bulk: thread.bulk,
             })
-          : recordRejection(current);
-      yield* store.putTrust(next, now);
+          : recordRejection(before);
+      yield* store.putTrust(after, now);
+      entries.push({ key, kind, before, after });
     });
     yield* apply(sender, keys.sender, "sender");
     if (keys.category) yield* apply(category, keys.category, "category");
-    return before;
+    return { effect: change.type, entries } satisfies TrustUndo;
   });
 
   const statePatchOf = (thread: MailStore.ThreadRecord): MailStore.ThreadStatePatch => ({
@@ -424,21 +437,23 @@ const make = Effect.gen(function* () {
   ) {
     const before = statePatchOf(thread);
     let patch: MailStore.ThreadStatePatch | null = null;
-    let trustBefore: ReadonlyArray<TrustRecord> = [];
+    let trust: TrustUndo | null = null;
     let kind: MailActionKind = "settle";
     let reason: string | null = null;
     let undoable = true;
     switch (action.type) {
       case "settle":
       case "approve": {
+        if (thread.state === "settled") return null;
         const settleReason =
           action.type === "approve"
             ? (thread.suggestionReason ?? "fyi")
             : (action.reason ?? thread.suggestionReason ?? "done");
         patch = settledPatch(now, settleReason, actor.actor);
-        // "Settle these" is the user agreeing with the AI's read; it counts toward graduation.
-        if (actor.actor === "user") {
-          trustBefore = yield* updateTrust(thread, { type: "approve", reason: settleReason });
+        // Only agreeing with a pending suggestion counts toward graduation; settling mail the AI
+        // never flagged says nothing about whether it may settle that sender alone.
+        if (actor.actor === "user" && thread.suggestionReason !== null) {
+          trust = yield* updateTrust(thread, { type: "approve", reason: settleReason });
         }
         kind = action.type === "approve" ? "approve" : "settle";
         reason = settleReason;
@@ -449,8 +464,8 @@ const make = Effect.gen(function* () {
       case "unsettle": {
         const wasAi =
           thread.state === "settled" && (thread.settledBy === "ai" || thread.settledBy === "rule");
-        if (action.type === "keep" || wasAi) {
-          trustBefore = yield* updateTrust(thread, { type: "reject" });
+        if ((action.type === "keep" && thread.suggestionReason !== null) || wasAi) {
+          trust = yield* updateTrust(thread, { type: "reject" });
         }
         patch = {
           ...(thread.state === "active" ? {} : activePatch(now)),
@@ -491,11 +506,14 @@ const make = Effect.gen(function* () {
         kind = "unsnooze";
         break;
       case "never_show": {
-        const now2 = now;
         const { keys, sender } = yield* loadTrust(thread);
         const current = sender ?? emptyRecord(keys.sender, "sender");
-        trustBefore = [current];
-        yield* store.putTrust({ ...setLevel(current, "never"), reason: "noise" }, now2);
+        const next: TrustRecord = { ...setLevel(current, "never"), reason: "noise" };
+        yield* store.putTrust(next, now);
+        trust = {
+          effect: "level",
+          entries: [{ key: keys.sender, kind: "sender", before: current, after: next }],
+        };
         patch = settledPatch(now, "noise", actor.actor);
         kind = "never_show";
         reason = "noise";
@@ -531,7 +549,7 @@ const make = Effect.gen(function* () {
       kind,
       threadId: thread.id,
       reason,
-      undo: undoable ? { threadPatch: before, trust: trustBefore } : null,
+      undo: undoable ? { threadPatch: before, ...(trust ? { trust } : {}) } : null,
     });
   });
 
@@ -565,7 +583,15 @@ const make = Effect.gen(function* () {
           }
           const now = yield* nowIso;
           const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
-          for (const record of action.undo.trust ?? []) yield* store.putTrust(record, now);
+          if (action.undo.trust) {
+            const { effect, entries } = action.undo.trust;
+            const current = yield* store.getTrust(entries.map((entry) => entry.key));
+            for (const entry of entries) {
+              const next = reverseTrust(effect, current.get(entry.key) ?? null, entry);
+              if (next === null) yield* store.deleteTrust(entry.key);
+              else yield* store.putTrust(next, now);
+            }
+          }
           if (action.undo.draftId !== undefined) {
             const draft = yield* store.getDraft(action.undo.draftId);
             if (draft !== null && (draft.status === "draft" || draft.status === "failed")) {
@@ -583,11 +609,6 @@ const make = Effect.gen(function* () {
               action.undo.threadPatch.state === "settled"
             ) {
               yield* mirror(thread, "archive");
-            }
-            // Undoing an AI settle is a correction: the sender and category go back to suggest mode.
-            if (wasSettle && (action.actor === "ai" || action.actor === "rule")) {
-              const restored = yield* store.getThread(thread.id);
-              if (restored !== null) yield* updateTrust(restored, { type: "reject" });
             }
           }
           yield* store.markActionUndone(actionId, now);
@@ -753,8 +774,28 @@ const make = Effect.gen(function* () {
     };
   }, sqlSafe);
 
+  /** Mail that arrived after the snapshot was read gets its own triage; this verdict is stale. */
+  const isFresh = (seen: MailStore.ThreadRecord, current: MailStore.ThreadRecord | null) =>
+    current !== null &&
+    current.lastMessageAt === seen.lastMessageAt &&
+    current.incomingCount === seen.incomingCount;
+
+  const setTriageIfFresh = (
+    seen: MailStore.ThreadRecord,
+    patch: Parameters<MailStore.MailStore["Service"]["setTriage"]>[1],
+  ) =>
+    store.transaction(
+      store
+        .getThread(seen.id)
+        .pipe(
+          Effect.flatMap((current) =>
+            isFresh(seen, current) ? store.setTriage(seen.id, patch) : Effect.void,
+          ),
+        ),
+    );
+
   const applyDecision = Effect.fn("MailService.applyDecision")(function* (
-    thread: MailStore.ThreadRecord,
+    seen: MailStore.ThreadRecord,
     input: {
       readonly verdict: MailStore.ThreadVerdict;
       readonly prefiltered: PrefilterResult;
@@ -763,9 +804,13 @@ const make = Effect.gen(function* () {
       readonly category: MailCategory;
       readonly urgent: boolean;
       readonly injection: boolean;
+      /** Nothing to check guardrails against, so nothing settles on its own. */
+      readonly bodyMissing: boolean;
     },
   ) {
     const now = yield* nowIso;
+    const thread = yield* store.getThread(seen.id);
+    if (thread === null || !isFresh(seen, thread)) return;
     const guardrail = input.prefiltered.guardrail ?? (input.urgent ? "urgent" : null);
     yield* store.setTriage(thread.id, {
       line: input.line,
@@ -778,49 +823,60 @@ const make = Effect.gen(function* () {
       triagedCount: thread.incomingCount,
       injection: input.injection,
     });
-    const current = yield* store.getThread(thread.id);
     // The user may have moved it while L1 ran; their choice wins.
-    if (current === null || current.state !== "active" || current.pinnedAt !== null) return;
-    const trust = yield* loadTrust({ fromAddress: current.fromAddress, category: input.category });
+    if (thread.state !== "active" || thread.pinnedAt !== null) return;
+    const trust = yield* loadTrust({ fromAddress: thread.fromAddress, category: input.category });
     const reason = SETTLE_REASONS.has(input.verdict.reason as MailSettleReason)
       ? (input.verdict.reason as MailSettleReason)
       : null;
-    const decision = decide({
+    const decided = decide({
       verdict: { decision: input.verdict.decision, reason, confidence: input.verdict.confidence },
       guardrail,
       sender: trust.sender,
       category: trust.category,
       rule: input.prefiltered.rule,
     });
+    const decision: TrustDecision =
+      decided.type === "auto_settle" && decided.via !== "never_show" && input.bodyMissing
+        ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
+        : decided;
     if (decision.type === "auto_settle") {
       const by: MailActor =
         decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
-      yield* store.patchThread(current.id, settledPatch(now, decision.reason, by));
+      const entries = [trust.keys.sender, trust.keys.category].flatMap((key) => {
+        if (key === null) return [];
+        const kind = key === trust.keys.sender ? ("sender" as const) : ("category" as const);
+        const record =
+          (kind === "sender" ? trust.sender : trust.category) ?? emptyRecord(key, kind);
+        return [{ key, kind, before: record, after: record }];
+      });
+      yield* store.patchThread(thread.id, settledPatch(now, decision.reason, by));
       yield* store.insertAction({
         at: now,
         actor: by,
         actorLabel: null,
         kind: "settle",
-        threadId: current.id,
+        threadId: thread.id,
         reason: decision.reason,
-        undo: { threadPatch: statePatchOf(current), trust: [] },
+        undo: { threadPatch: statePatchOf(thread), trust: { effect: "ai_settle", entries } },
       });
-      yield* mirror(current, "archive");
+      yield* mirror(thread, "archive");
     } else if (decision.type === "suggest") {
-      yield* store.patchThread(current.id, {
+      yield* store.patchThread(thread.id, {
         suggestionReason: decision.reason,
         suggestionConfidence: decision.confidence,
       });
     } else {
-      yield* store.patchThread(current.id, { suggestionReason: null, suggestionConfidence: null });
+      yield* store.patchThread(thread.id, { suggestionReason: null, suggestionConfidence: null });
     }
-  });
+  }, store.transaction);
 
   interface Prepared {
     readonly thread: MailStore.ThreadRecord;
     readonly text: string;
     readonly prefiltered: PrefilterResult;
     readonly repliedTo: boolean;
+    readonly bodyMissing: boolean;
     readonly item: TriageItem;
   }
 
@@ -836,7 +892,10 @@ const make = Effect.gen(function* () {
     if (latest.bodyState === "pending") return "wait" as const;
     const account = yield* store.getAccount(thread.accountId);
     const me = account?.email.toLowerCase() ?? "";
-    const text = cleanForModel(latest.body ?? "", L1_TEXT_CHARS);
+    // Guardrails read the whole message; only the model's copy is cut short.
+    const full = cleanForModel(latest.body ?? "", GUARDRAIL_TEXT_CHARS);
+    const text =
+      full.length <= L1_TEXT_CHARS ? full : `${full.slice(0, L1_TEXT_CHARS).trimEnd()} …`;
     const replied = yield* store.repliedToAddresses(thread.accountId, [latest.from.address]);
     const toMe = latest.to.some((entry) => entry.address === me);
     const prefiltered = prefilter(
@@ -844,7 +903,7 @@ const make = Effect.gen(function* () {
         fromAddress: latest.from.address,
         fromName: latest.from.name,
         subject: latest.subject,
-        text,
+        text: full,
         listUnsubscribe: latest.listUnsubscribe,
         listId: latest.listId,
         precedence: latest.precedence,
@@ -873,6 +932,7 @@ const make = Effect.gen(function* () {
       text,
       prefiltered,
       repliedTo: replied.size > 0,
+      bodyMissing: latest.bodyState !== "loaded" || full.trim().length === 0,
       item: {
         id: "",
         from: latest.from.name
@@ -901,7 +961,7 @@ const make = Effect.gen(function* () {
     const items = batch.map((entry, index) => ({ ...entry.item, id: `e${index + 1}` }));
     const prompt = buildTriagePrompt({ rules: yield* compiledRules, items });
     const result = yield* textGeneration
-      .generateMailTriage({ cwd: store.workspaceDir, prompt, modelSelection: selection })
+      .generateMailTriage({ cwd: modelDir, prompt, modelSelection: selection })
       .pipe(Effect.timeout("3 minutes"));
     const outputChars = toJson(result).length;
     yield* recordUsage(kind, selection.model, prompt.length + outputChars, batch.length);
@@ -922,7 +982,7 @@ const make = Effect.gen(function* () {
       if (prepared === "wait") continue;
       progressed = true;
       if (prepared === null) {
-        yield* store.setTriage(thread.id, { triageState: "done" });
+        yield* setTriageIfFresh(thread, { triageState: "done" });
         continue;
       }
       const trust = yield* loadTrust({
@@ -942,29 +1002,32 @@ const make = Effect.gen(function* () {
       if (skip) {
         const fromMemory = trust.sender?.trust === "auto" || trust.sender?.trust === "never";
         const ruleVerdict = prepared.prefiltered.verdict;
-        yield* applyDecision(thread, {
-          verdict: {
-            decision: prepared.prefiltered.rule?.action === "keep" ? "keep" : "settle",
-            reason:
-              ruleVerdict?.reason ??
-              trust.sender?.reason ??
-              prepared.prefiltered.rule?.reason ??
-              "fyi",
-            confidence: ruleVerdict?.confidence ?? 0.9,
-            source: fromMemory ? "memory" : "rule",
-          },
-          prefiltered: prepared.prefiltered,
-          line,
-          suggestedAction: null,
-          category: prepared.prefiltered.category,
-          urgent: false,
-          injection,
-        });
+        yield* commit(
+          applyDecision(thread, {
+            verdict: {
+              decision: prepared.prefiltered.rule?.action === "keep" ? "keep" : "settle",
+              reason:
+                ruleVerdict?.reason ??
+                trust.sender?.reason ??
+                prepared.prefiltered.rule?.reason ??
+                "fyi",
+              confidence: ruleVerdict?.confidence ?? 0.9,
+              source: fromMemory ? "memory" : "rule",
+            },
+            prefiltered: prepared.prefiltered,
+            line,
+            suggestedAction: null,
+            category: prepared.prefiltered.category,
+            urgent: false,
+            injection,
+            bodyMissing: prepared.bodyMissing,
+          }),
+        );
         continue;
       }
       if (usage.capped || settings.defaultModelSelection === null) {
         // At the cap, or before a model is picked, only rules and settle-memory run.
-        yield* store.setTriage(thread.id, {
+        yield* setTriageIfFresh(thread, {
           line,
           category: prepared.prefiltered.category,
           guardrail: prepared.prefiltered.guardrail,
@@ -986,7 +1049,7 @@ const make = Effect.gen(function* () {
               Effect.annotateLogs({ count: batch.length, cause: String(cause).slice(0, 200) }),
               Effect.andThen(
                 Effect.forEach(batch, (entry) =>
-                  store.setTriage(entry.thread.id, { triageState: "waiting_model" }),
+                  setTriageIfFresh(entry.thread, { triageState: "waiting_model" }),
                 ),
               ),
               Effect.as([] as ReadonlyArray<{ entry: Prepared; verdict: null }>),
@@ -1016,7 +1079,7 @@ const make = Effect.gen(function* () {
           const verdict = better ?? result.verdict;
           const prepared = result.entry;
           if (verdict === null) {
-            yield* store.setTriage(prepared.thread.id, { triageState: "waiting_model" });
+            yield* setTriageIfFresh(prepared.thread, { triageState: "waiting_model" });
             continue;
           }
           const modelCategory = MAIL_CATEGORIES.has(verdict.category as MailCategory)
@@ -1027,23 +1090,26 @@ const make = Effect.gen(function* () {
             prepared.prefiltered.category === "notification"
               ? modelCategory
               : prepared.prefiltered.category;
-          yield* applyDecision(prepared.thread, {
-            verdict: {
-              decision: verdict.decision,
-              reason: verdict.reason,
-              confidence: Math.max(0, Math.min(1, verdict.confidence)),
-              source: better ? "escalated" : "model",
-            },
-            prefiltered: prepared.prefiltered,
-            line:
-              verdict.summary.trim().slice(0, 140) ||
-              firstLine(prepared.text) ||
-              prepared.thread.subject,
-            suggestedAction: verdict.action.trim().slice(0, 40) || null,
-            category,
-            urgent: verdict.urgent,
-            injection: verdict.injection || looksLikeInstructionsToAi(prepared.text),
-          });
+          yield* commit(
+            applyDecision(prepared.thread, {
+              verdict: {
+                decision: verdict.decision,
+                reason: verdict.reason,
+                confidence: Math.max(0, Math.min(1, verdict.confidence)),
+                source: better ? "escalated" : "model",
+              },
+              prefiltered: prepared.prefiltered,
+              line:
+                verdict.summary.trim().slice(0, 140) ||
+                firstLine(prepared.text) ||
+                prepared.thread.subject,
+              suggestedAction: verdict.action.trim().slice(0, 40) || null,
+              category,
+              urgent: verdict.urgent,
+              injection: verdict.injection || looksLikeInstructionsToAi(prepared.text),
+              bodyMissing: prepared.bodyMissing,
+            }),
+          );
         }
       }
     }
@@ -1055,7 +1121,7 @@ const make = Effect.gen(function* () {
   const drainTriage = Effect.gen(function* () {
     let more = true;
     while (more) {
-      more = yield* stateLock
+      more = yield* triageLock
         .withPermits(1)(triageRound)
         .pipe(
           Effect.catchCause((cause) =>
@@ -1123,17 +1189,27 @@ const make = Effect.gen(function* () {
           if (thread.workingReason !== "drafting" || thread.chatThreadId === null) continue;
           const shell = yield* threadManagement
             .getThreadShell(ThreadId.make(thread.chatThreadId))
-            .pipe(Effect.orElseSucceed(() => null));
-          const running =
-            shell !== null &&
-            (shell as { readonly latestRun?: { readonly status?: string } | null }).latestRun
-              ?.status === "running";
-          if (!running) {
+            .pipe(Effect.option);
+          // A failed lookup says nothing; only a chat that is gone or idle hands the email back.
+          if (Option.isNone(shell)) continue;
+          if (
+            shell.value === null ||
+            (shell.value.activeRunId === null && (shell.value.activityRunStatus ?? null) === null)
+          ) {
             yield* store.patchThread(thread.id, { ...activePatch(iso), stateAt: thread.stateAt });
             changed.push(thread.id);
           }
         }
         if (changed.length > 0) yield* engine.publishThreads(changed);
+        // Failed or capped triage gets another try; the cap rolls over weekly.
+        const minute = Math.floor(DateTime.toEpochMillis(now) / 60_000);
+        if (minute % TRIAGE_RETRY_MINUTES === 0 && settings.defaultModelSelection !== null) {
+          const usage = yield* engine.usage;
+          if (!usage.capped) {
+            yield* store.requeueWaitingTriage;
+            yield* Queue.offer(engine.triageSignal, undefined);
+          }
+        }
       }),
     )
     .pipe(
@@ -1155,7 +1231,7 @@ const make = Effect.gen(function* () {
         return yield* invalid("That draft was already sent.");
       }
       const id = existing?.id ?? MailDraftId.make(`draft-${yield* uuid}`);
-      const draft: MailStore.DraftRecord = {
+      const saved = yield* store.saveDraftContent({
         id,
         threadId: thread.id,
         accountId: thread.accountId,
@@ -1171,8 +1247,9 @@ const make = Effect.gen(function* () {
         // What an agent wrote first, so the user's edits can teach later drafts.
         originalBody: existing?.originalBody ?? (actor.actor === "user" ? null : input.body),
         messageId: null,
-      };
-      yield* store.putDraft(draft);
+        revision: 0,
+      });
+      if (saved === null) return yield* invalid("That draft was already sent.");
       if (existing === null) {
         yield* store.insertAction({
           at: now,
@@ -1193,7 +1270,7 @@ const make = Effect.gen(function* () {
         yield* store.patchThread(thread.id, { ...activePatch(now), stateAt: thread.stateAt });
       }
       yield* engine.publishThreads([thread.id]);
-      return MailStore.draftView(draft);
+      return MailStore.draftView(saved);
     },
     sqlSafe,
   );
@@ -1222,51 +1299,57 @@ const make = Effect.gen(function* () {
     function* (input) {
       const draft = yield* store.getDraft(input.draftId);
       if (draft === null) return yield* notFound("draft");
-      if (draft.status === "sent") return MailStore.draftView(draft);
+      if (draft.status === "sent" || draft.status === "sending") return MailStore.draftView(draft);
+      if (draft.revision !== input.revision) return yield* invalid(DRAFT_CHANGED);
       if (draft.to.length + draft.cc.length === 0)
         return yield* invalid("Add at least one recipient.");
+      const account = yield* store.getAccount(draft.accountId);
+      if (account === null) return yield* notFound("account");
       const now = yield* nowIso;
       const recent = (yield* store.draftsForThread(draft.threadId)).find(
         (other) =>
           other.id !== draft.id &&
           other.status === "sent" &&
-          other.body.trim() === input.body.trim() &&
+          other.body.trim() === draft.body.trim() &&
           other.sentAt !== null &&
           isoMillis(now) - isoMillis(other.sentAt) < SEND_DEDUPE_MS,
       );
       if (recent) return yield* invalid("The same reply was sent a moment ago.");
-      // One claim per approved body: a double tap or a retry cannot send twice.
-      if (!(yield* store.claimDraftForSend(draft.id, input.body, now))) {
+      // One claim per reviewed revision: a double tap or a retry cannot send twice, and a
+      // resend after an unclear failure keeps the first Message-ID.
+      const claimed = yield* store.claimDraftForSend(
+        draft.id,
+        input.revision,
+        `<${yield* uuid}@${domainOf(account.email) || "t3.mail"}>`,
+        now,
+      );
+      if (claimed === null) {
         const latest = yield* store.getDraft(draft.id);
         if (latest?.status === "sent" || latest?.status === "sending")
           return MailStore.draftView(latest);
-        return yield* invalid(
-          "The draft changed after you reviewed it. Review it again before sending.",
-        );
+        return yield* invalid(DRAFT_CHANGED);
       }
-      const account = yield* store.getAccount(draft.accountId);
-      if (account === null) return yield* notFound("account");
+      const messageId = claimed.messageId ?? "";
+      const fail = (message: string, code: "send_failed" | "auth_failed" = "send_failed") =>
+        store
+          .finishDraftSend(claimed.id, { status: "failed", error: message, at: now })
+          .pipe(
+            Effect.andThen(engine.publishThreads([claimed.threadId])),
+            Effect.andThen(Effect.fail(new MailError({ code, message }))),
+          );
       const password = yield* credentials
         .get(account.id, account.credentialStore)
         .pipe(Effect.orElseSucceed(() => null));
-      const fail = (message: string, code: "send_failed" | "auth_failed" = "send_failed") =>
-        store
-          .putDraft({ ...draft, status: "failed", error: message, updatedAt: now })
-          .pipe(
-            Effect.andThen(engine.publishThreads([draft.threadId])),
-            Effect.andThen(Effect.fail(new MailError({ code, message }))),
-          );
       if (password === null)
         return yield* fail("Re-enter the app password for this account.", "auth_failed");
-      const messages = yield* store.threadMessages(draft.threadId);
+      const messages = yield* store.threadMessages(claimed.threadId);
       const last = messages.at(-1);
-      const messageId = `<${yield* uuid}@${domainOf(account.email) || "t3.mail"}>`;
       const outgoing = {
         from: { name: account.displayName, address: account.email },
-        to: draft.to,
-        cc: draft.cc,
-        subject: draft.subject,
-        text: input.body,
+        to: claimed.to,
+        cc: claimed.cc,
+        subject: claimed.subject,
+        text: claimed.body,
         messageId,
         inReplyTo: last?.messageId ?? null,
         references: [
@@ -1297,38 +1380,39 @@ const make = Effect.gen(function* () {
         const info =
           failure && failure._tag === "Fail"
             ? failure.error
-            : { auth: false, detail: "Sending failed." };
-        return yield* fail(info.detail, info.auth ? "auth_failed" : "send_failed");
+            : { auth: false, definite: false, detail: "Sending failed." };
+        return yield* fail(
+          info.definite ? info.detail : `${info.detail} ${MAYBE_SENT}`,
+          info.auth ? "auth_failed" : "send_failed",
+        );
       }
       const sentAt = yield* nowIso;
+      yield* store.finishDraftSend(claimed.id, { status: "sent", error: null, at: sentAt });
       const final: MailStore.DraftRecord = {
-        ...draft,
-        body: input.body,
+        ...claimed,
         status: "sent",
         error: null,
-        messageId,
         sentAt,
         updatedAt: sentAt,
       };
-      yield* store.putDraft(final);
       const local = yield* store.upsertMessage({
         accountId: account.id,
         mailbox: "__local",
         uid: -Math.floor(isoMillis(sentAt) / 1000),
         messageId,
-        threadId: draft.threadId,
+        threadId: claimed.threadId,
         labels: null,
         inInbox: false,
         from: { name: account.displayName, address: account.email },
-        to: draft.to.map((address) => ({ name: "", address })),
-        cc: draft.cc.map((address) => ({ name: "", address })),
-        subject: draft.subject,
+        to: claimed.to.map((address) => ({ name: "", address })),
+        cc: claimed.cc.map((address) => ({ name: "", address })),
+        subject: claimed.subject,
         date: sentAt,
         inReplyTo: outgoing.inReplyTo,
         references: outgoing.references,
         seen: true,
         outgoing: true,
-        size: input.body.length,
+        size: claimed.body.length,
         attachments: [],
         listUnsubscribe: false,
         listId: null,
@@ -1337,31 +1421,31 @@ const make = Effect.gen(function* () {
         calendar: false,
         textPart: null,
       });
-      yield* store.setMessageBody(local.id, input.body);
-      yield* store.refreshThreadAggregate(draft.threadId);
-      const thread = yield* store.getThread(draft.threadId);
+      yield* store.setMessageBody(local.id, claimed.body);
+      yield* store.refreshThreadAggregate(claimed.threadId);
+      const thread = yield* store.getThread(claimed.threadId);
       if (thread !== null && thread.state !== "settled") {
         yield* store.patchThread(thread.id, settledPatch(sentAt, "replied", "user"));
         yield* mirror(thread, "archive");
       }
-      yield* engine.afterBodies([draft.threadId]);
+      yield* engine.afterBodies([claimed.threadId]);
       yield* store.insertAction({
         at: sentAt,
         actor: "user",
         actorLabel: null,
         kind: "send",
-        threadId: draft.threadId,
+        threadId: claimed.threadId,
         reason: null,
         undo: null,
       });
-      if (account.provider !== "gmail" && sent.value) {
+      if (account.provider !== "gmail") {
         yield* sync.enqueue(account.id, {
           kind: "append_sent",
           raw: sent.value.toString("base64"),
         });
       }
-      if (draft.originalBody !== null) yield* rememberEdit(draft.originalBody, input.body);
-      yield* engine.publishThreads([draft.threadId]);
+      if (claimed.originalBody !== null) yield* rememberEdit(claimed.originalBody, claimed.body);
+      yield* engine.publishThreads([claimed.threadId]);
       return MailStore.draftView(final);
     },
     sqlSafe,
@@ -1734,7 +1818,19 @@ const make = Effect.gen(function* () {
       kind: "trust",
       threadId: null,
       reason: input.trust,
-      undo: { trust: [current] },
+      undo: {
+        trust: {
+          effect: "level",
+          entries: [
+            {
+              key: input.key,
+              kind,
+              before: current,
+              after: input.trust === "reset" ? null : setLevel(current, input.trust),
+            },
+          ],
+        },
+      },
     });
   }, sqlSafe);
 
@@ -1794,7 +1890,7 @@ const make = Effect.gen(function* () {
     const prompt = buildVoicePrompt(samples);
     const result = yield* textGeneration
       .generateMailNotes({
-        cwd: store.workspaceDir,
+        cwd: modelDir,
         prompt,
         modelSelection: settings.defaultModelSelection,
       })
@@ -1820,6 +1916,13 @@ const make = Effect.gen(function* () {
   const dismissRecap: MailService["Service"]["dismissRecap"] = (date) =>
     store.setKv("recap-dismissed", date).pipe(Effect.andThen(engine.publishStatus), sqlSafe);
 
+  yield* fs.makeDirectory(modelDir, { recursive: true }).pipe(Effect.ignore);
+  yield* nowIso.pipe(
+    Effect.flatMap((now) =>
+      store.recoverInterruptedSends(now, `Sending was interrupted. ${MAYBE_SENT}`),
+    ),
+    Effect.ignore,
+  );
   yield* store.requeueWaitingTriage.pipe(Effect.ignore);
   for (const account of yield* store.listAccounts.pipe(Effect.orElseSucceed(() => []))) {
     yield* sync.start(account.id);

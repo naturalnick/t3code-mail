@@ -150,6 +150,8 @@ export const MailDraft = Schema.Struct({
   origin: MailActor,
   status: MailDraftStatus,
   error: Schema.NullOr(Schema.String),
+  /** Bumped by every save. Sending names the revision the user reviewed. */
+  revision: NonNegativeInt,
   updatedAt: IsoDateTime,
   sentAt: Schema.NullOr(IsoDateTime),
 });
@@ -439,8 +441,8 @@ export const MailSaveDraftInput = Schema.Struct({
 export const MailDraftInput = Schema.Struct({ draftId: MailDraftId });
 export const MailSendDraftInput = Schema.Struct({
   draftId: MailDraftId,
-  /** The body the user approved; the send is refused if the stored draft changed since. */
-  body: Schema.String,
+  /** The revision the user reviewed; the send is refused if the draft changed since. */
+  revision: NonNegativeInt,
 });
 
 export const MailOpenSessionInput = Schema.Struct({

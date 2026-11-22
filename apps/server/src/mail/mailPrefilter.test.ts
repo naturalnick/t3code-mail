@@ -53,6 +53,15 @@ describe("prefilter", () => {
       expected: { category: "invoice", guardrail: "money", verdict: null },
     },
     {
+      name: "a bill notice without money words is still guarded as money",
+      input: {
+        fromAddress: "no-reply@power.example",
+        subject: "Your November statement",
+        text: "Your bill is ready to view online.",
+      },
+      expected: { category: "invoice", guardrail: "money", verdict: null },
+    },
+    {
       name: "list mail with a sale is a noise promotion",
       input: {
         fromAddress: "deals@shop.example",

@@ -52,15 +52,19 @@ export function decide(input: DecideInput): TrustDecision {
     return { type: "auto_settle", reason: "noise", via: "never_show" };
   }
   if (rule?.action === "keep") return { type: "keep" };
-  if (rule?.action === "settle") return { type: "auto_settle", reason: rule.reason, via: "rule" };
+  const explicitlyTrusted = sender?.trust === "auto" && sender.explicit;
+  if (rule?.action === "settle") {
+    // A broad rule ("settle everything from this domain") still asks about an invoice.
+    return guardrail === null || explicitlyTrusted
+      ? { type: "auto_settle", reason: rule.reason, via: "rule" }
+      : { type: "suggest", reason: rule.reason, confidence: 1 };
+  }
   if (verdict.decision === "keep") return { type: "keep" };
   const reason = verdict.reason ?? sender?.reason ?? category?.reason ?? "fyi";
   const suggest: TrustDecision = { type: "suggest", reason, confidence: verdict.confidence };
   if (verdict.confidence < LOW_CONFIDENCE) return suggest;
   if (guardrail !== null) {
-    return sender?.trust === "auto" && sender.explicit
-      ? { type: "auto_settle", reason, via: "sender" }
-      : suggest;
+    return explicitlyTrusted ? { type: "auto_settle", reason, via: "sender" } : suggest;
   }
   if (sender?.trust === "auto") return { type: "auto_settle", reason, via: "sender" };
   // A sender the user just corrected stays in suggest mode even inside a trusted category.
@@ -111,6 +115,72 @@ export function recordRejection(record: TrustRecord): TrustRecord {
     trust: record.trust === "never" ? "never" : "suggest",
     explicit: false,
   };
+}
+
+/** What an action did to one key, so undoing it reverses only that and keeps later changes. */
+export interface TrustUndoEntry {
+  readonly key: string;
+  readonly kind: TrustRecord["kind"];
+  readonly before: TrustRecord;
+  /** Null when the action deleted the record. */
+  readonly after: TrustRecord | null;
+}
+
+export type TrustEffect = "approve" | "reject" | "level" | "ai_settle";
+
+export interface TrustUndo {
+  readonly effect: TrustEffect;
+  readonly entries: ReadonlyArray<TrustUndoEntry>;
+}
+
+/** Null deletes the record. */
+export function reverseTrust(
+  effect: TrustEffect,
+  current: TrustRecord | null,
+  entry: TrustUndoEntry,
+): TrustRecord | null {
+  const record = current ?? emptyRecord(entry.key, entry.kind);
+  switch (effect) {
+    case "ai_settle":
+      // Undoing an AI settle is a correction, like "keep in Active".
+      return recordRejection(record);
+    case "approve": {
+      const graduatedHere = entry.before.trust === "suggest" && entry.after?.trust === "auto";
+      return {
+        ...record,
+        approvals: Math.max(0, record.approvals - 1),
+        streak: Math.max(0, record.streak - 1),
+        trust:
+          graduatedHere && record.trust === "auto" && !record.explicit ? "suggest" : record.trust,
+      };
+    }
+    case "reject": {
+      const untouched = !record.explicit && record.trust === entry.after?.trust;
+      return {
+        ...record,
+        rejections: Math.max(0, record.rejections - 1),
+        streak: record.streak + entry.before.streak,
+        ...(untouched ? { trust: entry.before.trust, explicit: entry.before.explicit } : {}),
+      };
+    }
+    case "level": {
+      const untouched =
+        current === null
+          ? entry.after === null
+          : entry.after !== null &&
+            current.trust === entry.after.trust &&
+            current.explicit === entry.after.explicit;
+      if (!untouched) return current;
+      if (current === null) return entry.before;
+      return {
+        ...current,
+        trust: entry.before.trust,
+        explicit: entry.before.explicit,
+        streak: entry.before.streak,
+        reason: entry.before.reason ?? current.reason,
+      };
+    }
+  }
 }
 
 export function setLevel(record: TrustRecord, level: MailTrustLevel | "reset"): TrustRecord {

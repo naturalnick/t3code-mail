@@ -62,6 +62,8 @@ export interface IngestResult {
 }
 
 const QUESTION = /\?\s*$/m;
+/** Backfilled inbox mail older than this is history; it arrives settled. */
+const BACKLOG_DAYS = 30;
 
 function hashKey(value: string): string {
   return NodeCrypto.createHash("sha1").update(value).digest("hex").slice(0, 20);
@@ -91,6 +93,9 @@ export class MailEngine extends Context.Service<
         readonly seen: boolean;
         readonly labels: ReadonlyArray<string> | null;
       }>,
+    ) => Effect.Effect<void, SqlError.SqlError>;
+    readonly removeEmptyThreads: (
+      accountId: MailAccountId,
     ) => Effect.Effect<void, SqlError.SqlError>;
     readonly markRemoved: (
       context: Pick<IngestContext, "accountId" | "mailbox">,
@@ -288,7 +293,25 @@ const make = Effect.gen(function* () {
     context: IngestContext,
     messages: ReadonlyArray<ParsedMessage>,
   ) {
-    const now = yield* nowIso;
+    const nowAt = yield* DateTime.now;
+    const now = DateTime.formatIso(nowAt);
+    const backlogCutoff = DateTime.formatIso(DateTime.subtract(nowAt, { days: BACKLOG_DAYS }));
+    const result = yield* store.transaction(
+      ingestInTransaction(context, messages, now, backlogCutoff),
+    );
+    yield* publishThreads(result.visible);
+    if (result.quiet) yield* publishStatus;
+    if (result.queuedTriage) yield* Queue.offer(triageSignal, undefined);
+    return { newMessageIds: result.newMessageIds, threads: result.changed };
+  });
+
+  // Inside ingest's span and transaction.
+  const ingestInTransaction = Effect.fnUntraced(function* (
+    context: IngestContext,
+    messages: ReadonlyArray<ParsedMessage>,
+    now: string,
+    backlogCutoff: string,
+  ) {
     const me = context.accountEmail.toLowerCase();
     const newMessageIds: Array<{ id: number; uid: number }> = [];
     const touched = new Map<
@@ -349,6 +372,9 @@ const make = Effect.gen(function* () {
     }
 
     const changed: Array<MailThreadId> = [];
+    // Backfilled history that lands settled is counted, not streamed row by row.
+    const visible: Array<MailThreadId> = [];
+    let quiet = false;
     let queuedTriage = false;
     for (const [rawId, entry] of touched) {
       const id = MailThreadId.make(rawId);
@@ -364,8 +390,10 @@ const make = Effect.gen(function* () {
               message.labels?.includes("\\Inbox"),
             )
           : context.role === "primary";
-        // Mail the user already dealt with elsewhere, or old backfilled mail, arrives settled.
-        const arrivesSettled = context.backfill || (!inInbox && !lastIsMine);
+        // Mail already dealt with elsewhere arrives settled, and so does old backfilled history.
+        // Recent inbox mail that backfill reaches is triaged like new mail.
+        const arrivesSettled =
+          (!inInbox && !lastIsMine) || (context.backfill && inInbox && newest.date < backlogCutoff);
         yield* store.insertThread({
           id,
           accountId: context.accountId,
@@ -403,7 +431,11 @@ const make = Effect.gen(function* () {
           createdAt: now,
         });
         if (!arrivesSettled && !lastIsMine) queuedTriage = true;
-      } else if (!context.backfill) {
+        if (context.backfill && (arrivesSettled || lastIsMine)) quiet = true;
+        else visible.push(id);
+      } else if (!context.backfill && (!context.initial || newest.date > existing.lastMessageAt)) {
+        // A first sync (or a UIDVALIDITY re-sync) only acts on mail newer than the thread knew.
+        visible.push(id);
         const latestIsIncoming = entry.incoming.length > 0 && newest === entry.incoming.at(-1);
         if (latestIsIncoming) {
           // A reply from someone else brings the thread back, wherever it was.
@@ -459,9 +491,7 @@ const make = Effect.gen(function* () {
       yield* store.refreshThreadAggregate(id);
       changed.push(id);
     }
-    yield* publishThreads(changed);
-    if (queuedTriage) yield* Queue.offer(triageSignal, undefined);
-    return { newMessageIds, threads: changed };
+    return { newMessageIds, changed, visible, quiet, queuedTriage };
   });
 
   const applyFlags: MailEngine["Service"]["applyFlags"] = Effect.fn("MailEngine.applyFlags")(
@@ -558,11 +588,20 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const removeEmptyThreads: MailEngine["Service"]["removeEmptyThreads"] = Effect.fn(
+    "MailEngine.removeEmptyThreads",
+  )(function* (accountId) {
+    const emptied = yield* store.deleteEmptyThreads(accountId);
+    if (emptied.length > 0) yield* publishRemoved(emptied);
+  });
+
   const markRemoved: MailEngine["Service"]["markRemoved"] = Effect.fn("MailEngine.markRemoved")(
     function* (context, uids) {
       const threads = yield* store.markRemoved(context.accountId, context.mailbox, uids);
       for (const id of threads) yield* store.refreshThreadAggregate(id);
-      yield* publishThreads(threads);
+      const emptied = yield* store.deleteEmptyThreads(context.accountId);
+      yield* publishThreads(threads.filter((id) => !emptied.includes(id)));
+      if (emptied.length > 0) yield* publishRemoved(emptied);
     },
   );
 
@@ -570,6 +609,7 @@ const make = Effect.gen(function* () {
     ingest,
     applyFlags,
     markRemoved,
+    removeEmptyThreads,
     afterBodies,
     publishThreads,
     publishRemoved,

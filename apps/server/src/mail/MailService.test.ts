@@ -152,11 +152,20 @@ describe("MailService trust ramp", () => {
           const row = yield* rowOf(threadId);
           expect(row).toMatchObject({ state: "active", line: "Nightly build passed" });
           expect(row.suggestion).toMatchObject({ reason: "fyi" });
-          yield* mail.act(
-            { threadIds: [threadId], action: { type: "approve" } },
-            { actor: "user" },
-          );
+          // A repeated approve (double tap, stale client) is not a second approval.
+          for (const _ of [1, 2]) {
+            yield* mail.act(
+              { threadIds: [threadId], action: { type: "approve" } },
+              { actor: "user" },
+            );
+          }
           expect((yield* rowOf(threadId)).state).toBe("settled");
+          if (night === 1) {
+            const trust = yield* mail.listTrust;
+            expect(
+              trust.records.find((record) => record.key === "sender:updates@acme.dev"),
+            ).toMatchObject({ approvals: 1, streak: 1 });
+          }
         }
 
         const fourth = yield* deliver({
@@ -229,6 +238,24 @@ describe("MailService trust ramp", () => {
           agent,
         );
         expect((yield* rowOf(threadId)).hasDraft).toBe(true);
+        const draft = (yield* mail.getThread(threadId)).drafts[0]!;
+        const edited = yield* mail.saveDraft(
+          {
+            threadId,
+            draftId: draft.id,
+            to: draft.to,
+            cc: draft.cc,
+            subject: draft.subject,
+            body: "Friday at 10 works.",
+          },
+          { actor: "user" },
+        );
+        expect(edited.revision).toBe(draft.revision + 1);
+        // Approval covers one revision; a send of the version the user saw before is refused.
+        const stale = yield* mail
+          .sendDraft({ draftId: draft.id, revision: draft.revision })
+          .pipe(Effect.flip);
+        expect(stale.code).toBe("invalid");
 
         const log = yield* mail.listActions({ actor: "agent" });
         expect(

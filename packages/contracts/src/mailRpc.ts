@@ -163,8 +163,8 @@ export const MailRpcs = [
   Rpc.make(MAIL_WS_METHODS.mailDismissRecap, { payload: MailDismissRecapInput, error }),
 ] as const;
 
-/** Reading mail is reading the environment's data; acting on it operates it; accounts are settings. */
-export const MAIL_RPC_SCOPES = {
+/** Reading mail is reading the environment's data. */
+export const MAIL_READ_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailSubscribe]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailGetThread]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailListSettled]: AuthOrchestrationReadScope,
@@ -173,6 +173,10 @@ export const MAIL_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailListTrust]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailReadEmailMd]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailDryRunRule]: AuthOrchestrationReadScope,
+} as const;
+
+/** Acting on mail operates the environment; accounts, trust and EMAIL.md are settings. */
+export const MAIL_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailAct]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailUndo]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailSaveDraft]: AuthOrchestrationOperateScope,

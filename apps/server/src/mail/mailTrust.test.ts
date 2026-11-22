@@ -6,6 +6,7 @@ import {
   emptyRecord,
   recordApproval,
   recordRejection,
+  reverseTrust,
   setLevel,
   type TrustRecord,
 } from "./mailTrust.ts";
@@ -111,6 +112,49 @@ describe("trust ramp", () => {
       type: "auto_settle",
       reason: "receipt",
       via: "rule",
+    });
+    const invoice = {
+      ...base,
+      guardrail: "money",
+      rule: { action: "settle", reason: "fyi" },
+    } as const;
+    expect(decide(invoice).type).toBe("suggest");
+    expect(decide({ ...invoice, sender: sender({ trust: "auto", explicit: true }) }).type).toBe(
+      "auto_settle",
+    );
+  });
+
+  it("undoes one action's effect and keeps what happened after it", () => {
+    const entry = (before: TrustRecord, after: TrustRecord | null) => ({
+      key: before.key,
+      kind: before.kind,
+      before,
+      after,
+    });
+    const two = approve(sender(), 2);
+    const graduated = approve(two, 1);
+    const later = approve(graduated, 2);
+    expect(reverseTrust("approve", later, entry(two, graduated))).toMatchObject({
+      trust: "suggest",
+      approvals: 4,
+      streak: 4,
+    });
+
+    const kept = recordRejection(graduated);
+    expect(reverseTrust("reject", approve(kept, 1), entry(graduated, kept))).toMatchObject({
+      trust: "auto",
+      rejections: 0,
+      streak: 4,
+    });
+
+    const never = setLevel(two, "never");
+    expect(reverseTrust("level", never, entry(two, never))).toMatchObject({ trust: "suggest" });
+    expect(reverseTrust("level", setLevel(never, "auto"), entry(two, never))).toMatchObject({
+      trust: "auto",
+    });
+    expect(reverseTrust("ai_settle", graduated, entry(graduated, graduated))).toMatchObject({
+      trust: "suggest",
+      streak: 0,
     });
   });
 

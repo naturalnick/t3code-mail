@@ -24,6 +24,8 @@ const IDLE_REFRESH_MS = 25 * 60_000;
 const BACKFILL_INTERVAL_MS = 20_000;
 const SENT_POLL_MS = 5 * 60_000;
 const QUOTA_PAUSE_HOURS = 24;
+const BODY_ATTEMPTS = 3;
+const FETCH_FAILED = Symbol("fetch-failed");
 const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000, 5 * 60_000];
 
 export type ServerOp =
@@ -111,9 +113,8 @@ const make = Effect.gen(function* () {
         onFlags: () => {
           dirty = true;
         },
-        onExpunge: (uid) => {
-          const path = imap.client.mailbox ? imap.client.mailbox.path : null;
-          if (uid !== undefined && path !== null) expunged.push({ path, uid });
+        onExpunge: (path, uid) => {
+          if (uid !== undefined) expunged.push({ path, uid });
           dirty = true;
         },
         onClose: () => {},
@@ -159,10 +160,21 @@ const make = Effect.gen(function* () {
             return { type: "reset" as const };
           }
           if (known === null) {
+            const newest = await imap.fetchNewest(snapshot.exists, INITIAL_PAGE);
+            // All Mail's newest page can be mostly sent or archived mail; recent inbox mail
+            // must not wait for backfill.
+            const page = new Set(newest.map((message) => message.uid));
+            const inbox = imap.gmail
+              ? (await imap.searchGmailRaw("in:inbox"))
+                  .filter((uid) => !page.has(uid))
+                  .sort((a, b) => a - b)
+                  .slice(-INITIAL_PAGE)
+              : [];
             return {
               type: "initial" as const,
               snapshot,
-              messages: await imap.fetchNewest(snapshot.exists, INITIAL_PAGE),
+              messages: [...(await imap.fetchUids(inbox)), ...newest],
+              pageMin: newest[0]?.uid ?? null,
             };
           }
           const newer = await imap.fetchNewer(known.maxUid, 1_000);
@@ -187,8 +199,7 @@ const make = Effect.gen(function* () {
       const messages = result.messages;
       yield* ingest(path, role, messages, { initial: result.type === "initial", backfill: false });
       const maxUid = Math.max(known?.maxUid ?? 0, ...messages.map((message) => message.uid));
-      const minUid =
-        result.type === "initial" ? (messages[0]?.uid ?? null) : (known?.minUid ?? null);
+      const minUid = result.type === "initial" ? result.pageMin : (known?.minUid ?? null);
       if (result.type === "incremental") {
         yield* engine
           .applyFlags({ accountId, gmail: roles.gmail, mailbox: path }, result.flagChanges)
@@ -235,18 +246,31 @@ const make = Effect.gen(function* () {
       if (pending.length === 0) return 0;
       const bodies = yield* promise(() =>
         imap.withMailbox(path, null, async () => {
-          const results: Array<{ id: number; threadId: string; body: string | null }> = [];
+          const results: Array<{
+            id: number;
+            threadId: string;
+            body: string | null | typeof FETCH_FAILED;
+          }> = [];
           for (const row of pending) {
             const part = row.text_part ? parseTextPart(row.text_part) : null;
             const body =
-              part === null ? null : await imap.fetchBody(row.uid, part).catch(() => null);
+              part === null
+                ? null
+                : await imap
+                    .fetchBody(row.uid, part)
+                    .catch((): typeof FETCH_FAILED => FETCH_FAILED);
             results.push({ id: row.id, threadId: row.thread_id, body });
           }
           return results;
         }),
       );
-      for (const entry of bodies)
-        yield* store.setMessageBody(entry.id, entry.body).pipe(Effect.orDie);
+      for (const entry of bodies) {
+        yield* (
+          entry.body === FETCH_FAILED
+            ? store.bodyFetchFailed(entry.id, BODY_ATTEMPTS)
+            : store.setMessageBody(entry.id, entry.body)
+        ).pipe(Effect.orDie);
+      }
       yield* engine
         .afterBodies([...new Set(bodies.map((entry) => entry.threadId as MailThreadId))])
         .pipe(Effect.orDie);
@@ -289,6 +313,8 @@ const make = Effect.gen(function* () {
           backfillDone: messages.length === 0,
         })
         .pipe(Effect.orDie);
+      // After a UIDVALIDITY reset, threads whose mail never came back are gone for good.
+      if (messages.length === 0) yield* engine.removeEmptyThreads(accountId).pipe(Effect.orDie);
     });
 
     const runOps = Effect.gen(function* () {
@@ -349,12 +375,6 @@ const make = Effect.gen(function* () {
         if (newUid !== undefined) {
           yield* store.moveMessage(row.id, to, newUid, toInbox).pipe(Effect.orDie);
         }
-      }
-      // The source mailbox no longer has these UIDs; keep our state ahead of the next sync.
-      const target = yield* store.getMailbox(accountId, to).pipe(Effect.orDie);
-      if (target !== null) {
-        const maxMoved = Math.max(target.maxUid, ...moved.values());
-        yield* store.putMailbox({ ...target, maxUid: maxMoved }).pipe(Effect.orDie);
       }
     });
 
@@ -477,14 +497,8 @@ const make = Effect.gen(function* () {
       const fetched = yield* promise(() =>
         session.imap.withMailbox(primary, null, async () => {
           const uids = (await session.imap.searchGmailRaw(query)).slice(-200);
-          const missing = uids.filter((uid) => !known.has(uid));
-          const messages: Array<ParsedMessage> = [];
-          for (const uid of missing.slice(-50)) {
-            messages.push(
-              ...(await session.imap.fetchNewer(uid - 1, 1)).filter((m) => m.uid === uid),
-            );
-          }
-          return { uids, messages };
+          const missing = uids.filter((uid) => !known.has(uid)).slice(-50);
+          return { uids, messages: await session.imap.fetchUids(missing) };
         }),
       ).pipe(
         Effect.orElseSucceed(() => ({

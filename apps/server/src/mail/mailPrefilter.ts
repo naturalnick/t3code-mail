@@ -83,7 +83,9 @@ const NO_REPLY =
 function guardrailFor(input: PrefilterInput, category: MailCategory): MailGuardrail | null {
   const text = `${input.subject}\n${input.text}`;
   if (input.repliedTo) return "replied_to";
-  if (LEGAL.test(text)) return "legal";
+  if (category === "legal" || LEGAL.test(text)) return "legal";
+  if (category === "security") return "security";
+  if (category === "invoice") return "money";
   // A sign-in code is routine; an alert about the account is not.
   if (category !== "otp" && SECURITY.test(text)) return "security";
   if (MONEY.test(text)) return "money";
