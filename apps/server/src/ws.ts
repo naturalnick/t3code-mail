@@ -2005,7 +2005,8 @@ export const layerWsRpc = (
         [WS_METHODS.mailUndo]: (input) => mail.undo(input.actionId),
         [WS_METHODS.mailListActions]: (input) => mail.listActions(input),
         [WS_METHODS.mailSaveDraft]: (input) => mail.saveDraft(input, mailUser),
-        [WS_METHODS.mailDiscardDraft]: (input) => mail.discardDraft(input.draftId),
+        [WS_METHODS.mailDiscardDraft]: (input) =>
+          mail.discardDraft(input.draftId, input.expectedRevision),
         [WS_METHODS.mailSendDraft]: (input) => mail.sendDraft(input),
         [WS_METHODS.mailOpenSession]: (input) => mail.openSession(input),
         [WS_METHODS.mailAddAccount]: (input) => mail.addAccount(input),

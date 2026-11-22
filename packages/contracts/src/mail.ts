@@ -433,12 +433,16 @@ export const MailActionPage = Schema.Struct({
 export const MailSaveDraftInput = Schema.Struct({
   threadId: MailThreadId,
   draftId: Schema.optionalKey(MailDraftId),
+  expectedRevision: Schema.optionalKey(NonNegativeInt),
   to: Schema.Array(Schema.String),
   cc: Schema.Array(Schema.String),
   subject: Schema.String,
   body: Schema.String,
 });
-export const MailDraftInput = Schema.Struct({ draftId: MailDraftId });
+export const MailDraftInput = Schema.Struct({
+  draftId: MailDraftId,
+  expectedRevision: Schema.optionalKey(NonNegativeInt),
+});
 export const MailSendDraftInput = Schema.Struct({
   draftId: MailDraftId,
   /** The revision the user reviewed; the send is refused if the draft changed since. */

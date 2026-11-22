@@ -256,7 +256,10 @@ export class MailService extends Context.Service<
       input: MailSaveDraftInput,
       actor: MailActorInfo,
     ) => Effect.Effect<MailDraft, MailError>;
-    readonly discardDraft: (draftId: MailDraftId) => Effect.Effect<void, MailError>;
+    readonly discardDraft: (
+      draftId: MailDraftId,
+      expectedRevision?: number,
+    ) => Effect.Effect<void, MailError>;
     readonly sendDraft: (input: MailSendDraftInput) => Effect.Effect<MailDraft, MailError>;
     readonly openSession: (
       input: MailOpenSessionInput,
@@ -1226,9 +1229,13 @@ const make = Effect.gen(function* () {
       if (thread === null) return yield* notFound("email");
       const now = yield* nowIso;
       const existing = input.draftId ? yield* store.getDraft(input.draftId) : null;
-      if (input.draftId && existing === null) return yield* notFound("draft");
+      if (input.draftId && (existing === null || existing.threadId !== thread.id))
+        return yield* notFound("draft");
       if (existing !== null && (existing.status === "sending" || existing.status === "sent")) {
         return yield* invalid("That draft was already sent.");
+      }
+      if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision) {
+        return yield* invalid("The draft changed. Review the current version before editing.");
       }
       const id = existing?.id ?? MailDraftId.make(`draft-${yield* uuid}`);
       const saved = yield* store.saveDraftContent({
@@ -1269,20 +1276,31 @@ const make = Effect.gen(function* () {
       ) {
         yield* store.patchThread(thread.id, { ...activePatch(now), stateAt: thread.stateAt });
       }
-      yield* engine.publishThreads([thread.id]);
       return MailStore.draftView(saved);
     },
+    store.transaction,
+    Effect.tap((draft) => engine.publishThreads([draft.threadId])),
     sqlSafe,
   );
 
   const discardDraft: MailService["Service"]["discardDraft"] = Effect.fn(
     "MailService.discardDraft",
-  )(function* (draftId) {
-    const draft = yield* store.getDraft(draftId);
-    if (draft === null) return;
-    yield* store.deleteDraft(draftId);
-    yield* engine.publishThreads([draft.threadId]);
-  }, sqlSafe);
+  )(
+    function* (draftId, expectedRevision) {
+      const draft = yield* store.getDraft(draftId);
+      if (draft === null) return null;
+      if (draft.status === "sent" || draft.status === "sending")
+        return yield* invalid("That draft was already sent.");
+      if (expectedRevision !== undefined && expectedRevision !== draft.revision) {
+        return yield* invalid("The draft changed. Review the current version before discarding.");
+      }
+      yield* store.deleteDraft(draftId);
+      return draft.threadId;
+    },
+    store.transaction,
+    Effect.flatMap((id) => (id === null ? Effect.void : engine.publishThreads([id]))),
+    sqlSafe,
+  );
 
   const rememberEdit = Effect.fn("MailService.rememberEdit")(function* (
     original: string,

@@ -251,6 +251,22 @@ describe("MailService trust ramp", () => {
           { actor: "user" },
         );
         expect(edited.revision).toBe(draft.revision + 1);
+        const priorEdit = {
+          threadId,
+          draftId: draft.id,
+          to: draft.to,
+          cc: draft.cc,
+          subject: draft.subject,
+          body: "Overwrite from an old tab",
+          expectedRevision: draft.revision,
+        };
+        expect((yield* mail.saveDraft(priorEdit, { actor: "user" }).pipe(Effect.result))._tag).toBe(
+          "Failure",
+        );
+        expect((yield* mail.discardDraft(draft.id, draft.revision).pipe(Effect.result))._tag).toBe(
+          "Failure",
+        );
+        expect((yield* mail.getThread(threadId)).drafts[0]?.body).toBe(edited.body);
         // Approval covers one revision; a send of the version the user saw before is refused.
         const stale = yield* mail
           .sendDraft({ draftId: draft.id, revision: draft.revision })
