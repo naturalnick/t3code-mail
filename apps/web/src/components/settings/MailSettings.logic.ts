@@ -34,15 +34,13 @@ export function normalizeRule(rule: MailRule): MailRule | null {
       return value ? [[key, value]] : [];
     }),
   );
-  const { when: rawWhen, sensitive, ...rest } = rule;
-  // Never show is a hard block, so it takes no condition.
-  const when = rule.action === "never_show" ? "" : (rawWhen ?? "").trim();
+  const { when: rawWhen, ...rest } = rule;
+  const when = (rawWhen ?? "").trim();
   if (Object.keys(match).length === 0 && !when) return null;
   return {
     ...rest,
     match,
     ...(when ? { when } : {}),
-    ...(sensitive && rule.action === "settle" ? { sensitive } : {}),
   };
 }
 

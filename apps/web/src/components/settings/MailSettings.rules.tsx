@@ -12,10 +12,8 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { Select, SelectItem, SelectPopup, SelectTrigger } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { useMailCommand } from "./MailSettings.commands";
@@ -29,12 +27,6 @@ const matchFields = [
   ["subjectContains", msg("Subject contains")],
   ["listId", msg("List ID")],
 ] as const;
-const actions = {
-  settle: msg("Settle"),
-  keep: msg("Keep"),
-  never_show: msg("Never show"),
-} satisfies Record<MailRule["action"], string>;
-const actionOptions = ["settle", "keep", "never_show"] as const;
 
 /** A rule's scope in a few words, for lists and the email details. */
 export function useRuleSummary() {
@@ -48,7 +40,7 @@ export function useRuleSummary() {
           : [],
       )
       .join(" · ");
-    return { scope: scope || gt("Any email"), action: m(actions[rule.action]) };
+    return scope || gt("Any email");
   };
 }
 
@@ -58,7 +50,6 @@ export function newRule(patch: Partial<MailRule> = {}): MailRule {
     id: crypto.randomUUID?.() ?? randomUUID(),
     enabled: true,
     match: {},
-    action: "settle",
     reason: "fyi",
     ...patch,
   };
@@ -74,14 +65,17 @@ export function useSaveRule(environmentId: EnvironmentId) {
   );
   return {
     disabled: save.disabled,
-    run: async (rules: readonly MailRule[], rule: MailRule) =>
-      Boolean(
+    run: async (rules: readonly MailRule[], saved: MailRule) => {
+      // Saving it yourself makes it yours, whoever added it.
+      const { addedBy: _addedBy, ...rule } = saved;
+      return Boolean(
         await save.run({
           rules: rules.some((r) => r.id === rule.id)
             ? rules.map((r) => (r.id === rule.id ? rule : r))
             : [...rules, rule],
         }),
-      ),
+      );
+    },
   };
 }
 
@@ -146,51 +140,20 @@ export function RuleDialog({
                 </div>
               ))}
             </div>
-            <div className="flex flex-wrap gap-4">
-              <div className="grid gap-1.5">
-                <Label htmlFor={id + "action"}>{gt("Action")}</Label>
-                <Select
-                  value={draft.action}
-                  onValueChange={(value) => {
-                    if (value) setDraft({ ...draft, action: value });
-                  }}
-                >
-                  <SelectTrigger id={id + "action"}>{m(actions[draft.action])}</SelectTrigger>
-                  <SelectPopup>
-                    {actionOptions.map((action) => (
-                      <SelectItem key={action} value={action}>
-                        {m(actions[action])}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor={id + "when"}>{gt("Only when")}</Label>
+              <Textarea
+                id={id + "when"}
+                rows={2}
+                maxLength={300}
+                placeholder={gt("Shipping updates. Keep delivery confirmations.")}
+                value={draft.when ?? ""}
+                onChange={(event) => setDraft({ ...draft, when: event.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                {gt("The AI checks this on each email.")}
+              </p>
             </div>
-            {draft.action === "never_show" ? null : (
-              <div className="grid gap-1.5">
-                <Label htmlFor={id + "when"}>{gt("Only when")}</Label>
-                <Textarea
-                  id={id + "when"}
-                  rows={2}
-                  maxLength={300}
-                  placeholder={gt("Shipping updates. Keep delivery confirmations.")}
-                  value={draft.when ?? ""}
-                  onChange={(event) => setDraft({ ...draft, when: event.target.value })}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {gt("The AI checks this on each email.")}
-                </p>
-              </div>
-            )}
-            {draft.action === "settle" ? (
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm has-data-disabled:cursor-default">
-                <Checkbox
-                  checked={draft.sensitive === true}
-                  onCheckedChange={(checked) => setDraft({ ...draft, sensitive: checked === true })}
-                />
-                {gt("Also settle money, security and legal email")}
-              </label>
-            ) : null}
           </fieldset>
           {result && (
             <div role="status" className="space-y-1 text-sm">
@@ -276,14 +239,16 @@ export function MailRules({
     >
       {rules.length === 0 && <SettingsRow title={gt("No rules")} />}
       {rules.map((rule) => {
-        const { scope, action } = summary(rule);
         return (
           <SettingsRow
             key={rule.id}
-            title={scope}
-            description={
-              rule.when ? gt("{action} when: {when}", { action, when: rule.when }) : action
-            }
+            title={summary(rule)}
+            description={[
+              rule.when ? gt("Only when: {when}", { when: rule.when }) : null,
+              rule.addedBy ? gt("Added by {agent}", { agent: rule.addedBy }) : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
             control={
               <div className="flex items-center gap-2">
                 <Switch

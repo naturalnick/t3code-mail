@@ -2,6 +2,7 @@ import {
   OrchestratorMcpFailure,
   type MailAddress,
   type MailError,
+  type MailRule,
   type MailThreadRow,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -26,6 +27,14 @@ const row = (thread: MailThreadRow, excluded: (address: string) => boolean) => (
   unread: thread.unread,
   hasDraft: thread.hasDraft,
   ...(thread.suggestion ? { suggestedSettle: thread.suggestion.reason } : {}),
+});
+
+const ruleRow = (rule: MailRule) => ({
+  ruleId: rule.id,
+  enabled: rule.enabled,
+  match: rule.match,
+  ...(rule.when ? { when: rule.when } : {}),
+  ...(rule.addedBy ? { addedBy: rule.addedBy } : {}),
 });
 
 const failure = <A, R>(effect: Effect.Effect<A, MailError, R>) =>
@@ -161,6 +170,19 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
         );
         return { draftId: draft.id, revision: draft.revision };
       }),
+  ),
+  t3_mail_rules: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      return { rules: (yield* failure(mail.rules)).map(ruleRow) };
+    }),
+  ),
+  t3_mail_rule: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const rules = yield* failure(mail.saveRule(input, yield* agentActor));
+      return { rules: rules.map(ruleRow) };
+    }),
   ),
   t3_mail_triage: McpToolAccess.writes(({ threadIds, action, reason }) =>
     Effect.gen(function* () {

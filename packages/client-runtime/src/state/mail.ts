@@ -166,10 +166,6 @@ export function createMailEnvironmentAtoms<R, E>(
       tag: WS_METHODS.mailListActions,
       refreshTrigger: ({ environmentId }) => view(environmentId),
     }),
-    trust: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:mail:trust",
-      tag: WS_METHODS.mailListTrust,
-    }),
     emailMd: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:email-md",
       tag: WS_METHODS.mailReadEmailMd,
@@ -221,10 +217,6 @@ export function createMailEnvironmentAtoms<R, E>(
     updateSettings: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:update-settings",
       tag: WS_METHODS.mailUpdateSettings,
-    }),
-    setTrust: createEnvironmentRpcCommand(runtime, {
-      label: "environment-command:mail:set-trust",
-      tag: WS_METHODS.mailSetTrust,
     }),
     writeEmailMd: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:write-email-md",

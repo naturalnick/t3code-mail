@@ -37,13 +37,7 @@ import {
   draftTarget,
   hasOtherRecipients,
 } from "./mailCompose.logic";
-import {
-  actionLabel,
-  actorLabel,
-  guardrailLabel,
-  nudgeLabel,
-  senderName,
-} from "./mailPresentation";
+import { actionLabel, actorLabel, nudgeLabel, senderName } from "./mailPresentation";
 import { MailNewEmail } from "./MailNewEmail";
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
@@ -227,7 +221,7 @@ function MailThreadDetails({
             {rule ? (
               <div className="flex items-center justify-between gap-2">
                 <p className="min-w-0 text-muted-foreground">
-                  {gt("Your rule: {rule}", { rule: rule.when ?? summary(rule).scope })}
+                  {gt("Your rule: {rule}", { rule: rule.when ?? summary(rule) })}
                 </p>
                 <Button
                   size="compact"
@@ -238,13 +232,6 @@ function MailThreadDetails({
                   {gt("Edit rule")}
                 </Button>
               </div>
-            ) : null}
-            {suggestion && rule && thread.guardrail ? (
-              <p className="text-xs text-muted-foreground">
-                {gt("Mail asks first: {reason}", {
-                  reason: guardrailLabel(thread.guardrail, resolve),
-                })}
-              </p>
             ) : null}
             {suggestion ? (
               <div className="flex flex-wrap gap-2">
@@ -260,7 +247,7 @@ function MailThreadDetails({
                       setRuleEditor({
                         creating: true,
                         rule: newRule({
-                          match: { from: thread.from.address },
+                          match: thread.from.address ? { from: `<${thread.from.address}>` } : {},
                           when: detail?.kind ?? "",
                           reason: suggestion.reason,
                         }),

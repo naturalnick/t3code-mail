@@ -9,7 +9,7 @@ import {
   type MailDraft,
   MailDraftId,
   MailError,
-  type MailRule,
+  MailRule,
   mailSenderEntry,
   type MailReviewExistingInput,
   type MailSetSenderAiInput,
@@ -22,7 +22,6 @@ import {
   type MailThreadDetail,
   MailThreadId,
   type MailThreadRow,
-  type MailTrustRecord,
   MessageId,
   type ModelSelection,
   ThreadId,
@@ -47,10 +46,8 @@ import type {
   MailSearchResult,
   MailSeedVoiceResult,
   MailSendDraftInput,
-  MailSetTrustInput,
   MailThreadPage,
   MailThreadState,
-  MailTrustList,
   MailUpdateAccountInput,
   MailUpdateSettingsInput,
 } from "@t3tools/contracts";
@@ -113,12 +110,10 @@ import {
   decide,
   emptyRecord,
   LOW_CONFIDENCE,
-  previousTrustFields,
   recordApproval,
   recordRejection,
   reverseTrust,
   senderKey,
-  setLevel,
   type TrustDecision,
   type TrustRecord,
   type TrustUndo,
@@ -138,6 +133,7 @@ const TRASH_DAYS = 30;
 /** The model's reason travels with every sidebar row, so it stays one short line. */
 const WHY_CHARS = 140;
 const KIND_CHARS = 60;
+const sameRule = Schema.toEquivalence(MailRule);
 /** An address, or a domain with an optional leading @. */
 const SENDER_ENTRY = /^(?:[^\s@]+@|@)?[a-z\d-]+(?:\.[a-z\d-]+)+$/;
 
@@ -277,6 +273,15 @@ export interface MailActorInfo {
   readonly label?: string | undefined;
 }
 
+/** One rule change an agent makes for the user. Without `ruleId` it adds a rule. */
+export interface MailSaveRuleInput {
+  readonly ruleId?: string | undefined;
+  readonly delete?: boolean | undefined;
+  readonly match?: MailRule["match"] | undefined;
+  readonly when?: string | undefined;
+  readonly enabled?: boolean | undefined;
+}
+
 export class MailService extends Context.Service<
   MailService,
   {
@@ -331,11 +336,15 @@ export class MailService extends Context.Service<
     readonly updateSettings: (
       input: MailUpdateSettingsInput,
     ) => Effect.Effect<MailSettings, MailError>;
-    readonly listTrust: Effect.Effect<MailTrustList, MailError>;
-    readonly setTrust: (input: MailSetTrustInput) => Effect.Effect<void, MailError>;
     readonly readEmailMd: Effect.Effect<MailEmailMd, MailError>;
     readonly writeEmailMd: (content: string) => Effect.Effect<MailEmailMd, MailError>;
     readonly dryRunRule: (rule: MailRule) => Effect.Effect<MailDryRunRuleResult, MailError>;
+    readonly rules: Effect.Effect<ReadonlyArray<MailRule>, MailError>;
+    /** A rule change an agent made because the user asked; it applies at once. */
+    readonly saveRule: (
+      input: MailSaveRuleInput,
+      actor: MailActorInfo,
+    ) => Effect.Effect<ReadonlyArray<MailRule>, MailError>;
     readonly seedVoice: Effect.Effect<MailSeedVoiceResult, MailError>;
     readonly dismissRecap: (date: string) => Effect.Effect<void, MailError>;
     /** Tells whether the user turned AI off for a sender, so agents must not read its mail. */
@@ -439,7 +448,7 @@ const make = Effect.gen(function* () {
           ? recordApproval(before, { reason: change.reason })
           : recordRejection(before);
       yield* store.putTrust(after, now);
-      entries.push({ key, kind, clock: yield* store.advanceTrustClock(key, "feedback") });
+      entries.push({ key, kind, clock: yield* store.advanceTrustClock(key) });
     });
     yield* apply(sender, keys.sender, "sender");
     if (keys.category) yield* apply(category, keys.category, "category");
@@ -516,6 +525,7 @@ const make = Effect.gen(function* () {
     let mirrorUndo: MailStore.MirrorUndo | undefined;
     let read: NonNullable<MailStore.ActionRecord["undo"]>["read"];
     let trash: NonNullable<MailStore.ActionRecord["undo"]>["trash"];
+    let rule: NonNullable<MailStore.ActionRecord["undo"]>["rule"];
     switch (action.type) {
       case "settle":
       case "approve": {
@@ -592,24 +602,31 @@ const make = Effect.gen(function* () {
         patch = activePatch(now);
         kind = "unsnooze";
         break;
-      case "never_show": {
-        const { keys, sender } = yield* loadTrust(thread);
-        const current = sender ?? emptyRecord(keys.sender, "sender");
-        const next: TrustRecord = { ...setLevel(current, "never"), reason: "noise" };
-        yield* store.putTrust(next, now);
-        trust = {
-          effect: "level",
-          entry: {
-            key: keys.sender,
-            kind: "sender",
-            clock: yield* store.advanceTrustClock(keys.sender, "level"),
-          },
-          before: previousTrustFields(sender, next),
-        };
-        patch = settledPatch(now, "noise", actor.actor);
-        kind = "never_show";
-        reason = "noise";
-        mirrorUndo = yield* mirror(thread, "archive");
+      case "settle_sender": {
+        if (!thread.fromAddress) return yield* invalid("This email has no sender.");
+        const from = `<${thread.fromAddress.toLowerCase()}>`;
+        const settings = yield* engine.settings;
+        const covered = settings.rules.some(
+          (entry) =>
+            entry.enabled &&
+            !entry.when &&
+            Object.keys(entry.match).length === 1 &&
+            entry.match.from?.toLowerCase() === from,
+        );
+        if (!covered) {
+          rule = { id: yield* uuid, enabled: true, match: { from }, reason: "fyi" };
+          yield* engine.putSettings({
+            ...settings,
+            rules: [...settings.rules, rule],
+          });
+        }
+        if (thread.state === "settled") patch = {};
+        else {
+          patch = settledPatch(now, "fyi", actor.actor);
+          mirrorUndo = yield* mirror(thread, "archive");
+        }
+        kind = "settle_sender";
+        reason = "fyi";
         break;
       }
       case "mark_read": {
@@ -699,6 +716,7 @@ const make = Effect.gen(function* () {
       },
       {
         ...(trust ? { trust } : {}),
+        ...(rule ? { rule } : {}),
         ...(mirrorUndo ? { mirror: mirrorUndo } : {}),
         ...(read ? { read } : {}),
         ...(trash ? { trash } : {}),
@@ -829,21 +847,17 @@ const make = Effect.gen(function* () {
           targets: history.read.targets,
         });
       }
-      if (history.trust?.effect === "level") {
-        const { entry, before } = history.trust;
-        if ((yield* store.trustClock(entry.key)).revision !== entry.clock.revision)
-          return yield* staleUndo();
-        if (before) {
-          const record =
-            (yield* store.getTrust([entry.key])).get(entry.key) ??
-            emptyRecord(entry.key, entry.kind);
-          yield* store.putTrust({ ...record, ...before }, now);
-        } else yield* store.deleteTrust(entry.key);
-        yield* store.advanceTrustClock(
-          entry.key,
-          action.reason === "reset" || !before ? "reset" : "level",
-        );
-      } else if (history.trust) {
+      if (history.rule) {
+        const added = history.rule;
+        const settings = yield* engine.settings;
+        const current = settings.rules.find((entry) => entry.id === added.id);
+        if (!current || !sameRule(current, added)) return yield* staleUndo();
+        yield* engine.putSettings({
+          ...settings,
+          rules: settings.rules.filter((entry) => entry.id !== added.id),
+        });
+      }
+      if (history.trust) {
         const { effect, entries } = history.trust;
         const records = yield* store.getTrust(entries.map((entry) => entry.key));
         for (const entry of entries) {
@@ -851,7 +865,7 @@ const make = Effect.gen(function* () {
           if (entry.clock.reset !== latest.reset) continue;
           const current = records.get(entry.key) ?? emptyRecord(entry.key, entry.kind);
           yield* store.putTrust(reverseTrust(effect, current, entry.clock, latest), now);
-          yield* store.advanceTrustClock(entry.key, "feedback");
+          yield* store.advanceTrustClock(entry.key);
         }
       }
       if (thread && history.mirror && (yield* engine.settings).serverMirroring) {
@@ -1132,19 +1146,16 @@ const make = Effect.gen(function* () {
         : null;
       const decided = decide({
         verdict: { decision: input.verdict.decision, reason, confidence: input.verdict.confidence },
-        guardrail,
         sender: trust.sender,
         rule: input.prefiltered.rule,
         conditional: input.conditional ?? null,
       });
       const decision: TrustDecision =
-        decided.type === "auto_settle" && decided.via !== "never_show" && input.suggestOnly
+        decided.type === "auto_settle" && input.suggestOnly
           ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
           : decided;
       yield* saveNote(triageOutcome(decision, guardrail, input.conditional?.when ?? null));
       if (decision.type === "auto_settle") {
-        const by: MailActor =
-          decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
         const entries: Array<TrustUndoEntry> = [];
         for (const [key, kind] of [
           [trust.keys.sender, "sender"],
@@ -1155,10 +1166,10 @@ const make = Effect.gen(function* () {
         const mirrorUndo = yield* mirror(thread, "archive");
         yield* recordThreadAction(
           thread,
-          settledPatch(now, decision.reason, by),
+          settledPatch(now, decision.reason, "rule"),
           {
             at: now,
-            actor: by,
+            actor: "rule",
             actorLabel: null,
             kind: "settle",
             reason: decision.reason,
@@ -1345,25 +1356,26 @@ const make = Effect.gen(function* () {
         fromAddress: thread.fromAddress,
         category: prepared.prefiltered.category,
       });
-      // Only what the user set up exactly skips the model: their rules and Never show.
-      if (prepared.prefiltered.rule !== null || trust.sender?.trust === "never") {
+      // A rule with no condition is the user's exact choice, so it skips the model.
+      const exact = prepared.prefiltered.rule;
+      if (exact !== null) {
         yield* commit(
           applyDecision(thread, {
             verdict: {
-              decision: prepared.prefiltered.rule?.action === "keep" ? "keep" : "settle",
-              reason: prepared.prefiltered.rule?.reason ?? "noise",
+              decision: "settle",
+              reason: exact.reason,
               confidence: 1,
               source: "user_rule",
               why: null,
               by: null,
-              ruleId: prepared.prefiltered.rule?.id ?? null,
+              ruleId: exact.id,
             },
             prefiltered: prepared.prefiltered,
             suggestedAction: null,
             category: prepared.prefiltered.category,
             guardrail: prepared.prefiltered.guardrail,
             injection: looksLikeInstructionsToAi(prepared.text),
-            suggestOnly: prepared.bodyMissing,
+            suggestOnly: false,
           }),
         );
         continue;
@@ -1394,7 +1406,6 @@ const make = Effect.gen(function* () {
           flags: [...prepared.item.flags, ...trustFacts(trust)],
           rules: prepared.prefiltered.conditional.map((rule, index) => ({
             key: `r${index + 1}`,
-            action: rule.action === "keep" ? "keep" : "settle",
             when: rule.when,
           })),
         },
@@ -1539,7 +1550,7 @@ const make = Effect.gen(function* () {
               prepared.bodyMissing ||
               verdict.why.trim().length === 0 ||
               initial.confidence < LOW_CONFIDENCE ||
-              (prepared.repliedTo && !better && conditional?.sensitive !== true),
+              (prepared.repliedTo && !better && conditional === null),
           }),
         );
       }
@@ -2510,12 +2521,17 @@ const make = Effect.gen(function* () {
     "MailService.updateSettings",
   )(
     function* (input) {
-      const current = yield* engine.settings;
-      const next: MailSettings = {
-        ...current,
-        ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
-      };
-      yield* engine.putSettings(next);
+      const [current, next] = yield* store.transaction(
+        Effect.gen(function* () {
+          const current = yield* engine.settings;
+          const next: MailSettings = {
+            ...current,
+            ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
+          };
+          yield* engine.putSettings(next);
+          return [current, next] as const;
+        }),
+      );
       if (current.syncEnabled !== next.syncEnabled) {
         for (const account of yield* store.listAccounts) {
           if (account.credentialPending) continue;
@@ -2537,63 +2553,6 @@ const make = Effect.gen(function* () {
       return next;
     },
     changeAccounts,
-    sqlSafe,
-  );
-
-  const listTrust: MailService["Service"]["listTrust"] = store.listTrust.pipe(
-    Effect.map((rows) => ({
-      records: rows.map(({ record, updatedAt }): MailTrustRecord => ({
-        key: record.key,
-        kind: record.kind,
-        label: record.key.replace(/^(sender|category):/, ""),
-        reason: record.reason,
-        approvals: record.approvals,
-        rejections: record.rejections,
-        trust: record.trust,
-        updatedAt,
-      })),
-    })),
-    sqlSafe,
-  );
-
-  const setTrust: MailService["Service"]["setTrust"] = Effect.fn("MailService.setTrust")(
-    function* (input) {
-      const kind = input.key.startsWith("category:")
-        ? "category"
-        : input.key.startsWith("sender:")
-          ? "sender"
-          : null;
-      if (kind === null) return yield* invalid("Unknown trust key.");
-      const now = yield* nowIso;
-      const records = yield* store.getTrust([input.key]);
-      const current = records.get(input.key) ?? emptyRecord(input.key, kind);
-      const next = input.trust === "reset" ? null : setLevel(current, input.trust);
-      if (next === null) yield* store.deleteTrust(input.key);
-      else yield* store.putTrust(next, now);
-      yield* store.insertAction({
-        at: now,
-        actor: "user",
-        actorLabel: input.key,
-        kind: "trust",
-        threadId: null,
-        reason: input.trust,
-        undo: {
-          trust: {
-            effect: "level",
-            entry: {
-              key: input.key,
-              kind,
-              clock: yield* store.advanceTrustClock(
-                input.key,
-                input.trust === "reset" ? "reset" : "level",
-              ),
-            },
-            before: previousTrustFields(records.get(input.key) ?? null, next),
-          },
-        },
-      });
-    },
-    store.transaction,
     sqlSafe,
   );
 
@@ -2707,9 +2666,63 @@ const make = Effect.gen(function* () {
         aiExcludedSenders: input.enabled ? others : [...others, sender],
       };
       yield* engine.putSettings(next);
-      yield* engine.publishStatus;
       return next;
     },
+    store.transaction,
+    Effect.tap(() => engine.publishStatus),
+    changeAccounts,
+    sqlSafe,
+  );
+
+  const saveRule: MailService["Service"]["saveRule"] = Effect.fn("MailService.saveRule")(
+    function* (input, actor) {
+      const current = yield* engine.settings;
+      const existing =
+        input.ruleId === undefined
+          ? undefined
+          : current.rules.find((rule) => rule.id === input.ruleId);
+      if (input.ruleId !== undefined && existing === undefined) return yield* notFound("rule");
+      let rules: ReadonlyArray<MailRule>;
+      if (input.delete === true) {
+        if (!existing) return yield* invalid("Deleting a rule requires its ID.");
+        rules = current.rules.filter((rule) => rule.id !== existing.id);
+      } else {
+        const raw = input.match ?? existing?.match ?? {};
+        const match = Object.fromEntries(
+          Object.entries(raw).flatMap(([key, value]) => {
+            const trimmed = value?.trim() ?? "";
+            return trimmed ? [[key, trimmed]] : [];
+          }),
+        );
+        const when = (input.when ?? existing?.when ?? "").trim().slice(0, 300);
+        if (Object.keys(match).length === 0 && !when)
+          return yield* invalid("A rule needs a sender, domain, subject or list, or a `when`.");
+        const {
+          when: _when,
+          addedBy: _addedBy,
+          ...base
+        } = existing ?? {
+          id: yield* uuid,
+          enabled: true,
+          match: {},
+          reason: "fyi" as const,
+        };
+        const rule: MailRule = {
+          ...base,
+          match,
+          ...(when ? { when } : {}),
+          enabled: input.enabled ?? existing?.enabled ?? true,
+          ...(actor.actor === "user" ? {} : { addedBy: actor.label ?? "Agent" }),
+        };
+        rules = existing
+          ? current.rules.map((entry) => (entry.id === existing.id ? rule : entry))
+          : [...current.rules, rule];
+      }
+      yield* engine.putSettings({ ...current, rules });
+      return rules;
+    },
+    store.transaction,
+    Effect.tap(() => engine.publishStatus),
     changeAccounts,
     sqlSafe,
   );
@@ -2766,11 +2779,14 @@ const make = Effect.gen(function* () {
     removeAccount,
     syncNow,
     updateSettings,
-    listTrust,
-    setTrust,
     readEmailMd,
     writeEmailMd,
     dryRunRule,
+    rules: engine.settings.pipe(
+      Effect.map((settings) => settings.rules),
+      sqlSafe,
+    ),
+    saveRule,
     seedVoice,
     dismissRecap,
     aiExcluded,

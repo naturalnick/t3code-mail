@@ -14,25 +14,18 @@ it("requires a scope or a condition and drops empty fields before previewing or 
     enabled: false,
     match: { from: "  " },
     when: " ",
-    action: "settle",
     reason: "fyi",
-    sensitive: false,
   };
-  const { when: _when, sensitive: _sensitive, ...bare } = rule;
+  const { when: _when, ...bare } = rule;
   expect(normalizeRule(rule)).toBeNull();
   expect(
     normalizeRule({ ...rule, match: { from: " ", domain: " example.org ", listId: "list" } }),
   ).toEqual({ ...bare, match: { domain: "example.org", listId: "list" } });
-  expect(normalizeRule({ ...rule, when: " Shipping updates ", sensitive: true })).toEqual({
+  expect(normalizeRule({ ...rule, when: " Shipping updates " })).toEqual({
     ...bare,
     match: {},
     when: "Shipping updates",
-    sensitive: true,
   });
-  // Never show takes no condition and can't be sensitive.
-  expect(
-    normalizeRule({ ...rule, action: "never_show", when: "Promotions", sensitive: true }),
-  ).toBeNull();
 });
 
 it("adds voice notes within the existing tone section or creates one", () => {

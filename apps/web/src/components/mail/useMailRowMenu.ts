@@ -108,8 +108,8 @@ export function useMailRowMenu(
             },
           ]),
       {
-        id: "never_show",
-        label: gt("Never show this sender"),
+        id: "settle_sender",
+        label: gt("Always settle from this sender"),
         separatorBefore: senderAi.disabled,
       },
       { id: "delete", label: gt("Delete"), destructive: true },
@@ -163,8 +163,12 @@ export function useMailRowMenu(
       case "toggle_ai":
         void senderAi.toggle(thread.from.address);
         return;
-      case "never_show":
-        void actions.act(ids, { type: "never_show" }, gt("Sender muted"));
+      case "settle_sender":
+        void actions.act(
+          ids,
+          { type: "settle_sender" },
+          gt("Future mail from this sender will settle"),
+        );
         return;
       case "delete": {
         const deleted = await actions.act(ids, { type: "delete" }, gt("Moved to Trash"));

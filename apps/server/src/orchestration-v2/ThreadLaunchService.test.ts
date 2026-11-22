@@ -524,14 +524,16 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
       assert.include(yield* context.forTurn(accepted.id, true), "Actually, meet on Friday.");
 
       yield* deliver(3, "Confirmed for Saturday.");
-      yield* mail.setTrust({ key: "sender:ada@example.org", trust: "never" });
+      yield* mail.updateSettings({
+        rules: [{ id: "ada", enabled: true, match: { from: "ada@example.org" }, reason: "noise" }],
+      });
       yield* mail.drainTriage;
       const live = (yield* projection).visibleTurnItems.findLast(
         ({ item }) => item.type === "assistant_message",
       )?.item;
       assert.equal(live?.type, "assistant_message");
       if (live?.type !== "assistant_message") assert.fail("Missing saved triage");
-      assert.include(live.text, "Never Show preference");
+      assert.include(live.text, "by your mail rule");
       assert.include(live.text, "Settled as noise");
       yield* Effect.all([open, open], { concurrency: "unbounded" });
       const refreshed = yield* projection;

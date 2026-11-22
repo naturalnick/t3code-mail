@@ -206,10 +206,9 @@ export const MailActionKind = Schema.Literals([
   "unsnooze",
   "approve",
   "reject",
-  "never_show",
+  "settle_sender",
   "draft",
   "send",
-  "trust",
   "returned",
   "mark_read",
   "mark_unread",
@@ -297,9 +296,6 @@ export const MailAccount = Schema.Struct({
 });
 export type MailAccount = typeof MailAccount.Type;
 
-export const MailRuleAction = Schema.Literals(["settle", "keep", "never_show"]);
-export type MailRuleAction = typeof MailRuleAction.Type;
-
 export const MailRule = Schema.Struct({
   id: TrimmedNonEmptyString,
   enabled: Schema.Boolean,
@@ -315,10 +311,10 @@ export const MailRule = Schema.Struct({
    * skips the model.
    */
   when: Schema.optionalKey(TrimmedString.check(Schema.isMaxLength(300))),
-  action: MailRuleAction,
+  /** Recorded on what it settles; never shown. */
   reason: MailSettleReason,
-  /** Also settles mail Mail normally asks about: money, security, legal, urgent, people you write to. */
-  sensitive: Schema.optionalKey(Schema.Boolean),
+  /** The agent that added or last changed it; absent once the user saves it themselves. */
+  addedBy: Schema.optionalKey(TrimmedString),
 });
 export type MailRule = typeof MailRule.Type;
 
@@ -341,22 +337,6 @@ export const MailSettings = Schema.Struct({
   ),
 });
 export type MailSettings = typeof MailSettings.Type;
-
-/** "never" is Never show for a sender. Nothing settles on its own without a rule. */
-export const MailTrustLevel = Schema.Literals(["suggest", "never"]);
-export type MailTrustLevel = typeof MailTrustLevel.Type;
-
-export const MailTrustRecord = Schema.Struct({
-  key: Schema.String,
-  kind: Schema.Literals(["sender", "category"]),
-  label: Schema.String,
-  reason: Schema.NullOr(MailSettleReason),
-  approvals: NonNegativeInt,
-  rejections: NonNegativeInt,
-  trust: MailTrustLevel,
-  updatedAt: IsoDateTime,
-});
-export type MailTrustRecord = typeof MailTrustRecord.Type;
 
 export const MailUsage = Schema.Struct({
   weekStart: IsoDateTime,
@@ -495,7 +475,8 @@ export const MailThreadAction = Schema.Union([
   }),
   /** Dismiss the proposal, or refuse an AI settle. The model hears about it next time. */
   Schema.Struct({ type: Schema.Literal("keep") }),
-  Schema.Struct({ type: Schema.Literal("never_show") }),
+  /** Settles it and adds a rule that settles everything from this sender. */
+  Schema.Struct({ type: Schema.Literal("settle_sender") }),
   Schema.Struct({ type: Schema.Literal("mark_read") }),
   /** The newest incoming message becomes unread again. */
   Schema.Struct({ type: Schema.Literal("mark_unread") }),
@@ -622,12 +603,6 @@ export const MailUpdateSettingsInput = Schema.Struct({
   aiExcludedSenders: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
 });
 
-export const MailTrustList = Schema.Struct({ records: Schema.Array(MailTrustRecord) });
-export const MailSetTrustInput = Schema.Struct({
-  key: TrimmedNonEmptyString,
-  trust: Schema.Literals(["suggest", "never", "reset"]),
-});
-
 export const MailEmailMd = Schema.Struct({ path: Schema.String, content: Schema.String });
 export const MailWriteEmailMdInput = Schema.Struct({ content: Schema.String });
 
@@ -683,8 +658,6 @@ export type MailUpdateAccountInput = typeof MailUpdateAccountInput.Type;
 export type MailAccountInput = typeof MailAccountInput.Type;
 export type MailSyncInput = typeof MailSyncInput.Type;
 export type MailUpdateSettingsInput = typeof MailUpdateSettingsInput.Type;
-export type MailTrustList = typeof MailTrustList.Type;
-export type MailSetTrustInput = typeof MailSetTrustInput.Type;
 export type MailEmailMd = typeof MailEmailMd.Type;
 export type MailWriteEmailMdInput = typeof MailWriteEmailMdInput.Type;
 export type MailDryRunRuleInput = typeof MailDryRunRuleInput.Type;

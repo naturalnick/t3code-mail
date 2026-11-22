@@ -6,9 +6,9 @@ Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines
 
 - Web and desktop share the Mail tab, five sidebar sections, local search, Gmail server search, daily recap and action history. Open chat shows the email’s saved triage decisions in an ordinary T3 chat beside the email with the existing model picker and subagent controls. The first user question starts the model turn. Older email can show its last saved verdict when available.
 - IMAP sync prioritizes recent mail and backfills older messages. Mailbox rebuilds preserve pins, snoozes and chat associations. Queued archive and read operations target the messages present when the user acted.
-- Triage checks rules before calling the selected provider, batches verdicts and checks the weekly budget before each automatic triage call. Only rules settle on their own; a rule can carry a plain-language condition the model checks. Users review automatic settles and undo them. Protected categories require a rule that covers them.
+- Triage checks rules before calling the selected provider, batches verdicts and checks the weekly budget before each automatic triage call. Only rules settle on their own; a rule can carry a plain-language condition the model checks. Users review automatic settles and undo them. Agents can add and change rules through MCP.
 - Draft editing and send approval check the revision the user reviewed. Outside agents can read, search, leave drafts and propose settles through the CLI or MCP. Sending requires approval in the app.
-- Settings cover accounts, provider models, rules, hidden senders, EMAIL.md, notifications, server mirroring and usage. The web catalogs include all nine translated locales.
+- Settings cover accounts, provider models, rules, EMAIL.md, notifications, server mirroring and usage. The web catalogs include all nine translated locales.
 
 ## Verification and remaining coverage
 
@@ -23,8 +23,8 @@ Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines
 
 1. In this checkout run `T3CODE_DEV_INSTANCE=mail-v1 vp run dev --home-dir "$HOME/.t3-mail-v1" --no-seed`. Open the local web address and use the pairing URL printed by this server. This keeps the fork’s accounts, mail and chats separate from your installed T3 Code.
 2. Open **Mail → Mail settings → Add account**. For Gmail, enable 2-Step Verification, create a Google app password using the link in the dialog, then enter your Gmail address and the generated password. Gmail accounts whose administrator disables app passwords need OAuth, which is outside v1.
-3. Pick a **Default mail model** from your configured T3 providers. Review the initial suggestions in **Mail home**. The default trust threshold is three consecutive approvals.
-4. Use **Settled by AI** to inspect or undo automatic settles. Open a thread to draft, review and explicitly approve a reply. Server archiving is opt-in.
+3. Pick a **Default mail model** from your configured T3 providers. Review the initial suggestions in **Mail home**. Choose **Auto-settle…** on a suggestion to make a rule.
+4. Use the **Daily recap** in **Mail review** to inspect or undo automatic settles. Open a thread to draft, review and explicitly approve a reply. Server archiving is opt-in.
 
 See [the Mail guide](../user/mail.md) for other providers, rules, MCP tools and CLI examples.
 

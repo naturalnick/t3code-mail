@@ -33,9 +33,7 @@ export function triageOutcome(
   const ruleNote = rule ? ` Your rule: "${rule}".` : "";
   if (decision.type === "suggest")
     return `Suggested settling as ${reason}.${ruleNote} ${guardrail ? reviewReason[guardrail] + " " : ""}Left in Active for your review.`;
-  return decision.via === "never_show"
-    ? `Settled as ${reason} by your Never Show preference.`
-    : `Settled as ${reason} by your mail rule.${ruleNote}`;
+  return `Settled as ${reason} by your mail rule.${ruleNote}`;
 }
 
 export function triageText(

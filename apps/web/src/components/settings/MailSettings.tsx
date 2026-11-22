@@ -185,54 +185,6 @@ function NumericSetting({
   );
 }
 
-/** Senders muted with Never show. Showing one again is the only way back, so it lives here. */
-function HiddenSenders({ environmentId }: { environmentId: EnvironmentId }) {
-  const gt = useGT();
-  const searchable = useSearchableSetting();
-  const query = useEnvironmentQuery(mailEnvironment.trust({ environmentId, input: {} }));
-  const change = useMailCommand(
-    environmentId,
-    mailEnvironment.setTrust,
-    gt("Could not show this sender again"),
-  );
-  const hidden = query.data?.records.filter((record) => record.trust === "never") ?? [];
-  return (
-    <SettingsSection {...searchable("mail-hidden")}>
-      {query.error ? (
-        <SettingsRow
-          title={query.error}
-          control={
-            <Button size="xs" variant="outline" onClick={query.refresh}>
-              {gt("Retry")}
-            </Button>
-          }
-        />
-      ) : hidden.length === 0 ? (
-        <SettingsRow title={query.data ? gt("No hidden senders") : gt("Loading…")} />
-      ) : (
-        hidden.map((record) => (
-          <SettingsRow
-            key={record.key}
-            title={record.label}
-            control={
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={change.disabled}
-                onClick={async () => {
-                  if (await change.run({ key: record.key, trust: "suggest" })) query.refresh();
-                }}
-              >
-                {gt("Show again")}
-              </Button>
-            }
-          />
-        ))
-      )}
-    </SettingsSection>
-  );
-}
-
 function Usage({ environmentId, usage }: { environmentId: EnvironmentId; usage: MailUsage }) {
   const gt = useGT();
   const locale = useLocale();
@@ -475,7 +427,6 @@ const MailSections = memo(function MailSections({
       <MailModels environmentId={environmentId} settings={settings} />
 
       <MailRules environmentId={environmentId} rules={settings.rules} />
-      <HiddenSenders environmentId={environmentId} />
       <MailAiOff environmentId={environmentId} senders={settings.aiExcludedSenders} />
       <Usage environmentId={environmentId} usage={status.usage} />
       <Behavior environmentId={environmentId} settings={settings} />

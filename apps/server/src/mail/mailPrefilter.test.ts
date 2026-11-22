@@ -96,22 +96,18 @@ describe("prefilter", () => {
         id: "off",
         enabled: false,
         match: { domain: "acme.dev" },
-        action: "keep",
         reason: "fyi",
       },
       {
         id: "acme",
         enabled: true,
         match: { domain: "@acme.dev" },
-        action: "settle",
         reason: "receipt",
       },
     ];
     expect(prefilter({ ...base, fromAddress: "billing@mail.acme.dev" }, rules).rule).toEqual({
       id: "acme",
-      action: "settle",
       reason: "receipt",
-      sensitive: false,
     });
     expect(prefilter({ ...base, fromAddress: "x@notacme.dev" }, rules).rule).toBeNull();
   });
@@ -122,7 +118,6 @@ describe("prefilter", () => {
       enabled: true,
       match: { domain: "shop.dev" },
       when: "Shipping updates. Keep delivery confirmations.",
-      action: "settle",
       reason: "fyi",
     };
     const anywhere: MailRule = {
@@ -130,16 +125,14 @@ describe("prefilter", () => {
       enabled: true,
       match: {},
       when: "Promotions",
-      action: "settle",
       reason: "noise",
-      sensitive: true,
     };
     const shop = { ...base, fromAddress: "orders@shop.dev" };
     expect(prefilter(shop, [shipping, anywhere])).toMatchObject({
       rule: null,
       conditional: [
-        { id: "shipping", when: shipping.when, sensitive: false },
-        { id: "promos", sensitive: true },
+        { id: "shipping", when: shipping.when },
+        { id: "promos", when: "Promotions" },
       ],
     });
     expect(prefilter({ ...base, fromAddress: "x@other.dev" }, [shipping]).conditional).toEqual([]);

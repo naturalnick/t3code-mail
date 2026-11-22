@@ -273,12 +273,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("filters automatic settle domain subject list dry run when condition")],
   },
   {
-    id: "mail-hidden",
-    title: msg("Hidden senders"),
-    to: "/settings/mail",
-    searchTerms: [msg("never show muted blocked sender")],
-  },
-  {
     id: "mail-ai-off",
     title: msg("AI off"),
     to: "/settings/mail",

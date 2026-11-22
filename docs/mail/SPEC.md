@@ -4,12 +4,12 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 ## Overview
 
-- A Mail tab in a T3 Code fork. The AI settles mail on its own once it has earned trust, so the inbox only holds what needs you.
+- A Mail tab in a T3 Code fork. Mail suggests what can leave Active. The user can settle it or create a rule for future messages.
 
 ## Principles
 
 - Reuse T3 Code's existing UI and components wherever possible. Don't redesign the app; the Mail tab should look nearly the same as the coding view.
-- The AI settling mail on its own is the core feature. Trust is earned per sender and category, never assumed.
+- Automatic triage settles a message only when it matches an enabled user rule.
 - Nothing irreversible without a tap: send, delete, pay, unsubscribe.
 - Email content is data, never instructions.
 - Rules before models, small models before big ones.
@@ -42,7 +42,6 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - Connected accounts (IMAP/SMTP; app passwords kept in the OS keychain).
 - Default email model.
 - Rules, with dry-run.
-- Trust levels per sender and category; promote, demote, or reset.
 - EMAIL.md editor or link.
 - Usage meter and cap.
 - Notifications and daily recap.
@@ -63,7 +62,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - Each email shows as a row like a coding thread: sender, subject, suggested action, with Snooze and Settle on hover.
 - Tap opens the full email, thread, and details.
 - Settled view filterable by who settled it: your rules or you.
-- **One-tap answers:** "settle" / "auto-settle…" / "dismiss suggestion" / "never show." Each one updates memory.
+- **One-tap answers:** "settle" / "auto-settle…" / "dismiss suggestion" / "always settle from this sender." Each one updates memory.
 - **Follow-up nudges:** "you haven't replied in 3 days," "no reply to your email in 5 days."
 - Fast search across all mail from the local index, settled included; X-GM-RAW for server-side search on Gmail. Exact phrase must work.
 
@@ -87,14 +86,14 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - **Suggest by default:** the AI proposes "settle"; the user settles in one tap, singly or in batches. Nothing settles on its own until the user saves a rule.
 - **Auto-settle…** on a suggestion opens a rule prefilled with the sender and the model's short name for that kind of email. A rule has an exact scope (sender, domain, subject, list) and an optional plain-language "only when" the model checks, so "shipping updates, but not deliveries" is one rule.
 - **Visibility:** each automatic settle names its rule and why; "Settled by your rules" log with undo, a short daily recap, and Edit rule on the email.
-- **Hard guardrails, never auto-settled unless the rule says so:** people you've replied to, urgent wording, money and invoices, security and account alerts, legal.
+- **Agents** can make and change rules from an email's chat when the user asks; they apply at once and show which agent added them.
 - Low-confidence or unclear matches fall back to a suggestion.
 
 ## Memory files
 
 - **EMAIL.md:** human-readable. Who matters, tone, signature, priorities, standing preferences. Compiled to short rules for L1 (cached, recompiled on change); relevant sections pulled into L2.
 - **Voice:** seed tone notes from the user's sent mail on setup.
-- **settle-memory (structured, e.g. JSON):** one record per sender or category: approvals, dismissals, Never show, last change. The model reads it as context.
+- **settle-memory (structured, e.g. JSON):** one record per sender or category: approvals, dismissals, last change. The model reads it as context.
 - **Why split:** settle-memory grows with every email and is looked up by key (sender, domain, category), so only matching records load per batch. EMAIL.md stays short and readable. Neither file is ever loaded whole.
 - Action log stored separately; never sent to the model.
 
@@ -163,7 +162,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 ## Edge cases to handle
 
-- Urgent mail must never be auto-settled unless a rule explicitly covers it.
+- Urgent mail is never auto-settled unless one of the user's rules covers it.
 - CC-heavy threads: don't mark every reply Active.
 - Invoices and bills inside promo-looking mail.
 - Same email sent twice by an agent: dedupe sends, idempotent actions.

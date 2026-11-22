@@ -1,26 +1,10 @@
-import type { MailActionEntry, MailAddress, MailGuardrail } from "@t3tools/contracts";
+import type { MailActionEntry, MailAddress } from "@t3tools/contracts";
 import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "../../i18n/messages";
 
 export function senderName(from: MailAddress): string {
   return from.name.trim() || from.address;
-}
-
-/** Why Mail asks before settling this one, even when a rule covers it. */
-export function guardrailLabel(guardrail: MailGuardrail, resolve: MessageResolver = m): string {
-  switch (guardrail) {
-    case "replied_to":
-      return resolve(msg("You've written to this sender"));
-    case "urgent":
-      return resolve(msg("Urgent wording"));
-    case "money":
-      return resolve(msg("Money or an invoice"));
-    case "security":
-      return resolve(msg("Account security"));
-    case "legal":
-      return resolve(msg("Legal"));
-  }
 }
 
 /** Nudges arrive as `waiting:N` or `unanswered:N`, so the server never stores translated copy. */
@@ -47,8 +31,8 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
       return resolve(msg("Moved back to Active"));
     case "reject":
       return resolve(msg("Dismissed suggestion"));
-    case "never_show":
-      return resolve(msg("Never show this sender"));
+    case "settle_sender":
+      return resolve(msg("Always settle from this sender"));
     case "pin":
       return resolve(msg("Pinned", { $context: "email action log" }));
     case "unpin":
@@ -70,8 +54,6 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
       return resolve(msg("Waiting for reply"));
     case "send":
       return action.reason ?? resolve(msg("Sent a reply"));
-    case "trust":
-      return resolve(msg("Changed trust"));
     case "nudge":
       return nudgeLabel(action.reason, resolve) ?? resolve(msg("Returned to Active"));
     case "returned":

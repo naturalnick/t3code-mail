@@ -283,9 +283,15 @@ export function MailThreadToolbar({
             </MenuItem>
           )}
           <MenuItem
-            onClick={() => void act([thread.id], { type: "never_show" }, gt("Sender muted"))}
+            onClick={() =>
+              void act(
+                [thread.id],
+                { type: "settle_sender" },
+                gt("Future mail from this sender will settle"),
+              )
+            }
           >
-            {gt("Never show this sender")}
+            {gt("Always settle from this sender")}
           </MenuItem>
           <MenuSeparator />
           <MenuItem

@@ -308,7 +308,52 @@ it.effect("prefetches formatted bodies only for mail a reader is likely to open"
   ),
 );
 
-describe("MailService trust ramp", () => {
+describe("MailService rules and feedback", () => {
+  it.effect.each([false, true])("migrates hidden senders with saved settings = %s", (saved) =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        const engine = yield* MailEngine.MailEngine;
+        const defaults = yield* engine.settings;
+        const retained = {
+          id: "reports",
+          enabled: false,
+          match: { domain: "work.dev" },
+          reason: "fyi",
+        };
+        if (saved)
+          yield* store.setKv(
+            "settings",
+            JSON.stringify({
+              ...defaults,
+              recapEnabled: false,
+              rules: [
+                { ...retained, action: "settle" },
+                { ...retained, id: "old", action: "keep" },
+              ],
+            }),
+          );
+        yield* store.sql`ALTER TABLE mail_trust ADD COLUMN trust TEXT NOT NULL DEFAULT 'suggest'`;
+        yield* store.sql`INSERT INTO mail_trust(key, kind, approvals, rejections, updated_at, trust)
+          VALUES ('sender:alerts@acme.dev', 'sender', 0, 0, ${at}, 'never')`;
+        yield* store.sql`PRAGMA user_version = 15`;
+        yield* store.migrate;
+        expect(yield* engine.settings).toEqual({
+          ...defaults,
+          recapEnabled: !saved,
+          rules: [
+            ...(saved ? [retained] : []),
+            {
+              id: "never-show-alerts@acme.dev",
+              enabled: true,
+              match: { from: "<alerts@acme.dev>" },
+              reason: "noise",
+            },
+          ],
+        });
+      }),
+    ),
+  );
   it.effect(
     "only suggests until the user saves a rule, then the rule settles what it covers",
     () => {
@@ -316,6 +361,7 @@ describe("MailService trust ramp", () => {
       return withMail(
         Effect.gen(function* () {
           const mail = yield* MailService.MailService;
+          const store = yield* MailStore.MailStore;
           yield* mail.updateSettings({
             defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
           });
@@ -349,10 +395,10 @@ describe("MailService trust ramp", () => {
             expect((yield* rowOf(threadId)).state).toBe("settled");
           }
           expect(
-            (yield* mail.listTrust).records.find(
-              (record) => record.key === "sender:updates@acme.dev",
-            ),
-          ).toMatchObject({ approvals: 4, trust: "suggest" });
+            (yield* store.listTrust)
+              .map(({ record }) => record)
+              .find((record) => record.key === "sender:updates@acme.dev"),
+          ).toMatchObject({ approvals: 4 });
           expect(prompts.at(-1)).toContain(
             "the user approved settling 3 earlier email(s) from this sender as fyi",
           );
@@ -362,7 +408,6 @@ describe("MailService trust ramp", () => {
             enabled: true,
             match: { from: "updates@acme.dev" },
             when: "Builds that passed",
-            action: "settle",
             reason: "fyi",
           } as const;
           yield* mail.updateSettings({ rules: [rule] });
@@ -408,16 +453,16 @@ describe("MailService trust ramp", () => {
           }
           expect((yield* engine.usage).calls).toBe(callsBefore + 2);
 
-          // Money in the text is a guardrail: the rule matches, but Mail asks first.
+          // A rule is the user's firm choice, so it settles an invoice it covers too.
           const invoice = yield* deliver({
             subject: "Invoice for build minutes",
             body: "Amount due: $42 by Friday.",
             at: "2026-11-07T06:00:00.000Z",
           });
           expect(yield* rowOf(invoice)).toMatchObject({
-            state: "active",
+            state: "settled",
+            settledBy: "rule",
             guardrail: "money",
-            suggestion: { reason: "fyi" },
           });
 
           const log = yield* mail.listActions({ actor: "rule" });
@@ -612,7 +657,7 @@ describe("MailService trust ramp", () => {
     { category: "invoice", guardrail: "money", subject: "Statement enclosed", list: false },
     { category: "security", guardrail: "security", subject: "Urgent sale update", list: true },
     { category: "legal", guardrail: "legal", subject: "Urgent bulletin", list: true },
-  ])("applies the model's $category guardrail before a rule", (entry) =>
+  ])("settles $category mail a rule covers; the guardrail only labels it", (entry) =>
     withMail(
       Effect.gen(function* () {
         const mail = yield* MailService.MailService;
@@ -626,7 +671,6 @@ describe("MailService trust ramp", () => {
               enabled: true,
               match: {},
               when: "Anything routine",
-              action: "settle",
               reason: "fyi",
             },
           ],
@@ -638,9 +682,9 @@ describe("MailService trust ramp", () => {
           at: "2026-11-01T06:00:00.000Z",
         });
         expect(yield* rowOf(threadId)).toMatchObject({
-          state: "active",
+          state: "settled",
+          settledBy: "rule",
           guardrail: entry.guardrail,
-          suggestion: { reason: "fyi" },
         });
       }),
       () => ({ category: entry.category, rule: "r1" }),
@@ -663,7 +707,6 @@ describe("MailService trust ramp", () => {
               enabled: true,
               match: {},
               when: "Anything routine",
-              action: "settle",
               reason: "fyi",
             },
           ],
@@ -871,6 +914,45 @@ describe("MailService trust ramp", () => {
     ),
   );
 
+  it.effect("lets an agent add, change and delete a rule that applies at once", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const engine = yield* MailEngine.MailEngine;
+        const agent = { actor: "agent", label: "Inbox helper" } as const;
+        const [added] = yield* mail.saveRule(
+          { match: { from: " updates@acme.dev " }, when: " Builds that passed " },
+          agent,
+        );
+        expect(added).toMatchObject({
+          enabled: true,
+          match: { from: "updates@acme.dev" },
+          when: "Builds that passed",
+          addedBy: "Inbox helper",
+        });
+        expect((yield* engine.settings).rules).toEqual([added]);
+
+        const [changed] = yield* mail.saveRule({ ruleId: added!.id, enabled: false }, agent);
+        expect(changed).toMatchObject({
+          id: added!.id,
+          enabled: false,
+          when: "Builds that passed",
+        });
+        // The user saving it themselves makes it theirs.
+        const [mine] = yield* mail.saveRule({ ruleId: added!.id }, { actor: "user" });
+        expect(mine).not.toHaveProperty("addedBy");
+
+        expect((yield* Effect.flip(mail.saveRule({ match: { from: " " } }, agent))).code).toBe(
+          "invalid",
+        );
+        expect((yield* Effect.flip(mail.saveRule({ ruleId: "gone" }, agent))).code).toBe(
+          "not_found",
+        );
+        expect(yield* mail.saveRule({ ruleId: added!.id, delete: true }, agent)).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("rejects approval of a superseded suggestion", () =>
     withMail(
       Effect.gen(function* () {
@@ -893,35 +975,49 @@ describe("MailService trust ramp", () => {
     ),
   );
 
-  it.effect("keeps the latest explicit trust choice when an older approval is undone", () =>
+  it.effect("settles a sender's mail through a rule that undo takes back", () =>
     withMail(
       Effect.gen(function* () {
         const mail = yield* MailService.MailService;
+        const engine = yield* MailEngine.MailEngine;
         const user = { actor: "user" } as const;
-        const key = "sender:updates@acme.dev";
-        const threadId = yield* deliver({ subject: "Status report", body: "Ready", at });
-        yield* mail.propose({ threadIds: [threadId], reason: "fyi" }, { actor: "agent" });
-        const approved = yield* mail.act(
-          {
-            threadIds: [threadId],
-            action: {
-              type: "approve",
-              revisions: {
-                [threadId]: (yield* rowOf(threadId)).suggestion?.revision ?? "already-settled",
-              },
-            },
-          },
+        const first = yield* deliver({ subject: "Status report", body: "Ready", at });
+        const [actionId] = (yield* mail.act(
+          { threadIds: [first], action: { type: "settle_sender" } },
           user,
-        );
-        yield* mail.setTrust({ key, trust: "never" });
-        const level = (yield* mail.listActions({ actor: "user" })).actions[0]!;
-        yield* mail.setTrust({ key, trust: "suggest" });
-        expect((yield* mail.undo(level.id).pipe(Effect.flip)).code).toBe("invalid");
-        yield* mail.undo(approved.actionIds[0]!);
-        expect((yield* mail.listTrust).records.find((row) => row.key === key)).toMatchObject({
-          trust: "suggest",
-          approvals: 0,
+        )).actionIds;
+        expect((yield* rowOf(first)).state).toBe("settled");
+        const [rule] = (yield* engine.settings).rules;
+        const similar = yield* deliver({
+          subject: "Different sender",
+          from: "otherupdates@acme.dev",
+          body: "",
+          at,
         });
+        expect((yield* rowOf(similar)).state).toBe("active");
+        expect(rule).toMatchObject({ enabled: true, match: { from: "<updates@acme.dev>" } });
+        expect(rule).not.toHaveProperty("when");
+
+        // An exact rule needs no body, so one that failed to download still settles.
+        const next = yield* deliver({ subject: "Status report 2", body: "", at });
+        expect(yield* rowOf(next)).toMatchObject({ state: "settled", settledBy: "rule" });
+        yield* mail.undo(actionId!);
+        expect((yield* engine.settings).rules).toEqual([]);
+        expect((yield* rowOf(first)).state).toBe("active");
+
+        const [secondId] = (yield* mail.act(
+          { threadIds: [first], action: { type: "settle_sender" } },
+          user,
+        )).actionIds;
+        // Mail the sender's rule already settles changes nothing.
+        expect(
+          yield* mail.act({ threadIds: [next], action: { type: "settle_sender" } }, user),
+        ).toEqual({ actionIds: [] });
+        const [created] = (yield* engine.settings).rules;
+        const changed = { ...created!, when: "Only build reports" };
+        yield* mail.updateSettings({ rules: [changed] });
+        expect((yield* Effect.flip(mail.undo(secondId!))).code).toBe("invalid");
+        expect((yield* engine.settings).rules).toEqual([changed]);
       }),
     ),
   );
@@ -1815,7 +1911,7 @@ describe("MailService accounts", () => {
             },
             { actor: "user" },
           );
-          expect((yield* mail.listTrust).records.length).toBeGreaterThan(0);
+          expect((yield* store.listTrust).length).toBeGreaterThan(0);
           yield* addSendingAccount;
           const shared = yield* deliver({
             account: other,
@@ -1847,10 +1943,12 @@ describe("MailService accounts", () => {
           expect(yield* store.recentReplyEdits(other, "contact@example.org")).toEqual([
             { before: "one", after: "two" },
           ]);
-          expect((yield* mail.listTrust).records.map((record) => record.key).sort()).toEqual([
-            "category:notification",
-            "sender:ops@elsewhere.org",
-          ]);
+          expect(
+            (yield* store.listTrust)
+              .map(({ record }) => record)
+              .map((record) => record.key)
+              .sort(),
+          ).toEqual(["category:notification", "sender:ops@elsewhere.org"]);
         }),
       ),
   );

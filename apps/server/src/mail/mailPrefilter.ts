@@ -1,10 +1,4 @@
-import type {
-  MailCategory,
-  MailGuardrail,
-  MailRule,
-  MailRuleAction,
-  MailSettleReason,
-} from "@t3tools/contracts";
+import type { MailCategory, MailGuardrail, MailRule, MailSettleReason } from "@t3tools/contracts";
 
 import { domainOf } from "./mailText.ts";
 
@@ -38,9 +32,7 @@ export interface PrefilterResult {
 
 export interface MatchedRule {
   readonly id: string;
-  readonly action: MailRuleAction;
   readonly reason: MailSettleReason;
-  readonly sensitive: boolean;
 }
 
 const OTP =
@@ -124,7 +116,7 @@ export function matchesRule(
   // A rule with a condition may cover all mail; without one it needs a scope.
   if (!from && !domain && !subjectContains && !listId) return Boolean(rule.when);
   const address = input.fromAddress.toLowerCase();
-  if (from && !address.includes(from.toLowerCase())) return false;
+  if (from && !`<${address}>`.includes(from.toLowerCase())) return false;
   if (domain) {
     const wanted = domain.toLowerCase().replace(/^@/, "");
     const actual = domainOf(address);
@@ -150,9 +142,7 @@ export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>)
   const matched = rules.filter((rule) => matchesRule(rule, input));
   const decided = (rule: MailRule): MatchedRule => ({
     id: rule.id,
-    action: rule.action,
     reason: rule.reason,
-    sensitive: rule.sensitive === true,
   });
   const exact = matched.find((rule) => !rule.when);
   return {
@@ -162,8 +152,6 @@ export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>)
     rule: exact ? decided(exact) : null,
     conditional: exact
       ? []
-      : matched.flatMap((rule) =>
-          rule.when && rule.action !== "never_show" ? [{ ...decided(rule), when: rule.when }] : [],
-        ),
+      : matched.flatMap((rule) => (rule.when ? [{ ...decided(rule), when: rule.when }] : [])),
   };
 }

@@ -29,20 +29,6 @@ import type { ParsedMessage } from "./imapSession.ts";
 import { asksQuestion, stripQuoted } from "./mailText.ts";
 import * as MailStore from "./MailStore.ts";
 
-const DEFAULT_SETTINGS: MailSettings = {
-  defaultModelSelection: null,
-  escalationModelSelection: null,
-  weeklyTokenCap: 300_000,
-  serverMirroring: false,
-  recapEnabled: true,
-  notificationsEnabled: true,
-  nudgeReplyDays: 3,
-  nudgeWaitingDays: 5,
-  syncEnabled: true,
-  rules: [],
-  aiExcludedSenders: [],
-};
-
 /** The recap lists this many settled emails and counts the rest. */
 const RECAP_ITEMS = 25;
 
@@ -143,9 +129,11 @@ const make = Effect.gen(function* () {
 
   const settings = store.getKv("settings").pipe(
     Effect.map((raw) => {
-      if (raw === null) return DEFAULT_SETTINGS;
+      if (raw === null) return MailStore.DEFAULT_SETTINGS;
       const decoded = decodeSettings(raw);
-      return decoded._tag === "Some" ? { ...DEFAULT_SETTINGS, ...decoded.value } : DEFAULT_SETTINGS;
+      return decoded._tag === "Some"
+        ? { ...MailStore.DEFAULT_SETTINGS, ...decoded.value }
+        : MailStore.DEFAULT_SETTINGS;
     }),
   );
   const putSettings = (next: MailSettings) => store.setKv("settings", JSON.stringify(next));

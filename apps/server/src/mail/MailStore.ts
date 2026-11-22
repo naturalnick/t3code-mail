@@ -11,6 +11,8 @@ import {
   type MailMessage,
   type MailProviderKind,
   type MailSettleReason,
+  type MailSettings,
+  type MailRule,
   type MailThreadRow,
   type MailThreadState,
   type MailWorkingReason,
@@ -57,6 +59,20 @@ const SENDER_COLUMNS = `CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NUL
     THEN COALESCE(json_extract(${FIRST_RECIPIENT}, '$[0].name'), '') ELSE from_name END AS from_name,
   CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NULL
     THEN json_extract(${FIRST_RECIPIENT}, '$[0].address') ELSE from_address END AS from_address`;
+
+export const DEFAULT_SETTINGS: MailSettings = {
+  defaultModelSelection: null,
+  escalationModelSelection: null,
+  weeklyTokenCap: 300_000,
+  serverMirroring: false,
+  recapEnabled: true,
+  notificationsEnabled: true,
+  nudgeReplyDays: 3,
+  nudgeWaitingDays: 5,
+  syncEnabled: true,
+  rules: [],
+  aiExcludedSenders: [],
+};
 
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
 const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -355,6 +371,23 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `ALTER TABLE mail_trust DROP COLUMN explicit`,
     `ALTER TABLE mail_trust DROP COLUMN bulk`,
   ],
+  [
+    // Never show became a rule; the senders it hid become rules the user can see in Settings.
+    `INSERT OR IGNORE INTO mail_kv (key, value) SELECT 'settings', '${JSON.stringify(DEFAULT_SETTINGS)}'
+       WHERE EXISTS (SELECT 1 FROM mail_trust WHERE trust = 'never' AND kind = 'sender')`,
+    `UPDATE mail_kv SET value = json_set(value, '$.rules', json(
+        (SELECT json_group_array(json(rule)) FROM (
+          SELECT json_remove(r.value, '$.action', '$.sensitive') AS rule FROM json_each(mail_kv.value, '$.rules') r
+            WHERE json_extract(r.value, '$.action') IS NOT 'keep'
+          UNION ALL SELECT json_object('id', 'never-show-' || substr(t.key, 8), 'enabled', json('true'),
+            'match', json_object('from', '<' || substr(t.key, 8) || '>'), 'reason', 'noise')
+            FROM mail_trust t WHERE t.trust = 'never' AND t.kind = 'sender'))))
+      WHERE key = 'settings' AND json_valid(value)`,
+    `UPDATE mail_actions SET kind = 'settle', undo_json = json_remove(undo_json, '$.trust')
+      WHERE kind = 'never_show'`,
+    `DELETE FROM mail_actions WHERE kind = 'trust'`,
+    `ALTER TABLE mail_trust DROP COLUMN trust`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -532,6 +565,8 @@ export interface ActionRecord {
   readonly undo: {
     readonly thread?: ThreadChange;
     readonly trust?: TrustUndo;
+    /** A rule the action added, removed again by undo. */
+    readonly rule?: MailRule;
     readonly mirror?: MirrorUndo;
     readonly discardedDraft?: DraftRecord;
     /** A new email's thread, removed with its only draft and put back by undo. */
@@ -738,8 +773,6 @@ const toTrust = (row: Row): TrustRecord => ({
   reason: strOrNull(row.reason) as MailSettleReason | null,
   approvals: num(row.approvals),
   rejections: num(row.rejections),
-  // Earned "auto" trust no longer exists; only Never show still settles a sender.
-  trust: str(row.trust) === "never" ? "never" : "suggest",
 });
 
 const toAction = (row: Row): ActionRecord => ({
@@ -1637,23 +1670,19 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<TrustClock>`SELECT revision, setting, reset FROM mail_trust_clock WHERE key = ${key}`.pipe(
       Effect.map((rows) => rows[0] ?? { revision: 0, setting: 0, reset: 0 }),
     );
-  const advanceTrustClock = (key: string, change: "feedback" | "level" | "reset") =>
+  const advanceTrustClock = (key: string) =>
     sql<TrustClock>`INSERT INTO mail_trust_clock(key, revision, setting, reset)
-      VALUES (${key}, 1, ${change === "feedback" ? 0 : 1}, ${change === "reset" ? 1 : 0})
+      VALUES (${key}, 1, 0, 0)
       ON CONFLICT(key) DO UPDATE SET revision = revision + 1, setting = setting + excluded.setting,
         reset = reset + excluded.reset RETURNING revision, setting, reset`.pipe(
       Effect.map((rows) => rows[0]!),
     );
   const putTrust = (record: TrustRecord, now: string) =>
-    sql`INSERT INTO mail_trust (key, kind, reason, approvals, rejections, trust, updated_at)
+    sql`INSERT INTO mail_trust (key, kind, reason, approvals, rejections, updated_at)
       VALUES (${record.key}, ${record.kind}, ${record.reason}, ${record.approvals},
-        ${record.rejections}, ${record.trust}, ${now})
+        ${record.rejections}, ${now})
       ON CONFLICT (key) DO UPDATE SET reason = excluded.reason, approvals = excluded.approvals,
-        rejections = excluded.rejections, trust = excluded.trust, updated_at = excluded.updated_at`.pipe(
-      Effect.asVoid,
-    );
-  const deleteTrust = (key: string) =>
-    sql`DELETE FROM mail_trust WHERE key = ${key}`.pipe(Effect.asVoid);
+        rejections = excluded.rejections, updated_at = excluded.updated_at`.pipe(Effect.asVoid);
   const listTrust = sql<Row>`SELECT * FROM mail_trust ORDER BY updated_at DESC LIMIT 500`.pipe(
     Effect.map((rows) =>
       rows.map((row) => ({ record: toTrust(row), updatedAt: str(row.updated_at) })),
@@ -1947,7 +1976,6 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     findMessageByGmailId,
     getTrust,
     putTrust,
-    deleteTrust,
     listTrust,
     trustClock,
     advanceTrustClock,
