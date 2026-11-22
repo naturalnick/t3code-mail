@@ -122,7 +122,9 @@ function MessageBody({
               gt("Message body unavailable.")}
           </p>
           {trimmed ? (
-            <QuotedToggle shown={showQuoted} onToggle={() => setShowQuoted(!showQuoted)} />
+            <div className="mt-2">
+              <QuotedToggle shown={showQuoted} onToggle={() => setShowQuoted(!showQuoted)} />
+            </div>
           ) : null}
         </>
       )}

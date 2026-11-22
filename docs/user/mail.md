@@ -19,7 +19,7 @@ Until you've approved a sender's or category's settles a few times in a row, Mai
 
 To keep a sender's mail away from AI entirely, right-click it and choose **Turn off AI for this sender**, or add addresses and domains under **Settings → Mail → AI off**. Their mail stays in Active without a model reading it, and Mail chats and agents can't read it. When a domain covers the sender, **Turn on AI** names that domain and turns it back on for the whole domain.
 
-Formatted messages preserve the sender’s layout. Choose **Load remote images** to display pictures hosted by the sender for that message.
+Formatted messages open in a simplified view that keeps the sender’s words, links and tables in your theme, without their layout or images. Choose **Show original** for the sender’s layout, such as a boarding pass or a coupon; emails that are mostly pictures open that way. In the original, **Load remote images** displays pictures hosted by the sender for that message.
 
 Choose **Chat** on an email to open its chat beside the email, with the saved triage history. Each entry shows what Mail decided, why, and whether the model or one of your rules made the decision. Opening the chat uses no model tokens. Ask a follow-up there to work with the email.
 
