@@ -29,7 +29,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
   const actions = useMailActions(environmentId);
   const entries = query.data?.actions ?? [];
   return (
-    <section className="grid gap-2">
+    <section className="grid min-w-0 grid-cols-1 gap-2">
       <h2 className="text-sm font-medium">{gt("Settled by AI")}</h2>
       {query.error && <p role="alert">{query.error}</p>}
       {query.data && entries.length === 0 && (
@@ -101,14 +101,14 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
   const reauth = status.accounts.filter((a) => a.status === "auth_failed");
   return (
     <>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">{gt("Inbox")}</h1>
         <Button render={<Link to="/settings/mail" />} variant="ghost" size="sm">
           {gt("Mail settings")}
         </Button>
       </div>
       {needsSetup && (
-        <section className="grid justify-items-start gap-2">
+        <section className="grid min-w-0 grid-cols-1 justify-items-start gap-2">
           <p className="text-sm">
             {status.accounts.length === 0
               ? gt("Connect an account to start syncing mail.")
@@ -120,13 +120,13 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
         </section>
       )}
       {reauth.map((account) => (
-        <Link key={account.id} className="text-sm underline" to="/settings/mail">
+        <Link key={account.id} className="text-sm wrap-anywhere underline" to="/settings/mail">
           {gt("Reconnect {email}", { email: account.email })}
         </Link>
       ))}
       {recap && status.accounts.length > 0 && (
-        <section className="grid gap-1">
-          <div className="flex items-center justify-between">
+        <section className="grid min-w-0 grid-cols-1 gap-1">
+          <div className="flex flex-wrap items-center justify-between">
             <h2 className="text-sm font-medium">{gt("Daily recap")}</h2>
             <Button
               size="xs"
@@ -147,8 +147,8 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
         </section>
       )}
       {proposals.length > 0 && (
-        <section className="grid gap-1">
-          <div className="flex items-center justify-between gap-2">
+        <section className="grid min-w-0 grid-cols-1 gap-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-medium">{gt("Suggested settles")}</h2>
             <Button
               size="sm"
@@ -214,7 +214,7 @@ export function MailHome() {
   const status = useMailStatus(environmentId);
   return (
     <MailPage>
-      <div className="mx-auto grid w-full max-w-3xl gap-6 p-5">
+      <div className="mx-auto grid w-full min-w-0 grid-cols-1 max-w-3xl gap-6 p-5">
         {environmentId === null ? (
           gt("No connected server has Mail.")
         ) : status === null ? (

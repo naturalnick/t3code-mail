@@ -212,6 +212,38 @@ const rowOf = (threadId: MailThreadId) =>
     Effect.map((detail) => detail.thread),
   );
 
+it.effect("lists newest messages first and pages settled mail by message date", () =>
+  withMail(
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const recent = yield* deliver({
+        subject: "Recent",
+        body: "Newer message",
+        at: "2026-11-03T06:00:00.000Z",
+      });
+      const older = yield* deliver({
+        subject: "Older",
+        body: "Older message",
+        at: "2026-11-01T06:00:00.000Z",
+      });
+      expect((yield* mail.listThreads("active", 1)).map((t) => t.id)).toEqual([recent]);
+      yield* mail.act(
+        { threadIds: [recent, older], action: { type: "settle" } },
+        { actor: "user" },
+      );
+      const first = yield* mail.listSettled({ limit: 1 });
+      expect(first.threads.map((t) => t.id)).toEqual([recent]);
+      const last = first.threads[0]!;
+      const next = yield* mail.listSettled({
+        limit: 1,
+        before: { at: last.lastMessageAt, id: last.id },
+      });
+      expect(next.threads.map((t) => t.id)).toEqual([older]);
+      expect(next.hasMore).toBe(false);
+    }),
+  ),
+);
+
 describe("MailService trust ramp", () => {
   it.effect("suggests until approved three times, then settles on its own and undo demotes", () =>
     withMail(

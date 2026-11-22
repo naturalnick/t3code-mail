@@ -49,14 +49,11 @@ export interface MailSections {
 
 const byEntry = (a: MailThreadRow, b: MailThreadRow) =>
   a.stateAt.localeCompare(b.stateAt) || a.id.localeCompare(b.id);
-const byEntryNewest = (a: MailThreadRow, b: MailThreadRow) => byEntry(b, a);
+const byLatestMessage = (a: MailThreadRow, b: MailThreadRow) =>
+  b.lastMessageAt.localeCompare(a.lastMessageAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 const bySnoozeEnd = (a: MailThreadRow, b: MailThreadRow) =>
   (a.snoozedUntil ?? "~").localeCompare(b.snoozedUntil ?? "~") || byEntry(a, b);
 
-/**
- * Sidebar sections. Rows sort by when they entered their state, never by new mail, so the list
- * does not reshuffle under the pointer. Pinned threads show only in Pinned.
- */
 export function groupMailThreads(threads: Iterable<MailThreadRow>): MailSections {
   const pinned: Array<MailThreadRow> = [];
   const active: Array<MailThreadRow> = [];
@@ -70,11 +67,11 @@ export function groupMailThreads(threads: Iterable<MailThreadRow>): MailSections
     else if (thread.state === "snoozed") snoozed.push(thread);
     else settled.push(thread);
   }
-  pinned.sort((a, b) => (a.pinnedAt ?? "").localeCompare(b.pinnedAt ?? "") || byEntry(a, b));
-  active.sort(byEntry);
-  working.sort(byEntry);
+  pinned.sort(byLatestMessage);
+  active.sort(byLatestMessage);
+  working.sort(byLatestMessage);
   snoozed.sort(bySnoozeEnd);
-  settled.sort(byEntryNewest);
+  settled.sort(byLatestMessage);
   return {
     pinned,
     proposals: active.filter((thread) => thread.suggestion !== null),
@@ -114,6 +111,20 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-data:mail:arrivals",
       tag: WS_METHODS.mailArrivals,
       idleTtlMs: 0,
+    }),
+    messageBody: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:mail:message-body",
+      idleTtlMs: 0,
+      tag: WS_METHODS.mailGetMessageBody,
+      refreshTrigger: ({ environmentId, input }) =>
+        Atom.make((get) => {
+          const mailbox = get(view(environmentId));
+          const accountId = mailbox?.threads.get(input.threadId)?.accountId;
+          const status = mailbox?.status.accounts.find(
+            (account) => account.id === accountId,
+          )?.status;
+          return status === "idle" || status === "syncing";
+        }),
     }),
     thread: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:thread",

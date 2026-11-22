@@ -159,6 +159,10 @@ function walkStructure(
   path = "",
 ) {
   if (!node) return;
+  if (node.disposition === "attachment" || node.type.toLowerCase() === "message/rfc822") {
+    visit(node, node.part ?? (path || "1"));
+    return;
+  }
   const children = node.childNodes ?? [];
   if (children.length === 0) {
     visit(node, node.part ?? (path || "1"));
@@ -253,11 +257,11 @@ function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): Mail
   };
 }
 
-async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   const chunks: Array<Buffer> = [];
   for await (const chunk of stream)
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
 
 const isLoopback = (host: string) => host === "127.0.0.1" || host === "localhost" || host === "::1";
@@ -445,9 +449,46 @@ export class ImapSession {
       maxBytes: BODY_MAX_BYTES,
     });
     if (!download.content) return null;
-    const raw = await streamToString(download.content);
+    const raw = (await streamToBuffer(download.content)).toString("utf8");
     const text = part.html ? htmlToText(raw) : normalizeWhitespace(raw);
     return text.length > BODY_MAX_CHARS ? text.slice(0, BODY_MAX_CHARS) : text;
+  }
+
+  async fetchFormattedBody(uid: number) {
+    const message = await this.client.fetchOne(String(uid), { bodyStructure: true }, { uid: true });
+    if (!message || !message.bodyStructure) throw new Error("Message structure unavailable");
+    let htmlPart = "";
+    const images: Array<{ cid: string; part: string; type: string; size: number }> = [];
+    walkStructure(message.bodyStructure, (node, part) => {
+      if (node.disposition === "attachment") return;
+      const type = node.type.toLowerCase();
+      if (!htmlPart && type === "text/html") htmlPart = part;
+      if (node.id && node.size && /^image\/(png|jpeg|gif|webp)$/i.test(type)) {
+        images.push({ cid: node.id.replace(/^<|>$/g, ""), part, type, size: node.size });
+      }
+    });
+    if (!htmlPart) return null;
+    const body = await this.client.download(String(uid), htmlPart, {
+      uid: true,
+      maxBytes: 512 * 1024,
+    });
+    if (!body.content) throw new Error("Message body unavailable");
+    const html = (await streamToBuffer(body.content)).toString("utf8");
+    const inlineImages: Record<string, string> = Object.create(null);
+    let remaining = BODY_MAX_BYTES;
+    for (const image of images.slice(0, 16)) {
+      if (image.size > remaining || !html.includes(`cid:${image.cid}`)) continue;
+      const download = await this.client.download(String(uid), image.part, {
+        uid: true,
+        maxBytes: remaining,
+      });
+      if (download.content) {
+        const bytes = await streamToBuffer(download.content);
+        inlineImages[image.cid] = `data:${image.type};base64,${bytes.toString("base64")}`;
+        remaining -= bytes.length;
+      }
+    }
+    return { html, inlineImages };
   }
 
   /** Gmail server-side search; returns All Mail UIDs. */

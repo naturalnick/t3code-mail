@@ -302,6 +302,12 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       (SELECT reason FROM mail_actions WHERE kind = 'trust' AND actor_label = mail_trust.key
         AND undone_at IS NULL ORDER BY id DESC LIMIT 1) IS NOT 'auto'`,
   ],
+  [
+    `CREATE TABLE mail_display_bodies (id INTEGER PRIMARY KEY, content TEXT NOT NULL)`,
+    `CREATE TRIGGER delete_mail_display_body AFTER DELETE ON mail_messages
+      BEGIN DELETE FROM mail_display_bodies WHERE id = OLD.id; END`,
+  ],
+  [`CREATE INDEX mail_threads_state_latest ON mail_threads (state, last_message_at DESC, id DESC)`],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -1278,7 +1284,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<Row>`SELECT * FROM (SELECT * FROM mail_threads WHERE state != 'settled' OR pinned_at IS NOT NULL)
       UNION ALL
       SELECT * FROM (SELECT * FROM mail_threads WHERE state = 'settled' AND pinned_at IS NULL
-        ORDER BY state_at DESC, id DESC LIMIT ${settledLimit})`.pipe(
+        ORDER BY last_message_at DESC, id DESC LIMIT ${settledLimit})`.pipe(
       Effect.map((rows) => rows.map(toThread)),
     );
 
@@ -1289,10 +1295,10 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     readonly limit: number;
   }) =>
     sql<Row>`SELECT * FROM mail_threads WHERE state = 'settled'
-        ${input.before ? sql`AND (state_at < ${input.before.at} OR (state_at = ${input.before.at} AND id < ${input.before.id}))` : sql``}
+        ${input.before ? sql`AND (last_message_at, id) < (${input.before.at}, ${input.before.id})` : sql``}
         ${input.reason ? sql`AND settled_reason = ${input.reason}` : sql``}
         ${input.byAi === true ? sql`AND settled_by = 'ai'` : sql``}
-      ORDER BY state_at DESC, id DESC LIMIT ${input.limit + 1}`.pipe(
+      ORDER BY last_message_at DESC, id DESC LIMIT ${input.limit + 1}`.pipe(
       Effect.map((rows) => ({
         threads: rows.slice(0, input.limit).map(toThread),
         hasMore: rows.length > input.limit,
@@ -1309,8 +1315,9 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<Row>`SELECT * FROM mail_threads WHERE state = 'snoozed' AND snoozed_until IS NOT NULL
       AND snoozed_until <= ${now}`.pipe(Effect.map((rows) => rows.map(toThread)));
 
-  const threadsByState = (state: MailThreadState) =>
-    sql<Row>`SELECT * FROM mail_threads WHERE state = ${state}`.pipe(
+  const threadsByState = (state: MailThreadState, limit?: number) =>
+    sql<Row>`SELECT * FROM mail_threads WHERE state = ${state}
+      ${limit === undefined ? sql`` : sql`ORDER BY last_message_at DESC, id DESC LIMIT ${limit}`}`.pipe(
       Effect.map((rows) => rows.map(toThread)),
     );
 

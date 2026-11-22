@@ -13,6 +13,8 @@ import { PaperclipIcon, TriangleAlertIcon } from "lucide-react";
 import { useState } from "react";
 
 import { useClientSettings } from "../../hooks/useSettings";
+import { observeIntersection } from "../../lib/observeIntersection";
+import { MailFormattedMessage } from "./MailFormattedMessage";
 import { formatBytes } from "../../lib/formatBytes";
 import { mailEnvironment } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
@@ -37,16 +39,43 @@ function address(entry: MailAddress) {
 
 function ThreadMessage({
   message,
+  threadId,
+  environmentId,
   timestampFormat,
 }: {
   message: MailMessage;
+  threadId: MailThreadId;
+  environmentId: EnvironmentId;
   timestampFormat: TimestampFormat;
 }) {
   const gt = useGT();
-  const [original, setOriginal] = useState(false);
-  const body = original ? message.fullText : message.text || message.fullText;
+  const [showCleaned, setShowCleaned] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const observe = (node: HTMLElement | null) => {
+    if (node === null || visible) return;
+    return observeIntersection(
+      node,
+      (entry) => {
+        if (entry.isIntersecting) setVisible(true);
+      },
+      { rootMargin: "150px" },
+    );
+  };
+  const display = useEnvironmentQuery(
+    visible
+      ? mailEnvironment.messageBody({
+          environmentId,
+          input: { threadId, messageId: Number(message.id) },
+        })
+      : null,
+  );
+  const formatted = display.data;
+  const body = showCleaned ? message.text : message.fullText || message.text;
   return (
-    <article className="space-y-2 border-t border-border py-4 [content-visibility:auto]">
+    <article
+      ref={observe}
+      className="min-w-0 space-y-2 border-t border-border py-4 [content-visibility:auto]"
+    >
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <span className="min-w-0 text-sm font-semibold wrap-anywhere">{address(message.from)}</span>
         <time dateTime={message.date} className="text-xs text-muted-foreground">
@@ -61,12 +90,20 @@ function ThreadMessage({
           <p>{gt("Cc: {recipients}", { recipients: message.cc.map(address).join(", ") })}</p>
         )}
       </div>
-      <p className="text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
-        {body ?? gt("Message body unavailable.")}
-      </p>
-      {message.fullText && message.text && message.fullText !== message.text && (
-        <InlineButton tone="muted" aria-pressed={original} onClick={() => setOriginal(!original)}>
-          {original ? gt("Show cleaned message") : gt("Show original message")}
+      {formatted && !showCleaned ? (
+        <MailFormattedMessage body={formatted} title={message.subject || gt("(No subject)")} />
+      ) : (
+        <p className="text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
+          {body ?? gt("Message body unavailable.")}
+        </p>
+      )}
+      {message.text && (formatted || (message.fullText && message.fullText !== message.text)) && (
+        <InlineButton
+          tone="muted"
+          aria-pressed={showCleaned}
+          onClick={() => setShowCleaned(!showCleaned)}
+        >
+          {showCleaned ? gt("Show original message") : gt("Show cleaned message")}
         </InlineButton>
       )}
       {message.attachments.length > 0 && (
@@ -225,8 +262,14 @@ export function MailThreadView({
         <MailThreadControls environmentId={environmentId} thread={thread} />
       </header>
       <section aria-label={gt("Messages")}>
-        {detail.messages.map((message) => (
-          <ThreadMessage key={message.id} message={message} timestampFormat={timestampFormat} />
+        {detail.messages.toReversed().map((message) => (
+          <ThreadMessage
+            key={message.id + ":" + message.date}
+            environmentId={environmentId}
+            threadId={threadId}
+            message={message}
+            timestampFormat={timestampFormat}
+          />
         ))}
       </section>
       <MailThreadDrafts

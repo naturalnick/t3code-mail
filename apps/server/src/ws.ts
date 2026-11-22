@@ -1999,6 +1999,7 @@ export const layerWsRpc = (
       const handlers = ServerWsRpcGroup.of({
         [WS_METHODS.mailArrivals]: () => mail.arrivals,
         [WS_METHODS.mailSubscribe]: () => mail.subscribe,
+        [WS_METHODS.mailGetMessageBody]: (input) => mail.getMessageBody(input),
         [WS_METHODS.mailGetThread]: (input) => mail.getThread(input.threadId),
         [WS_METHODS.mailListSettled]: (input) => mail.listSettled(input),
         [WS_METHODS.mailSearch]: (input) => mail.search(input),

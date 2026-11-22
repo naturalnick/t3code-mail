@@ -266,6 +266,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeAuthAccess]: "auth",
   [MAIL_WS_METHODS.mailArrivals]: "mail",
   [MAIL_WS_METHODS.mailSubscribe]: "mail",
+  [MAIL_WS_METHODS.mailGetMessageBody]: "mail",
   [MAIL_WS_METHODS.mailGetThread]: "mail",
   [MAIL_WS_METHODS.mailListSettled]: "mail",
   [MAIL_WS_METHODS.mailSearch]: "mail",

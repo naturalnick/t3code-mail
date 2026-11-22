@@ -14,6 +14,8 @@ import {
   type MailSettleReason,
   type MailStreamEvent,
   type MailThreadAction,
+  type MailMessageBodyInput,
+  type MailFormattedBody,
   type MailThreadDetail,
   type MailThreadId,
   type MailThreadRow,
@@ -236,6 +238,9 @@ export class MailService extends Context.Service<
   {
     readonly arrivals: MailEngine.MailEngine["Service"]["arrivals"];
     readonly subscribe: Stream.Stream<MailStreamEventType, MailError>;
+    readonly getMessageBody: (
+      input: MailMessageBodyInput,
+    ) => Effect.Effect<MailFormattedBody | null, MailError>;
     readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
     /** Sidebar order: oldest entry first, except Settled, newest first. */
@@ -798,6 +803,13 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
+  const rowsWithDrafts = Effect.fn("MailService.rowsWithDrafts")(function* (
+    threads: ReadonlyArray<MailStore.ThreadRecord>,
+  ) {
+    const drafts = yield* store.threadsWithDrafts(threads.map((thread) => thread.id));
+    return threads.map((thread) => MailStore.threadRow(thread, drafts.has(thread.id)));
+  });
+
   const listSettled: MailService["Service"]["listSettled"] = Effect.fn("MailService.listSettled")(
     function* (input) {
       const page = yield* store.settledPage({
@@ -807,35 +819,17 @@ const make = Effect.gen(function* () {
         limit: input.limit ?? 50,
       });
       return {
-        threads: yield* engine.rows(page.threads.map((thread) => thread.id)),
+        threads: yield* rowsWithDrafts(page.threads),
         hasMore: page.hasMore,
       };
     },
-    Effect.map((page) => ({
-      ...page,
-      threads: [...page.threads].sort((a, b) =>
-        a.stateAt === b.stateAt ? b.id.localeCompare(a.id) : b.stateAt.localeCompare(a.stateAt),
-      ),
-    })),
     sqlSafe,
   );
 
-  const listThreads: MailService["Service"]["listThreads"] = (state, limit) =>
-    store.threadsByState(state).pipe(
-      Effect.flatMap((threads) =>
-        engine.rows(
-          [...threads]
-            .sort((a, b) =>
-              state === "settled"
-                ? b.stateAt.localeCompare(a.stateAt)
-                : a.stateAt.localeCompare(b.stateAt),
-            )
-            .slice(0, limit)
-            .map((thread) => thread.id),
-        ),
-      ),
-      sqlSafe,
-    );
+  const listThreads: MailService["Service"]["listThreads"] = Effect.fn("MailService.listThreads")(
+    (state, limit) => store.threadsByState(state, limit).pipe(Effect.flatMap(rowsWithDrafts)),
+    sqlSafe,
+  );
 
   const search: MailService["Service"]["search"] = Effect.fn("MailService.search")(function* (
     input,
@@ -2213,6 +2207,7 @@ const make = Effect.gen(function* () {
   return MailService.of({
     arrivals: engine.arrivals,
     subscribe: engine.subscribe.pipe(Stream.mapError(() => storeError())),
+    getMessageBody: Effect.fn("MailService.getMessageBody")(sync.getMessageBody, sqlSafe),
     getThread,
     listSettled,
     listThreads,

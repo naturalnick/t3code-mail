@@ -6,7 +6,7 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - Mail threads are not orchestration threads. A mailbox has thousands of threads; the shell stream would carry all of them. Mail keeps its own thread table and sidebar states.
 - A mail thread's chat session (L2) is a real T3 thread, created lazily the first time the user asks the AI about that email, in one hidden "Mail" project per environment rooted at `<state>/mail/workspace` (which holds EMAIL.md). This gives the model picker, subagents and the normal composer for free.
 - The coding sidebar, project pickers and command palette hide the Mail project; the Mail tab shows its sessions inside mail threads.
-- IMAP library: `imapflow` (IDLE, CONDSTORE/QRESYNC, X-GM-*, UIDPLUS). SMTP: `nodemailer`. No MIME parser dependency: bodies come from the text part via IMAP `download`, cleaned by our own small HTML-to-text.
+- IMAP library: `imapflow` (IDLE, CONDSTORE/QRESYNC, X-GM-*, UIDPLUS). SMTP: `nodemailer`. No MIME parser dependency: bodies come from the text part via IMAP `download`, cleaned by our own small HTML-to-text. The reader separately fetches and caches the formatted MIME alternative when a message comes into view.
 - Gmail syncs `[Gmail]/All Mail` only and reads `\Inbox`/`\Sent` from X-GM-LABELS, so one connection and one IDLE cover incoming and sent mail. Other providers sync INBOX (IDLE) plus the Sent folder (polled).
 - A Gmail message that loses `\Inbox` outside T3 (archived on the phone, or a filter skipped the inbox) settles its thread with reason "archived". We follow the user's Gmail, never fight it.
 - Server mirroring (archive on settle) defaults to off so a first run cannot rearrange a real mailbox; it is one switch in Mail settings.
@@ -22,7 +22,7 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - Graduated senders skip the model only when the message has no guardrail hit and looks like their previous mail (same bulk/list shape, an approved category and no direct question); otherwise L1 runs and low confidence falls back to suggest.
 - "Never show" is an explicit user rule: that sender settles immediately as noise, logged with undo.
 - Replying settles the thread with reason "replied". If the reply asks a question, the thread goes to Working (waiting on their reply) instead, and a nudge returns it to Active after the configured days.
-- Sidebar order is stable: Active is ordered by when a thread entered Active, not by its latest message, so rows do not reshuffle while you work.
+- Email lists show the latest message first, including paginated settled history. Snoozed uses the next wake time.
 - The weekly Mail budget adds character-based estimates for triage, escalation and voice notes to the input and output tokens providers report for finished Mail chat turns. Partial turns contribute their known counters. The default cap is 300k tokens. Mail Settings compares this amount with T3’s recorded provider usage for the same environment and local calendar week. Opening the meter requests the usage summary.
 - The daily recap is computed locally from the action log (no model call) and shown at the top of the Mail home once per day.
 - Mobile Mail is Later per the spec (iOS app); contracts and client-runtime state are shared so mobile can add the tab without server changes.

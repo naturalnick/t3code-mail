@@ -21,6 +21,8 @@ import {
   MailDryRunRuleResult,
   MailEmailMd,
   MailError,
+  MailFormattedBody,
+  MailMessageBodyInput,
   MailListActionsInput,
   MailListSettledInput,
   MailOpenSessionInput,
@@ -47,6 +49,7 @@ import {
 export const MAIL_WS_METHODS = {
   mailArrivals: "mail.arrivals",
   mailSubscribe: "mail.subscribe",
+  mailGetMessageBody: "mail.getMessageBody",
   mailGetThread: "mail.getThread",
   mailListSettled: "mail.listSettled",
   mailSearch: "mail.search",
@@ -85,6 +88,11 @@ export const MailRpcs = [
     success: MailStreamEvent,
     error,
     stream: true,
+  }),
+  Rpc.make(MAIL_WS_METHODS.mailGetMessageBody, {
+    payload: MailMessageBodyInput,
+    success: Schema.NullOr(MailFormattedBody),
+    error,
   }),
   Rpc.make(MAIL_WS_METHODS.mailGetThread, {
     payload: MailThreadInput,
@@ -174,6 +182,7 @@ export const MailRpcs = [
 export const MAIL_READ_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailArrivals]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailSubscribe]: AuthOrchestrationReadScope,
+  [MAIL_WS_METHODS.mailGetMessageBody]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailGetThread]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailListSettled]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailSearch]: AuthOrchestrationReadScope,

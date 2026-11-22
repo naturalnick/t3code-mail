@@ -1,5 +1,12 @@
-import { type MailAccountId, MailThreadId } from "@t3tools/contracts";
+import {
+  type MailAccountId,
+  MailFormattedBody,
+  type MailMessageBodyInput,
+  MailThreadId,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -78,6 +85,9 @@ export class MailSync extends Context.Service<
     readonly wake: (accountId?: MailAccountId) => Effect.Effect<void>;
     readonly enqueue: (accountId: MailAccountId, op: EnqueueOp) => Effect.Effect<void, SqlError>;
     /** Gmail X-GM-RAW search; matches not synced yet are fetched so they show up locally. */
+    readonly getMessageBody: (
+      input: MailMessageBodyInput,
+    ) => Effect.Effect<MailFormattedBody | null, SqlError>;
     readonly searchGmail: (
       accountId: MailAccountId,
       query: string,
@@ -296,9 +306,10 @@ const make = Effect.gen(function* () {
     });
 
     const bodyPauseKey = `body-quota:${accountId}`;
-    let bodyPauseUntil = yield* store.getKv(bodyPauseKey).pipe(Effect.orDie);
+
     const fetchBodies = Effect.fn("MailSync.fetchBodies")(function* (path: string) {
       const now = yield* DateTime.now;
+      const bodyPauseUntil = yield* store.getKv(bodyPauseKey).pipe(Effect.orDie);
       if (bodyPauseUntil !== null && bodyPauseUntil > DateTime.formatIso(now)) return 0;
       const pending = yield* store.pendingBodies(accountId, path, BODY_ROUND).pipe(Effect.orDie);
       if (pending.length === 0) return 0;
@@ -308,9 +319,9 @@ const make = Effect.gen(function* () {
         ),
       );
       if (quota) {
-        bodyPauseUntil = DateTime.formatIso(DateTime.add(now, { hours: QUOTA_PAUSE_HOURS }));
-        yield* store.setKv(bodyPauseKey, bodyPauseUntil).pipe(Effect.orDie);
-        yield* setStatus(accountId, { backfillPausedUntil: bodyPauseUntil });
+        const until = DateTime.formatIso(DateTime.add(now, { hours: QUOTA_PAUSE_HOURS }));
+        yield* store.setKv(bodyPauseKey, until).pipe(Effect.orDie);
+        yield* setStatus(accountId, { backfillPausedUntil: until });
       }
       for (const entry of bodies) {
         yield* (
@@ -513,6 +524,59 @@ const make = Effect.gen(function* () {
       Effect.andThen(wake(accountId)),
     );
 
+  const displayLock = yield* KeyedLock.make<number>();
+  const displayBodyJson = Schema.fromJsonString(Schema.NullOr(MailFormattedBody));
+  const getMessageBody: MailSync["Service"]["getMessageBody"] = Effect.fn(
+    "MailSync.getMessageBody",
+  )(
+    function* ({ threadId, messageId }) {
+      const cached = yield* store.sql<{
+        content: string;
+      }>`SELECT d.content FROM mail_display_bodies d
+        JOIN mail_messages m ON m.id = d.id WHERE m.id = ${messageId} AND m.thread_id = ${threadId} AND m.removed = 0`;
+      if (cached[0])
+        return yield* Schema.decodeEffect(displayBodyJson)(cached[0].content).pipe(Effect.orDie);
+      const [target] = yield* store.messageTargets(threadId, [messageId]);
+      if (!target) return null;
+      const imap = live.get(target.accountId)?.imap;
+      if (!imap) return null;
+      const pause = yield* store.getKv(`body-quota:${target.accountId}`);
+      if (pause && pause > (yield* nowIso)) return null;
+      const result = yield* promise(() =>
+        imap.withMailbox(target.mailbox, null, async (box) =>
+          box.uidValidity === target.uidValidity
+            ? { body: await imap.fetchFormattedBody(target.uid) }
+            : null,
+        ),
+      ).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            if (error.kind === "quota") {
+              const until = DateTime.formatIso(
+                DateTime.add(yield* DateTime.now, { hours: QUOTA_PAUSE_HOURS }),
+              );
+              yield* store.setKv(`body-quota:${target.accountId}`, until);
+              yield* setStatus(target.accountId, { backfillPausedUntil: until });
+            }
+            return null;
+          }),
+        ),
+      );
+      if (!result) return null;
+      return yield* store.transaction(
+        Effect.gen(function* () {
+          const [current] = yield* store.messageTargets(threadId, [messageId]);
+          if (current?.identity !== target.identity) return null;
+          const content = yield* Schema.encodeEffect(displayBodyJson)(result.body).pipe(
+            Effect.orDie,
+          );
+          yield* store.sql`INSERT OR REPLACE INTO mail_display_bodies(id,content) VALUES (${messageId},${content})`;
+          return result.body;
+        }),
+      );
+    },
+    (operation, input) => displayLock.withLock(input.messageId, operation),
+  );
   const searchGmail: MailSync["Service"]["searchGmail"] = Effect.fn("MailSync.searchGmail")(
     function* (accountId, query) {
       const session = live.get(accountId);
@@ -580,7 +644,7 @@ const make = Effect.gen(function* () {
     yield* SubscriptionRef.set(suspended, false);
   }).pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped);
 
-  return MailSync.of({ start, stop, wake, enqueue, searchGmail });
+  return MailSync.of({ start, stop, wake, enqueue, getMessageBody, searchGmail });
 });
 
 export const layer = Layer.effect(MailSync, make);

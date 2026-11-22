@@ -93,7 +93,7 @@ export const MailThreadRow = Schema.Struct({
   messageCount: NonNegativeInt,
   unread: Schema.Boolean,
   state: MailThreadState,
-  /** When the thread entered its current state. Rows sort by this so they never reshuffle. */
+  /** When the thread entered its current state. */
   stateAt: IsoDateTime,
   pinnedAt: Schema.NullOr(IsoDateTime),
   workingReason: Schema.NullOr(MailWorkingReason),
@@ -120,6 +120,18 @@ export const MailAttachment = Schema.Struct({
   size: NonNegativeInt,
 });
 export type MailAttachment = typeof MailAttachment.Type;
+
+export const MailFormattedBody = Schema.Struct({
+  html: Schema.String,
+  inlineImages: Schema.Record(Schema.String, Schema.String),
+});
+export type MailFormattedBody = typeof MailFormattedBody.Type;
+
+export const MailMessageBodyInput = Schema.Struct({
+  threadId: MailThreadId,
+  messageId: NonNegativeInt,
+});
+export type MailMessageBodyInput = typeof MailMessageBodyInput.Type;
 
 export const MailMessage = Schema.Struct({
   id: Schema.String,

@@ -329,7 +329,7 @@ function SettledShelf(props: {
               variant="ghost"
               onClick={() => {
                 const last = threads.at(-1);
-                if (last) setCursors([...cursors, { at: last.stateAt, id: last.id }]);
+                if (last) setCursors([...cursors, { at: last.lastMessageAt, id: last.id }]);
               }}
             >
               {gt("Next")}

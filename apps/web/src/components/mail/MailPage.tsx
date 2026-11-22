@@ -16,7 +16,7 @@ export function MailPage({ children }: { children: ReactNode }) {
       <WorkspacePageHeader electron={isElectron}>
         <span className="text-sm font-medium">{gt("Mail")}</span>
       </WorkspacePageHeader>
-      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">{children}</div>
     </SidebarInset>
   );
 }
