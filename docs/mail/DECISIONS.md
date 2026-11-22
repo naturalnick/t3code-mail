@@ -37,3 +37,6 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - IMAP and SMTP require TLS (implicit or STARTTLS) except on loopback, where the local test server runs.
 - Model calls for mail run outside the lock that serializes user actions; a verdict is discarded if new mail reached the thread while the model ran, and failed or capped triage retries every 10 minutes.
 - Mail model calls run with an empty working folder (`<state>/mail/model`) because some harnesses (OpenCode) keep a read tool on for text generation.
+
+- Mail home offers up to 50 visible suggestions per approval batch so the user can review precisely what the button will settle.
+- Mail arrival notifications report only a count and skip initial sync and backfill. The coding view subscribes without downloading a mailbox snapshot.

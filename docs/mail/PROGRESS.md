@@ -19,17 +19,20 @@ Build log for the v1 described in [SPEC.md](SPEC.md). Choices made without a hum
 - Web settings, shared client state, permission-aware RPC commands and Mail capability discovery are implemented.
 - Verified 32 server Mail tests, two settings logic tests and the client-runtime typecheck at takeover.
 
-## Next
+- Mail and Code tabs, inbox, search, settled filters, batch approvals, recap and action log are wired into web and desktop. A mail thread opens full messages, related conversations, editable drafts and its T3 chat.
+- Draft saves, discards and explicit sends check the reviewed revision. A server regression test reproduced and now rejects stale edits.
+- The user guide and initial set of 234 Mail catalog keys cover all nine web translations.
 
-1. Verify IMAP/SMTP against GreenMail in Docker.
-2. Finish web navigation, inbox, thread detail, draft approval and integrated verification.
-3. Desktop: keep sync running in the background (App Nap / throttling).
-4. i18n for all locales, user docs, Astra review.
+## In progress
 
-## Known issues
+- Verify isolated GreenMail sync and SMTP, desktop background behavior and the integrated web client.
+- Address milestone review findings on provider selection, usage accounting, resync, queued mailbox operations, account cleanup, guardrails, undo and concurrent session creation. Run focused checks and a final review.
 
-- None recorded yet.
+## How to try it
 
-## How to run it
+1. In this checkout run `T3CODE_DEV_INSTANCE=mail-v1 vp run dev --home-dir "$HOME/.t3-mail-v1" --no-seed`. Open the local web address and use the pairing URL printed by this server. This keeps the fork’s accounts, mail and chats separate from your installed T3 Code.
+2. Open **Mail → Mail settings → Add account**. For Gmail, enable 2-Step Verification, create a Google app password using the link in the dialog, then enter your Gmail address and the generated password. Gmail accounts whose administrator disables app passwords need OAuth, which is outside v1.
+3. Pick a **Default mail model** from your configured T3 providers. Review the initial suggestions in **Mail home**. The default trust threshold is three consecutive approvals.
+4. Use **Settled by AI** to inspect or undo automatic settles. Open a thread to draft, review and explicitly approve a reply. Server archiving is opt-in.
 
-Not usable from the UI yet.
+See [the Mail guide](../user/mail.md) for other providers, rules, MCP tools and CLI examples.

@@ -2,11 +2,16 @@ import { useNavigate, useRouter, type AnyRouter } from "@tanstack/react-router";
 
 import { GUEST_PAGE_PATH } from "../../guestPage";
 import { withoutAssistantCitationHash } from "../../lib/assistantCitationNavigation";
+import { readIsMailChatThread } from "../../state/mail";
 import { resolveThreadRouteTarget, type ThreadRouteTarget } from "../../threadRoutes";
 
 /** Settings and Usage open as modals over the last main-app view. */
 export function isAppModalPage(pathname: string) {
   return pathname === "/settings" || pathname.startsWith("/settings/") || pathname === "/usage";
+}
+
+export function isMailPath(pathname: string) {
+  return pathname === "/mail" || pathname.startsWith("/mail/");
 }
 
 export function isSidebarUtilityPage(pathname: string) {
@@ -21,6 +26,9 @@ export function isSidebarUtilityPage(pathname: string) {
 const SHELL_LESS_PATHS = new Set(["/pair", "/connect", "/connect-agent", GUEST_PAGE_PATH]);
 
 let mainAppHref: string | null = null;
+// The Code and Mail tabs each reopen where the user left them.
+let codeHref: string | null = null;
+let mailHref: string | null = null;
 let appModalReturnHref: string | null = null;
 let appModalReturnHistoryIndex: number | null = null;
 let appModalReturnThreadTarget: ThreadRouteTarget | null = null;
@@ -40,10 +48,30 @@ export function startMainAppLocationTracking(router: AnyRouter): () => void {
     appModalReturnThreadTarget = resolveThreadRouteTarget(
       router.state.matches.at(-1)?.params ?? {},
     );
-    if (!isSidebarUtilityPage(pathname)) mainAppHref = href;
+    if (!isSidebarUtilityPage(pathname)) {
+      mainAppHref = href;
+      const target = appModalReturnThreadTarget;
+      const mail =
+        isMailPath(pathname) ||
+        (target?.kind === "server" && readIsMailChatThread(target.threadRef));
+      if (mail) mailHref = href;
+      else codeHref = href;
+    }
   };
   record();
   return router.subscribe("onResolved", record);
+}
+
+/** Whether the main-app page Settings or Usage opened over is in the Mail tab. */
+export function isAppModalReturnInMail() {
+  const href = appModalReturnHref;
+  return href !== null && href === mailHref;
+}
+
+export function useSwitchAppTab() {
+  const navigate = useNavigate();
+  return (tab: "code" | "mail") =>
+    navigate({ href: tab === "mail" ? (mailHref ?? "/mail") : (codeHref ?? "/") });
 }
 
 /** The thread Settings or Usage opened over, for views mounted while the modal is open. */

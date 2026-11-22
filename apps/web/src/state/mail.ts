@@ -24,7 +24,7 @@ export const mailEnvironment = createMailEnvironmentAtoms(connectionAtomRuntime)
  * Mail lives on one environment: the primary one when its server has Mail, otherwise the
  * first connected server that does.
  */
-const mailEnvironmentIdAtom = Atom.make((get): EnvironmentId | null => {
+export const mailEnvironmentIdAtom = Atom.make((get): EnvironmentId | null => {
   const supports = (environmentId: EnvironmentId) =>
     get(environmentPresentations.presentationAtom(environmentId))?.serverConfig?.environment
       .capabilities.mail === true;
@@ -56,10 +56,14 @@ export function useMailEnvironmentId(): EnvironmentId | null {
 
 const EMPTY_VIEW = Atom.make(null).pipe(Atom.withLabel("web-mail:empty-view"));
 
+const threadsAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => get(mailEnvironment.view(environmentId))?.threads ?? null),
+);
+
 const sectionsAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get): MailSections | null => {
-    const view = get(mailEnvironment.view(environmentId));
-    return view === null ? null : groupMailThreads(view.threads.values());
+    const threads = get(threadsAtom(environmentId));
+    return threads === null ? null : groupMailThreads(threads.values());
   }),
 );
 

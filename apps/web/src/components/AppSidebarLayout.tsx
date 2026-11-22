@@ -41,6 +41,8 @@ import {
 } from "../panelAnimations";
 import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
 import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
+import MailSidebar from "./mail/MailSidebar";
+import { useInMailTab } from "./mail/useInMailTab";
 import ThreadSidebar from "./Sidebar";
 import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
@@ -425,7 +427,9 @@ export function AppSidebarLayout({
   showSidebar?: boolean;
 }) {
   const gt = useGT();
-  const sidebarArea = workspaceAreaProps("sidebar", 0, gt("Threads"));
+  const inMail = useInMailTab();
+  const sidebarLabel = inMail ? gt("Mail") : gt("Threads");
+  const sidebarArea = workspaceAreaProps("sidebar", 0, sidebarLabel);
   const [sidebarRouteReveal] = useState<SidebarRouteReveal>(() => ({
     observedKey: null,
     pendingKey: null,
@@ -482,7 +486,7 @@ export function AppSidebarLayout({
               data-app-sidebar=""
               {...sidebarArea}
               role="navigation"
-              aria-label={gt("Threads")}
+              aria-label={sidebarLabel}
               resizable={{
                 maxWidth: sidebarMaximumWidth,
                 minWidth: sidebarMinimumWidth,
@@ -494,7 +498,7 @@ export function AppSidebarLayout({
               }}
               style={windowControlsInsetStyle}
             >
-              <ThreadSidebar routeReveal={sidebarRouteReveal} />
+              {inMail ? <MailSidebar /> : <ThreadSidebar routeReveal={sidebarRouteReveal} />}
               <SidebarRail onDoubleClick={resetSidebarWidth} />
             </Sidebar>
           </>

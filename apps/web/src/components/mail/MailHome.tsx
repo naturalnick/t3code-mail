@@ -1,0 +1,223 @@
+import type { EnvironmentId, MailStatus } from "@t3tools/contracts";
+import { Link } from "@tanstack/react-router";
+import { useGT, useMessages } from "gt-react";
+import { useState } from "react";
+import {
+  mailEnvironment,
+  useMailEnvironmentId,
+  useMailSections,
+  useMailStatus,
+} from "../../state/mail";
+import { useEnvironmentQuery } from "../../state/query";
+import { useMailCommand } from "../settings/MailSettings.commands";
+import { Button } from "../ui/button";
+import { MailPage } from "./MailPage";
+import { actionLabel, senderName } from "./mailPresentation";
+import { useMailActions } from "./useMailActions";
+
+function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
+  const gt = useGT();
+  const resolve = useMessages();
+  const [before, setBefore] = useState<number[]>([]);
+  const cursor = before.at(-1);
+  const query = useEnvironmentQuery(
+    mailEnvironment.actions({
+      environmentId,
+      input: { actor: "ai", limit: 20, ...(cursor === undefined ? {} : { beforeId: cursor }) },
+    }),
+  );
+  const actions = useMailActions(environmentId);
+  const entries = query.data?.actions ?? [];
+  return (
+    <section className="grid gap-2">
+      <h2 className="text-sm font-medium">{gt("Settled by AI")}</h2>
+      {query.error && <p role="alert">{query.error}</p>}
+      {query.data && entries.length === 0 && (
+        <p className="text-sm text-muted-foreground">{gt("No mail settled by AI yet.")}</p>
+      )}
+      {entries.map((entry) => (
+        <div key={entry.id} className="flex items-center gap-3 border-b py-2 text-sm">
+          <div className="min-w-0 flex-1">
+            {entry.threadId ? (
+              <Link
+                className="block truncate font-medium hover:underline"
+                to="/mail/$mailThreadId"
+                params={{ mailThreadId: entry.threadId }}
+              >
+                {entry.subject || entry.from}
+              </Link>
+            ) : (
+              entry.subject
+            )}
+            <span className="text-xs text-muted-foreground">{actionLabel(entry, resolve)}</span>
+          </div>
+          {entry.undoneAt
+            ? gt("Undone")
+            : entry.undoable && (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={actions.disabled}
+                  onClick={() => void actions.undo([entry.id])}
+                >
+                  {gt("Undo")}
+                </Button>
+              )}
+        </div>
+      ))}
+      <div className="flex gap-2">
+        {before.length > 0 && (
+          <Button variant="ghost" size="xs" onClick={() => setBefore(before.slice(0, -1))}>
+            {gt("Previous")}
+          </Button>
+        )}
+        {query.data?.hasMore && entries.length > 0 && (
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setBefore([...before, entries[entries.length - 1]!.id])}
+          >
+            {gt("Next")}
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status: MailStatus }) {
+  const gt = useGT();
+  const sections = useMailSections(environmentId);
+  const actions = useMailActions(environmentId);
+  const dismiss = useMailCommand(
+    environmentId,
+    mailEnvironment.dismissRecap,
+    gt("Could not dismiss recap"),
+  );
+  const [logOpen, setLogOpen] = useState(false);
+  const recap = status.recap;
+  const proposals = sections?.proposals.slice(0, 50) ?? [];
+  const needsSetup = status.accounts.length === 0 || status.settings.defaultModelSelection === null;
+  const reauth = status.accounts.filter((a) => a.status === "auth_failed");
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold">{gt("Inbox")}</h1>
+        <Button render={<Link to="/settings/mail" />} variant="ghost" size="sm">
+          {gt("Mail settings")}
+        </Button>
+      </div>
+      {needsSetup && (
+        <section className="grid justify-items-start gap-2">
+          <p className="text-sm">
+            {status.accounts.length === 0
+              ? gt("Connect an account to start syncing mail.")
+              : gt("Choose a mail model to start triage.")}
+          </p>
+          <Button render={<Link to="/settings/mail" />} size="sm">
+            {status.accounts.length === 0 ? gt("Add account") : gt("Choose model")}
+          </Button>
+        </section>
+      )}
+      {reauth.map((account) => (
+        <Link key={account.id} className="text-sm underline" to="/settings/mail">
+          {gt("Reconnect {email}", { email: account.email })}
+        </Link>
+      ))}
+      {recap && status.accounts.length > 0 && (
+        <section className="grid gap-1">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium">{gt("Daily recap")}</h2>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={dismiss.disabled}
+              onClick={() => void dismiss.run({ date: recap.date })}
+            >
+              {gt("Dismiss")}
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {gt("{arrived} arrived · {settled} settled by AI · {active} need you", {
+              arrived: recap.arrived,
+              settled: recap.settledByAi,
+              active: recap.needsYou,
+            })}
+          </p>
+        </section>
+      )}
+      {proposals.length > 0 && (
+        <section className="grid gap-1">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium">{gt("Suggested settles")}</h2>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actions.disabled}
+              onClick={() =>
+                void actions.act(
+                  proposals.map((t) => t.id),
+                  { type: "approve" },
+                  gt("Settled"),
+                )
+              }
+            >
+              {gt("Settle these ({count})", { count: proposals.length })}
+            </Button>
+          </div>
+          {proposals.map((t) => (
+            <div key={t.id} className="flex items-center gap-2 border-b py-1.5 text-sm">
+              <Link
+                to="/mail/$mailThreadId"
+                params={{ mailThreadId: t.id }}
+                className="min-w-0 flex-1 truncate hover:underline"
+              >
+                {senderName(t.from)} · {t.subject}
+              </Link>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={actions.disabled}
+                onClick={() => void actions.act([t.id], { type: "keep" }, gt("Kept in Active"))}
+              >
+                {gt("Keep in Active")}
+              </Button>
+            </div>
+          ))}
+        </section>
+      )}
+      {status.accounts.length > 0 && (
+        <div>
+          <Button
+            variant="outline"
+            size="sm"
+            aria-expanded={logOpen}
+            onClick={() => setLogOpen(!logOpen)}
+          >
+            {gt("Settled by AI")}
+          </Button>
+        </div>
+      )}
+      {logOpen && <AiLog environmentId={environmentId} />}
+    </>
+  );
+}
+
+export function MailHome() {
+  const gt = useGT();
+  const environmentId = useMailEnvironmentId();
+  const status = useMailStatus(environmentId);
+  return (
+    <MailPage>
+      <div className="mx-auto grid w-full max-w-3xl gap-6 p-5">
+        {environmentId === null ? (
+          gt("No connected server has Mail.")
+        ) : status === null ? (
+          gt("Loading mail…")
+        ) : (
+          <Inbox key={environmentId} environmentId={environmentId} status={status} />
+        )}
+      </div>
+    </MailPage>
+  );
+}
