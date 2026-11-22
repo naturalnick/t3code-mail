@@ -1,9 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
-  MailAddress,
   MailDraft,
-  MailMessage,
   MailThreadDetail,
   MailThreadId,
   MailThreadRow,
@@ -12,15 +10,13 @@ import type {
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { Link } from "@tanstack/react-router";
 import { useGT, useMessages } from "gt-react";
-import { BotIcon, PaperclipIcon, TriangleAlertIcon } from "lucide-react";
+import { BotIcon, TriangleAlertIcon } from "lucide-react";
 import * as Schema from "effect/Schema";
 import { useState, type ReactNode } from "react";
 
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useClientSettings } from "../../hooks/useSettings";
-import { formatBytes } from "../../lib/formatBytes";
-import { observeIntersection } from "../../lib/observeIntersection";
 import { cn } from "../../lib/utils";
 import { mailEnvironment } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
@@ -28,7 +24,15 @@ import { formatDateTimeTimestamp } from "../../timestampFormat";
 import { useMailCommand } from "../settings/MailSettings.commands";
 import { Button } from "../ui/button";
 import { MailChatPanel } from "./MailChatPanel";
-import { MailFormattedMessage, rememberedMessageHeight } from "./MailFormattedMessage";
+import { type ComposeTask, MailComposer } from "./MailComposer";
+import { MailConversation } from "./MailConversation";
+import {
+  type ComposeMode,
+  defaultReplyTarget,
+  draftMode,
+  draftTarget,
+  hasOtherRecipients,
+} from "./mailCompose.logic";
 import {
   actionLabel,
   actorLabel,
@@ -39,99 +43,9 @@ import {
 } from "./mailPresentation";
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
-import { MailComposer, MailThreadDrafts, type ComposeTask } from "./MailThreadDrafts";
 import { useMailActions } from "./useMailActions";
 
 const DETAILS_PANEL_KEY = "t3code:mail-details-panel";
-
-function address(entry: MailAddress) {
-  return entry.name && entry.name !== entry.address
-    ? `${entry.name} <${entry.address}>`
-    : entry.address;
-}
-
-function ThreadMessage({
-  message,
-  threadId,
-  environmentId,
-  timestampFormat,
-  eager,
-}: {
-  message: MailMessage;
-  threadId: MailThreadId;
-  environmentId: EnvironmentId;
-  timestampFormat: TimestampFormat;
-  eager: boolean;
-}) {
-  const gt = useGT();
-  const [visible, setVisible] = useState(eager);
-  const observe = (node: HTMLElement | null) => {
-    if (node === null || visible) return;
-    return observeIntersection(
-      node,
-      (entry) => {
-        if (entry.isIntersecting) setVisible(true);
-      },
-      { rootMargin: "600px" },
-    );
-  };
-  const display = useEnvironmentQuery(
-    visible
-      ? mailEnvironment.messageBody({
-          environmentId,
-          input: { threadId, messageId: Number(message.id) },
-        })
-      : null,
-  );
-  const formatted = display.data;
-  // Plain text shows only once the formatted body is known to be missing, never as a placeholder.
-  const settled = display.isSuccess || display.error !== null;
-  const body = message.fullText || message.text;
-  return (
-    <article ref={observe} className="min-w-0 py-5 first:pt-0 [content-visibility:auto]">
-      <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <span className="min-w-0 text-sm font-semibold wrap-anywhere">{address(message.from)}</span>
-        <time dateTime={message.date} className="text-xs text-muted-foreground">
-          {formatDateTimeTimestamp(message.date, timestampFormat)}
-        </time>
-      </header>
-      <div className="mb-3 text-xs wrap-anywhere text-muted-foreground">
-        {message.to.length > 0 && (
-          <p>{gt("To: {recipients}", { recipients: message.to.map(address).join(", ") })}</p>
-        )}
-        {message.cc.length > 0 && (
-          <p>{gt("Cc: {recipients}", { recipients: message.cc.map(address).join(", ") })}</p>
-        )}
-      </div>
-      {!settled ? (
-        <div aria-hidden style={{ height: rememberedMessageHeight(message.id) ?? 0 }} />
-      ) : formatted ? (
-        <MailFormattedMessage
-          id={message.id}
-          body={formatted}
-          title={message.subject || gt("(No subject)")}
-        />
-      ) : (
-        <p className="text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
-          {body ?? gt("Message body unavailable.")}
-        </p>
-      )}
-      {message.attachments.length > 0 && (
-        <ul aria-label={gt("Attachments")} className="mt-3 space-y-1 text-xs text-muted-foreground">
-          {message.attachments.map((file, index) => (
-            // oxlint-disable-next-line react/no-array-index-key -- MIME parts have fixed order and can share identical metadata.
-            <li key={index} className="flex items-center gap-1.5">
-              <PaperclipIcon aria-hidden className="size-3 shrink-0" />
-              <span className="wrap-anywhere">
-                {file.filename || file.contentType} · {formatBytes(file.size)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </article>
-  );
-}
 
 function DetailsSection({ title, children }: { title?: string; children: ReactNode }) {
   return (
@@ -201,7 +115,6 @@ function MailThreadDetails({
   account,
   timestampFormat,
   refresh,
-  onOpenDraft,
 }: {
   environmentId: EnvironmentId;
   thread: MailThreadRow;
@@ -209,7 +122,6 @@ function MailThreadDetails({
   account: string | null;
   timestampFormat: TimestampFormat;
   refresh: () => void;
-  onOpenDraft: (draft: MailDraft) => void;
 }) {
   const gt = useGT();
   const resolve = useMessages();
@@ -297,15 +209,6 @@ function MailThreadDetails({
           </div>
         </DetailsSection>
       ) : null}
-      {detail && detail.drafts.length > 0 ? (
-        <DetailsSection title={gt("Drafts")}>
-          <MailThreadDrafts
-            environmentId={environmentId}
-            drafts={detail.drafts}
-            onOpen={onOpenDraft}
-          />
-        </DetailsSection>
-      ) : null}
       {detail && detail.related.length > 0 ? (
         <DetailsSection title={gt("Related mail")}>
           <ul>
@@ -353,8 +256,7 @@ function hasDetails(
     thread.suggestedAction !== null ||
     thread.guardrail !== null ||
     account !== null ||
-    (detail !== null &&
-      (detail.drafts.length > 0 || detail.related.length > 0 || detail.actions.length > 0))
+    (detail !== null && (detail.related.length > 0 || detail.actions.length > 0))
   );
 }
 
@@ -371,7 +273,7 @@ export function MailThreadView({
   chatOpen: boolean;
   onChatOpenChange: (open: boolean) => void;
   /** Reply or Forward chosen from the sidebar menu before the email opened. */
-  requestedCompose: ComposeTask["mode"] | null;
+  requestedCompose: ComposeMode | null;
   onComposeHandled: () => void;
 }) {
   const gt = useGT();
@@ -386,13 +288,32 @@ export function MailThreadView({
   const [widePanel, setWidePanel] = useLocalStorage(DETAILS_PANEL_KEY, true, Schema.Boolean);
   const [narrowPanel, setNarrowPanel] = useState(false);
   const [compose, setCompose] = useState<ComposeTask | null>(null);
-  const [seenRequest, setSeenRequest] = useState<ComposeTask["mode"] | null>(null);
-  if (requestedCompose !== seenRequest) {
+  // The draft the open composer has saved, so its row is not listed twice.
+  const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
+  const [seenRequest, setSeenRequest] = useState<ComposeMode | null>(null);
+  const detail = query.data;
+  const accounts = view?.status.accounts;
+  const mine = accounts?.map((account) => account.email) ?? [];
+  const openCompose = (task: ComposeTask) => {
+    setCompose(task);
+    setComposeDraftId(task.draft?.id ?? null);
+  };
+  const replyTarget = detail ? defaultReplyTarget(detail.messages) : null;
+  // A menu request waits for the messages, since it answers the newest one someone else sent.
+  if (requestedCompose !== seenRequest && (requestedCompose === null || replyTarget !== null)) {
     setSeenRequest(requestedCompose);
-    if (requestedCompose !== null) setCompose({ mode: requestedCompose, draft: null });
+    if (requestedCompose !== null && replyTarget !== null) {
+      // The sidebar menu cannot see recipients; Reply all with no one else is a Reply.
+      const mode =
+        requestedCompose === "replyAll" && !hasOtherRecipients(replyTarget, mine)
+          ? "reply"
+          : requestedCompose;
+      openCompose({ mode, targetId: replyTarget.id, draft: null });
+    }
   }
   const closeCompose = () => {
     setCompose(null);
+    setComposeDraftId(null);
     if (requestedCompose !== null) onComposeHandled();
   };
   // The row learns its chat id on the next snapshot; the reply to opening one knows it now.
@@ -403,10 +324,8 @@ export function MailThreadView({
     gt("Could not open mail chat"),
   );
   const canSaveDraft = useAtomValue(mailEnvironment.saveDraft.permissionAtom(environmentId));
-  const detail = query.data;
   // The sidebar row is already in memory, so the header paints before the thread arrives.
   const thread = detail?.thread ?? view?.threads.get(threadId) ?? null;
-  const accounts = view?.status.accounts;
   if (thread === null) {
     return (
       <MailPage>
@@ -450,12 +369,17 @@ export function MailThreadView({
       account={account}
       timestampFormat={timestampFormat}
       refresh={query.refresh}
-      onOpenDraft={(draft) =>
-        setCompose({ mode: draft.subject.match(/^(fwd?|fw):/i) ? "forward" : "reply", draft })
-      }
     />
   );
-  const messages = detail?.messages.toReversed() ?? [];
+  const canReply = canSaveDraft && detail !== null;
+  const composeTarget =
+    compose && detail
+      ? (detail.messages.find((item) => item.id === compose.targetId) ?? null)
+      : null;
+  const openDraft = (draft: MailDraft) => {
+    const target = detail && draftTarget(draft, detail.messages);
+    if (target) openCompose({ mode: draftMode(draft), targetId: target.id, draft });
+  };
   return (
     <MailPage
       title={senderName(thread.from)}
@@ -463,8 +387,11 @@ export function MailThreadView({
         <MailThreadToolbar
           environmentId={environmentId}
           thread={thread}
-          canReply={canSaveDraft && detail !== null}
-          onCompose={(mode) => setCompose({ mode, draft: null })}
+          canReply={canReply && replyTarget !== null}
+          canReplyAll={replyTarget !== null && hasOtherRecipients(replyTarget, mine)}
+          onCompose={(mode) =>
+            replyTarget && openCompose({ mode, targetId: replyTarget.id, draft: null })
+          }
           detailsOpen={detailsOpen}
           onToggleDetails={showDetails ? toggleDetails : null}
           chatOpen={showChat}
@@ -484,31 +411,37 @@ export function MailThreadView({
               {thread.subject || gt("(No subject)")}
             </h1>
             {detail === null ? null : (
-              <div className="divide-y divide-border/70">
-                {messages.map((message, index) => (
-                  <ThreadMessage
-                    key={message.id + ":" + message.date}
-                    environmentId={environmentId}
-                    threadId={threadId}
-                    message={message}
-                    timestampFormat={timestampFormat}
-                    eager={index === 0}
-                  />
-                ))}
-              </div>
-            )}
-            {compose && detail ? (
-              <MailComposer
-                key={compose.draft?.id ?? compose.mode}
+              <MailConversation
                 environmentId={environmentId}
                 detail={detail}
-                from={from}
+                mine={mine}
                 timestampFormat={timestampFormat}
-                refresh={query.refresh}
-                task={compose}
-                close={closeCompose}
+                canReply={canReply}
+                composeTargetId={composeTarget?.id ?? null}
+                openDraftId={composeDraftId}
+                renderComposer={() =>
+                  compose && composeTarget ? (
+                    <MailComposer
+                      key={`${compose.targetId}:${compose.mode}:${compose.draft?.id ?? ""}`}
+                      environmentId={environmentId}
+                      detail={detail}
+                      target={composeTarget}
+                      mine={mine}
+                      from={from}
+                      timestampFormat={timestampFormat}
+                      refresh={query.refresh}
+                      task={compose}
+                      onSaved={(draft) => setComposeDraftId(draft.id)}
+                      close={closeCompose}
+                    />
+                  ) : null
+                }
+                onCompose={(mode, target) =>
+                  openCompose({ mode, targetId: target.id, draft: null })
+                }
+                onOpenDraft={openDraft}
               />
-            ) : null}
+            )}
             {query.error && (
               <div
                 role="alert"

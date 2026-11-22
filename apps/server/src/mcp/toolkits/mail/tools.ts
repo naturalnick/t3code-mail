@@ -1,5 +1,6 @@
 import {
   MailDraftId,
+  MailDraftMode,
   MailSettleReason,
   MailThreadId,
   MailThreadState,
@@ -59,6 +60,7 @@ const MailReadTool = Tool.make("t3_mail_read", {
     state: MailThreadState,
     messages: Schema.Array(
       Schema.Struct({
+        messageId: Schema.String,
         from: Schema.String,
         to: Schema.Array(Schema.String),
         cc: Schema.Array(Schema.String),
@@ -72,6 +74,9 @@ const MailReadTool = Tool.make("t3_mail_read", {
       Schema.Struct({
         draftId: MailDraftId,
         revision: NonNegativeInt,
+        mode: MailDraftMode,
+        targetMessageId: Schema.NullOr(Schema.String),
+        to: Schema.Array(Schema.String),
         body: Schema.String,
         status: Schema.String,
       }),
@@ -85,12 +90,14 @@ const MailReadTool = Tool.make("t3_mail_read", {
 const MailDraftTool = Tool.make("t3_mail_draft", {
   ...shared,
   description:
-    "Leave a reply draft on an email thread for the user to review and send. You cannot send. To edit, pass its `draftId` and the `expectedRevision` you read with t3_mail_read. Recipients and subject default to a reply.",
+    'Leave a reply or forward draft on an email thread for the user to review and send. You cannot send. It answers the newest message someone else sent, or the `targetMessageId` you read with t3_mail_read; the sent email quotes that message, so write only the new text. `mode: "forward"` forwards it with its attachments and needs `to`. To edit, pass its `draftId` and the `expectedRevision` you read. Recipients and subject default to a reply.',
   parameters: Schema.Struct({
     threadId: MailThreadId,
     body: Schema.String.check(Schema.isMinLength(1)),
     draftId: Schema.optionalKey(MailDraftId),
     expectedRevision: Schema.optionalKey(NonNegativeInt),
+    targetMessageId: Schema.optionalKey(Schema.String),
+    mode: Schema.optionalKey(MailDraftMode),
     to: Schema.optionalKey(Schema.Array(Schema.String)),
     cc: Schema.optionalKey(Schema.Array(Schema.String)),
     subject: Schema.optionalKey(Schema.String),

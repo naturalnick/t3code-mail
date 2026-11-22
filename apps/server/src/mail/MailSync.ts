@@ -34,6 +34,8 @@ const INITIAL_PAGE = 200;
 const BACKFILL_PAGE = 150;
 const BODY_ROUND = 40;
 const DISPLAY_ROUND = 20;
+/** One round per sync tick, so a large backfill never holds up new mail. */
+const REPLY_TO_ROUND = 200;
 /** Recently settled mail is often opened to check what the AI settled. */
 const DISPLAY_PREFETCH_DAYS = 14;
 const FLAG_WINDOW = 400;
@@ -91,6 +93,11 @@ export class MailSync extends Context.Service<
     readonly getMessageBody: (
       input: MailMessageBodyInput,
     ) => Effect.Effect<MailFormattedBody | null, SqlError>;
+    /** The message's attachments, for a forward; null when the server cannot be reached. */
+    readonly getAttachments: (
+      input: MailMessageBodyInput,
+      maxBytes: number,
+    ) => Effect.Effect<Awaited<ReturnType<ImapSession["fetchAttachments"]>> | null, SqlError>;
     readonly searchGmail: (
       accountId: MailAccountId,
       query: string,
@@ -417,6 +424,22 @@ const make = Effect.gen(function* () {
       return pending.length;
     });
 
+    /** Reads Reply-To for mail synced before it was recorded, one round per call. */
+    const fetchReplyTo = Effect.fn("MailSync.fetchReplyTo")(function* () {
+      const path = roles.primary;
+      const known = yield* store.getMailbox(accountId, path).pipe(Effect.orDie);
+      if (!known) return;
+      const uids = yield* store.pendingReplyTo(accountId, path, REPLY_TO_ROUND).pipe(Effect.orDie);
+      if (uids.length === 0) return;
+      const found = yield* promise(() =>
+        imap.withMailbox(path, null, async (snapshot) =>
+          snapshot.uidValidity === known.uidValidity ? imap.fetchReplyTo(uids) : null,
+        ),
+      );
+      if (found === null) return;
+      yield* store.setReplyTo(accountId, path, found, uids).pipe(Effect.orDie);
+    });
+
     // First pass: primary, sent, bodies, ops.
     yield* setStatus(accountId, { status: "syncing", statusDetail: null });
     yield* syncMailbox(roles.primary, "primary");
@@ -454,6 +477,7 @@ const make = Effect.gen(function* () {
       yield* fetchBodies(roles.primary);
       if (roles.sent !== null) yield* fetchBodies(roles.sent);
       yield* fetchDisplayBodies();
+      yield* fetchReplyTo();
       if (backfilling && loopAt - lastBackfill >= BACKFILL_INTERVAL_MS) {
         lastBackfill = loopAt;
         yield* backfill(roles.primary, "primary");
@@ -604,6 +628,18 @@ const make = Effect.gen(function* () {
   );
   const getMessageBody: MailSync["Service"]["getMessageBody"] = (input) =>
     loadMessageBody(input).pipe(Effect.map((body) => body ?? null));
+  const getAttachments: MailSync["Service"]["getAttachments"] = Effect.fn(
+    "MailSync.getAttachments",
+  )(function* (input, maxBytes) {
+    const [target] = yield* store.messageTargets(input.threadId, [input.messageId]);
+    const imap = target ? live.get(target.accountId)?.imap : undefined;
+    if (!target || !imap) return null;
+    return yield* promise(() =>
+      imap.withMailbox(target.mailbox, null, async (box) =>
+        box.uidValidity === target.uidValidity ? imap.fetchAttachments(target.uid, maxBytes) : null,
+      ),
+    ).pipe(Effect.orElseSucceed(() => null));
+  });
   const searchGmail: MailSync["Service"]["searchGmail"] = Effect.fn("MailSync.searchGmail")(
     function* (accountId, query) {
       const session = live.get(accountId);
@@ -671,7 +707,7 @@ const make = Effect.gen(function* () {
     yield* SubscriptionRef.set(suspended, false);
   }).pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped);
 
-  return MailSync.of({ start, stop, wake, enqueue, getMessageBody, searchGmail });
+  return MailSync.of({ start, stop, wake, enqueue, getMessageBody, getAttachments, searchGmail });
 });
 
 export const layer = Layer.effect(MailSync, make);

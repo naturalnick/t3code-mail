@@ -34,6 +34,7 @@ export function useMailRowMenu(
     const presets = resolveSnoozePresets(new Date(), timestampFormat, environmentId, resolve);
     const items: Array<ContextMenuItem> = [
       { id: "reply", label: gt("Reply") },
+      { id: "replyAll", label: gt("Reply all") },
       { id: "forward", label: gt("Forward") },
       thread.unread
         ? { id: "mark_read", label: gt("Mark as read"), separatorBefore: true }
@@ -83,6 +84,7 @@ export function useMailRowMenu(
       void actions.act(ids, { type: "snooze", until, onReply: true }, gt("Snoozed"));
     switch (clicked) {
       case "reply":
+      case "replyAll":
       case "forward":
         void navigate({
           to: "/mail/$mailThreadId",

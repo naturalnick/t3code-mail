@@ -440,6 +440,7 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
               gmailThreadId: "meeting",
               labels: ["\\Inbox"],
               from: { name: "Ada", address: "ada@example.org" },
+              replyTo: [],
               to: [],
               cc: [],
               subject: "Meeting",

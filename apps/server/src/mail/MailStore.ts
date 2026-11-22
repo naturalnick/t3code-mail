@@ -319,6 +319,12 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       BEGIN DELETE FROM mail_triage_notes WHERE thread_id = OLD.id; END`,
   ],
   [`ALTER TABLE mail_threads DROP COLUMN line`],
+  [
+    // NULL means not read yet; sync fills it in for mail stored before it was recorded.
+    `ALTER TABLE mail_messages ADD COLUMN reply_to_json TEXT`,
+    `ALTER TABLE mail_drafts ADD COLUMN mode TEXT NOT NULL DEFAULT 'reply'`,
+    `ALTER TABLE mail_drafts ADD COLUMN target_message INTEGER`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -332,6 +338,8 @@ export interface MessageInsert {
   readonly labels: ReadonlyArray<string> | null;
   readonly inInbox: boolean;
   readonly from: MailAddress;
+  /** Null when this copy was stored before Reply-To was recorded. */
+  readonly replyTo?: ReadonlyArray<MailAddress> | null;
   readonly to: ReadonlyArray<MailAddress>;
   readonly cc: ReadonlyArray<MailAddress>;
   readonly subject: string;
@@ -469,7 +477,7 @@ export interface ThreadChange {
 }
 type DraftContent = Pick<
   DraftRecord,
-  "body" | "to" | "cc" | "subject" | "status" | "error" | "messageId"
+  "body" | "to" | "cc" | "subject" | "status" | "error" | "messageId" | "mode" | "targetMessageId"
 >;
 
 export interface ActionRecord {
@@ -633,6 +641,7 @@ const toMessage = (row: Row): StoredMessage => ({
   labels: json<ReadonlyArray<string> | null>(row.labels, null),
   inInbox: bool(row.in_inbox),
   from: { name: str(row.from_name), address: str(row.from_address) },
+  replyTo: json<ReadonlyArray<MailAddress> | null>(row.reply_to_json, null),
   to: json<ReadonlyArray<MailAddress>>(row.to_json, []),
   cc: json<ReadonlyArray<MailAddress>>(row.cc_json, []),
   subject: str(row.subject),
@@ -658,6 +667,7 @@ export function messageView(message: StoredMessage, clean: (text: string) => str
   return {
     id: String(message.id),
     from: message.from,
+    replyTo: message.replyTo ?? [],
     to: message.to,
     cc: message.cc,
     date: message.date,
@@ -729,6 +739,11 @@ const toDraft = (row: Row): DraftRecord => ({
   originalBody: strOrNull(row.original_body),
   messageId: strOrNull(row.message_id),
   revision: num(row.revision),
+  mode: str(row.mode) === "forward" ? "forward" : "reply",
+  targetMessageId:
+    row.target_message === null || row.target_message === undefined
+      ? null
+      : String(num(row.target_message)),
 });
 
 export const draftView = ({ originalBody: _o, messageId: _m, ...draft }: DraftRecord): MailDraft =>
@@ -948,7 +963,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     if (existing[0]) {
       yield* sql`UPDATE mail_messages SET seen = ${message.seen ? 1 : 0},
             labels = ${message.labels === null ? null : toJson([...message.labels].sort())},
-            in_inbox = ${message.inInbox ? 1 : 0}, removed = 0
+            in_inbox = ${message.inInbox ? 1 : 0}, removed = 0,
+            reply_to_json = COALESCE(reply_to_json, ${message.replyTo == null ? null : toJson(message.replyTo)})
           WHERE id = ${existing[0].id}`;
       return { id: num(existing[0].id), inserted: false };
     }
@@ -975,7 +991,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     }>`INSERT INTO mail_messages (account_id, mailbox, uid, message_id,
           thread_id, labels, in_inbox, from_name, from_address, to_json, cc_json, subject, date,
           in_reply_to, references_json, seen, outgoing, size, attachments_json, list_unsubscribe,
-          list_id, precedence, auto_submitted, calendar, text_part, body, body_state)
+          list_id, precedence, auto_submitted, calendar, text_part, body, body_state, reply_to_json)
         VALUES (${message.accountId}, ${message.mailbox}, ${message.uid}, ${message.messageId},
           ${message.threadId}, ${message.labels === null ? null : toJson([...message.labels].sort())},
           ${message.inInbox ? 1 : 0}, ${message.from.name}, ${message.from.address},
@@ -986,7 +1002,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           ${message.listId}, ${message.precedence}, ${message.autoSubmitted},
           ${message.calendar ? 1 : 0},
           ${message.textPart === null ? null : toJson(message.textPart)}, NULL,
-          ${message.textPart === null ? "unavailable" : "pending"})
+          ${message.textPart === null ? "unavailable" : "pending"},
+          ${message.replyTo == null ? null : toJson(message.replyTo)})
         RETURNING id`;
     const id = num(rows[0]?.id);
     yield* sql`INSERT INTO mail_search (rowid, subject, sender, body)
@@ -1408,6 +1425,33 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     sql<Row>`SELECT * FROM mail_threads WHERE account_id = ${accountId} AND from_address = ${fromAddress} AND id != ${excludeId}
       ORDER BY last_message_at DESC LIMIT ${limit}`.pipe(Effect.map((rows) => rows.map(toThread)));
 
+  /** Messages whose Reply-To was never read, newest first. */
+  const pendingReplyTo = (accountId: MailAccountId, mailbox: string, limit: number) =>
+    sql<{ uid: number }>`SELECT uid FROM mail_messages WHERE account_id = ${accountId}
+      AND mailbox = ${mailbox} AND removed = 0 AND outgoing = 0 AND reply_to_json IS NULL
+      ORDER BY date DESC LIMIT ${limit}`.pipe(
+      Effect.map((rows) => rows.map((row) => num(row.uid))),
+    );
+  const setReplyTo = Effect.fn("MailStore.setReplyTo")(function* (
+    accountId: MailAccountId,
+    mailbox: string,
+    found: ReadonlyArray<{ readonly uid: number; readonly replyTo: ReadonlyArray<MailAddress> }>,
+    asked: ReadonlyArray<number>,
+  ) {
+    const byUid = new Map(found.map((entry) => [entry.uid, entry.replyTo]));
+    // A UID the server no longer has gets an empty list, so it is not asked for again.
+    yield* sql.withTransaction(
+      Effect.forEach(
+        asked,
+        (uid) =>
+          sql`UPDATE mail_messages SET reply_to_json = ${toJson(byUid.get(uid) ?? [])}
+            WHERE account_id = ${accountId} AND mailbox = ${mailbox} AND uid = ${uid}
+              AND reply_to_json IS NULL`,
+        { discard: true },
+      ),
+    );
+  });
+
   const latestMessage = (threadId: MailThreadId, incomingOnly = false) =>
     sql<Row>`SELECT * FROM mail_messages WHERE thread_id = ${threadId} AND removed = 0
       ${incomingOnly ? sql`AND outgoing = 0` : sql``} ORDER BY date DESC, id DESC LIMIT 1`.pipe(
@@ -1537,11 +1581,15 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   /** Saves an edit. Every save bumps the revision, so a send approves exactly one version. */
   const saveDraftContent = (draft: DraftRecord) =>
     sql<Row>`INSERT INTO mail_drafts (id, thread_id, account_id, to_json, cc_json, subject, body,
-        origin, original_body, status, error, message_id, revision, updated_at, sent_at)
+        origin, original_body, status, error, message_id, revision, updated_at, sent_at, mode,
+        target_message)
       VALUES (${draft.id}, ${draft.threadId}, ${draft.accountId}, ${toJson(draft.to)},
         ${toJson(draft.cc)}, ${draft.subject}, ${draft.body}, ${draft.origin},
-        ${draft.originalBody}, ${draft.status}, ${draft.error}, ${draft.messageId}, ${draft.revision}, ${draft.updatedAt}, NULL)
+        ${draft.originalBody}, ${draft.status}, ${draft.error}, ${draft.messageId}, ${draft.revision},
+        ${draft.updatedAt}, NULL, ${draft.mode},
+        ${draft.targetMessageId === null ? null : Number(draft.targetMessageId)})
       ON CONFLICT (id) DO UPDATE SET to_json = excluded.to_json, cc_json = excluded.cc_json,
+        mode = excluded.mode, target_message = excluded.target_message,
         subject = excluded.subject, body = excluded.body, status = excluded.status, error = excluded.error,
         message_id = excluded.message_id, revision = mail_drafts.revision + 1, updated_at = excluded.updated_at
       WHERE mail_drafts.status IN ('draft', 'failed')
@@ -1701,6 +1749,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     refreshUnread,
     markMessagesRead,
     undoMessagesRead,
+    pendingReplyTo,
+    setReplyTo,
     markNewestUnread,
     undoMessagesUnread,
     serverLocations,

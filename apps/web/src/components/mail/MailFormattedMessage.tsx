@@ -4,14 +4,62 @@ import { useGT } from "gt-react";
 import { useEffect, useRef, useState } from "react";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
-import { InlineButton } from "../ui/button";
+import { EllipsisIcon } from "lucide-react";
+import { Button, InlineButton } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
+const QUOTE_SELECTORS = [
+  ".gmail_quote",
+  "blockquote.t3-cite",
+  ".yahoo_quoted",
+  ".protonmail_quote",
+  "#mail-editor-reference-message-container",
+  "#divRplyFwdMsg",
+  "#appendonsend",
+].join(",");
+
+/** A forward's quoted block is the message itself, so it is never folded away. */
+const isForwarded = (element: Element) =>
+  /forwarded message|begin forwarded/i.test(
+    `${element.previousElementSibling?.textContent ?? ""} ${element.textContent ?? ""}`.slice(
+      0,
+      400,
+    ),
+  );
+
+/**
+ * Marks the earlier conversation a reply carries, the way Gmail and Outlook nest it, so the reader
+ * can fold it. Outlook puts its header first and the old mail after it as siblings.
+ */
+function markQuotedHistory(content: HTMLElement): boolean {
+  const quote = [...content.querySelectorAll(QUOTE_SELECTORS)].find(
+    (element) => !element.parentElement?.closest(QUOTE_SELECTORS) && !isForwarded(element),
+  );
+  if (!quote) return false;
+  const folded: Array<Element> = [quote];
+  if (quote.id === "divRplyFwdMsg" || quote.id === "appendonsend") {
+    for (let next = quote.nextElementSibling; next; next = next.nextElementSibling)
+      folded.push(next);
+    const rule = quote.previousElementSibling;
+    if (rule?.tagName === "HR") folded.push(rule);
+  }
+  const before = content.textContent?.trim().length ?? 0;
+  const quoted = folded.reduce((total, node) => total + (node.textContent?.trim().length ?? 0), 0);
+  // Folding everything would leave an empty message.
+  if (before - quoted < 1) return false;
+  for (const node of folded) node.setAttribute("data-t3-quote", "");
+  return true;
+}
+
+function prepareDocument(body: MailFormattedBody, loadImages: boolean, showQuoted: boolean) {
   // A template's inert owner document cannot fetch sender-controlled resources while sanitizing.
   const template = document.createElement("template");
   template.innerHTML = body.html;
   const content = template.content.ownerDocument.createElement("div");
   content.append(template.content);
+  // Apple Mail marks quotes with a `type` attribute the sanitizer drops, so carry it as a class.
+  for (const quote of content.querySelectorAll("blockquote[type=cite]"))
+    quote.classList.add("t3-cite");
   DOMPurify.sanitize(content, {
     IN_PLACE: true,
     ALLOWED_TAGS:
@@ -24,6 +72,7 @@ function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
       ),
     ALLOW_DATA_ATTR: false,
   });
+  const hasQuote = markQuotedHistory(content);
   let remoteImages = false;
   for (const img of content.querySelectorAll("img")) {
     const src = img.getAttribute("src") ?? "";
@@ -47,8 +96,8 @@ function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
     link.rel = "noopener noreferrer";
   }
   const policy = `default-src 'none'; img-src data:${loadImages ? " https: http:" : ""}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html{color-scheme:light;background:white;color:#171717;font:15px/1.5 system-ui,sans-serif;overflow:hidden}html,body{height:auto!important;min-height:0!important}body{display:flow-root;margin:0;padding:8px;overflow-wrap:anywhere}*,*::before,*::after{box-sizing:border-box}table,div,img,td,th,pre{max-width:100%!important}img{object-fit:contain;height:auto}pre{white-space:pre-wrap}@media(max-width:640px){table{table-layout:fixed}td,th{min-width:0!important;white-space:normal!important}}</style></head><body>${content.innerHTML}</body></html>`;
-  return { srcDoc, remoteImages };
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html{color-scheme:light;background:white;color:#171717;font:15px/1.5 system-ui,sans-serif;overflow:hidden}html,body{height:auto!important;min-height:0!important}body{display:flow-root;margin:0;padding:8px;overflow-wrap:anywhere}*,*::before,*::after{box-sizing:border-box}table,div,img,td,th,pre{max-width:100%!important}img{object-fit:contain;height:auto}pre{white-space:pre-wrap}${showQuoted ? "" : "[data-t3-quote]{display:none!important}"}@media(max-width:640px){table{table-layout:fixed}td,th{min-width:0!important;white-space:normal!important}}</style></head><body>${content.innerHTML}</body></html>`;
+  return { srcDoc, remoteImages, hasQuote };
 }
 
 const MAX_REMEMBERED_HEIGHTS = 200;
@@ -80,8 +129,10 @@ export function MailFormattedMessage({
 }) {
   const gt = useGT();
   const [loadImages, setLoadImages] = useState(false);
-  const { srcDoc, remoteImages } = prepareDocument(body, loadImages);
-  const remembered = measuredHeights.get(id);
+  const [showQuoted, setShowQuoted] = useState(false);
+  const { srcDoc, remoteImages, hasQuote } = prepareDocument(body, loadImages, showQuoted);
+  const heightKey = showQuoted ? `${id}:quoted` : id;
+  const remembered = measuredHeights.get(heightKey);
   const [measured, setMeasured] = useState(remembered !== undefined);
   const stop = useRef<(() => void) | undefined>(undefined);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The observer belongs to the iframe document and must be disconnected on unmount.
@@ -120,13 +171,42 @@ export function MailFormattedMessage({
               MAX_FRAME_HEIGHT,
             );
             frame.style.height = height + "px";
-            rememberHeight(id, height);
+            rememberHeight(heightKey, height);
             setMeasured(true);
           };
           stop.current = observeResize(element, resize);
           resize();
         }}
       />
+      {hasQuote ? (
+        <QuotedToggle shown={showQuoted} onToggle={() => setShowQuoted(!showQuoted)} />
+      ) : null}
     </>
+  );
+}
+
+/** The "•••" Gmail shows for folded history. */
+export function QuotedToggle({ shown, onToggle }: { shown: boolean; onToggle: () => void }) {
+  const gt = useGT();
+  const label = shown ? gt("Hide earlier messages") : gt("Show earlier messages");
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            className="mt-2"
+            aria-label={label}
+            aria-pressed={shown}
+            onClick={onToggle}
+          />
+        }
+      >
+        <EllipsisIcon />
+      </TooltipTrigger>
+      <TooltipPopup side="bottom">{label}</TooltipPopup>
+    </Tooltip>
   );
 }

@@ -402,6 +402,7 @@ const make = Effect.gen(function* () {
         labels,
         inInbox,
         from: message.from,
+        replyTo: message.replyTo,
         to: message.to,
         cc: message.cc,
         subject: message.subject,

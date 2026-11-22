@@ -75,6 +75,7 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
         subject: detail.thread.subject,
         state: detail.thread.state,
         messages: detail.messages.map((message) => ({
+          messageId: message.id,
           from: address(message.from),
           to: message.to.map(address),
           cc: message.cc.map(address),
@@ -88,6 +89,9 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
           .map((draft) => ({
             draftId: draft.id,
             revision: draft.revision,
+            mode: draft.mode,
+            targetMessageId: draft.targetMessageId,
+            to: draft.to,
             body: draft.body,
             status: draft.status,
           })),
@@ -96,26 +100,46 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
     }),
   ),
   t3_mail_draft: McpToolAccess.writes(
-    ({ threadId, body, draftId, expectedRevision, to, cc, subject }) =>
+    ({ threadId, body, draftId, expectedRevision, to, cc, subject, targetMessageId, mode }) =>
       Effect.gen(function* () {
         const mail = yield* MailService.MailService;
         const detail = yield* failure(mail.getThread(threadId));
         const existing = detail.drafts.find((draft) => draft.id === draftId);
-        const lastIncoming = detail.messages.findLast((message) => !message.outgoing);
-        const subjectLine = detail.thread.subject;
+        const chosenId = targetMessageId ?? existing?.targetMessageId ?? null;
+        const target =
+          (chosenId === null
+            ? undefined
+            : detail.messages.find((message) => message.id === chosenId)) ??
+          detail.messages.findLast((message) => !message.outgoing) ??
+          detail.messages.at(-1);
+        const forward = (mode ?? existing?.mode) === "forward";
+        // A reply goes to Reply-To or the sender; on your own message, to the people you wrote to.
+        const replyTo = !target
+          ? []
+          : target.outgoing
+            ? target.to
+            : target.replyTo.length > 0
+              ? target.replyTo
+              : [target.from];
+        const subjectLine = target?.subject || detail.thread.subject;
+        const prefix = forward ? /^(fwd?|fw):/i : /^re:/i;
         const draft = yield* failure(
           mail.saveDraft(
             {
               threadId,
               ...(draftId === undefined ? {} : { draftId }),
               ...(expectedRevision === undefined ? {} : { expectedRevision }),
-              to: to ?? existing?.to ?? (lastIncoming ? [lastIncoming.from.address] : []),
+              to: to ?? existing?.to ?? (forward ? [] : replyTo.map((entry) => entry.address)),
               cc: cc ?? existing?.cc ?? [],
               subject:
                 subject ??
-                existing?.subject ??
-                (/^re:/i.test(subjectLine) ? subjectLine : `Re: ${subjectLine}`),
+                (mode === undefined ? existing?.subject : undefined) ??
+                (prefix.test(subjectLine)
+                  ? subjectLine
+                  : `${forward ? "Fwd" : "Re"}: ${subjectLine}`),
               body,
+              mode: forward ? "forward" : "reply",
+              ...(target ? { targetMessageId: target.id } : {}),
             },
             yield* agentActor,
           ),

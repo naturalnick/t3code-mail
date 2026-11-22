@@ -1,12 +1,13 @@
 import { MailThreadId } from "@t3tools/contracts";
 import { createFileRoute } from "@tanstack/react-router";
+import type { ComposeMode } from "../components/mail/mailCompose.logic";
 import { MailThreadView } from "../components/mail/MailThreadView";
 import { MailPage } from "../components/mail/MailPage";
 import { useMailEnvironmentId } from "../state/mail";
 
 interface MailThreadSearch {
   readonly chat?: true;
-  readonly compose?: "reply" | "forward";
+  readonly compose?: ComposeMode;
 }
 
 function ThreadPage() {
@@ -37,7 +38,9 @@ function ThreadPage() {
 export const Route = createFileRoute("/_chat/mail/$mailThreadId")({
   validateSearch: (raw: Record<string, unknown>): MailThreadSearch => ({
     ...(raw.chat === true || raw.chat === "true" ? { chat: true as const } : {}),
-    ...(raw.compose === "reply" || raw.compose === "forward" ? { compose: raw.compose } : {}),
+    ...(raw.compose === "reply" || raw.compose === "replyAll" || raw.compose === "forward"
+      ? { compose: raw.compose }
+      : {}),
   }),
   component: ThreadPage,
 });

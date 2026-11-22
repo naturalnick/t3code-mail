@@ -117,6 +117,7 @@ import {
   type TrustUndo,
   type TrustUndoEntry,
 } from "./mailTrust.ts";
+import { composeOutgoing, type ComposedFile } from "./mailCompose.ts";
 import { buildRaw, classifySmtpError, sendRaw } from "./smtpSend.ts";
 
 type MailStreamEventType = MailStreamEvent;
@@ -126,8 +127,22 @@ const L1_TEXT_CHARS = 1_200;
 const GUARDRAIL_TEXT_CHARS = 200_000;
 const TRIAGE_RETRY_MINUTES = 10;
 const SEND_DEDUPE_MS = 10 * 60_000;
+
+const sameRecipients = (
+  a: { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> },
+  b: { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> },
+) => {
+  const key = (draft: typeof a) =>
+    [...draft.to, ...draft.cc]
+      .map((address) => address.toLowerCase())
+      .toSorted()
+      .join(",");
+  return key(a) === key(b);
+};
 const DRAFT_CHANGED = "The draft changed after you reviewed it. Review it again before sending.";
 const MAYBE_SENT = "It may have been sent; check Sent before sending again.";
+/** Leaves room under the common 25 MB limit for base64 encoding. */
+const FORWARD_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 
 const MAIL_CATEGORIES = new Set<MailCategory>([
   "person",
@@ -725,7 +740,14 @@ const make = Effect.gen(function* () {
       if (history.discardedDraft) {
         const draft = history.discardedDraft;
         if (yield* store.getDraft(draft.id)) return yield* staleUndo();
-        yield* store.saveDraftContent({ ...draft, revision: draft.revision + 1, updatedAt: now });
+        yield* store.saveDraftContent({
+          ...draft,
+          // Discards recorded before drafts had a mode and target.
+          mode: draft.mode ?? "reply",
+          targetMessageId: draft.targetMessageId ?? null,
+          revision: draft.revision + 1,
+          updatedAt: now,
+        });
       }
       if (history.read && thread) {
         const unread = history.read.unread === true;
@@ -1455,6 +1477,18 @@ const make = Effect.gen(function* () {
         return yield* invalid("The draft changed. Review the current version before editing.");
       }
       const id = existing?.id ?? MailDraftId.make(`draft-${yield* uuid}`);
+      const targetMessageId =
+        input.targetMessageId !== undefined
+          ? input.targetMessageId
+          : (existing?.targetMessageId ?? null);
+      if (
+        targetMessageId !== null &&
+        !(yield* store.threadMessages(thread.id)).some(
+          (message) => String(message.id) === targetMessageId && !message.removed,
+        )
+      ) {
+        return yield* notFound("message");
+      }
       const saved = yield* store.saveDraftContent({
         id,
         threadId: thread.id,
@@ -1463,6 +1497,8 @@ const make = Effect.gen(function* () {
         cc: input.cc,
         subject: input.subject,
         body: input.body,
+        mode: input.mode ?? existing?.mode ?? "reply",
+        targetMessageId,
         origin: existing?.origin ?? actor.actor,
         status: "draft",
         error: null,
@@ -1485,6 +1521,10 @@ const make = Effect.gen(function* () {
               ...(existing.body !== saved.body ? { body: existing.body } : {}),
               ...(toJson(existing.to) !== toJson(saved.to) ? { to: existing.to } : {}),
               ...(toJson(existing.cc) !== toJson(saved.cc) ? { cc: existing.cc } : {}),
+              ...(existing.mode !== saved.mode ? { mode: existing.mode } : {}),
+              ...(existing.targetMessageId !== saved.targetMessageId
+                ? { targetMessageId: existing.targetMessageId }
+                : {}),
             };
       const handBack =
         actor.actor !== "user" && thread.state === "working" && thread.workingReason === "drafting";
@@ -1553,6 +1593,9 @@ const make = Effect.gen(function* () {
           other.id !== draft.id &&
           other.status === "sent" &&
           other.body.trim() === draft.body.trim() &&
+          other.mode === draft.mode &&
+          other.targetMessageId === draft.targetMessageId &&
+          sameRecipients(other, draft) &&
           other.sentAt !== null &&
           isoMillis(now) - isoMillis(other.sentAt) < SEND_DEDUPE_MS,
       );
@@ -1588,17 +1631,74 @@ const make = Effect.gen(function* () {
       const correspondent = last?.outgoing
         ? yield* store.latestMessage(claimed.threadId, true)
         : last;
+      // Drafts from before targets were stored already hold any quote in their body: send as written.
+      const legacy = claimed.targetMessageId === null;
+      const chosen = legacy
+        ? null
+        : ((yield* store.threadMessages(claimed.threadId)).find(
+            (message) => String(message.id) === claimed.targetMessageId && !message.removed,
+          ) ?? null);
+      if (!legacy && chosen === null)
+        return yield* fail(
+          "The message this answers is no longer in the thread. Open the draft to choose another.",
+        );
+      const target = chosen ?? correspondent ?? last;
+      const forward = claimed.mode === "forward";
+      const formatted =
+        chosen === null
+          ? null
+          : yield* sync
+              .getMessageBody({ threadId: claimed.threadId, messageId: chosen.id })
+              .pipe(Effect.orElseSucceed(() => null));
+      if (forward && chosen !== null && !formatted?.html && !chosen.body)
+        return yield* fail("Couldn't download the message to forward. Try again.");
+      let files: ReadonlyArray<ComposedFile> = [];
+      if (forward && chosen !== null && chosen.attachments.length > 0) {
+        const fetched = yield* sync
+          .getAttachments(
+            { threadId: claimed.threadId, messageId: chosen.id },
+            FORWARD_ATTACHMENT_BYTES,
+          )
+          .pipe(Effect.orElseSucceed(() => null));
+        if (fetched === null)
+          return yield* fail("Couldn't download the attachments to forward. Try again.");
+        if (!fetched.complete)
+          return yield* fail(
+            "The attachments are too large to forward. Share a link to them instead.",
+          );
+        files = fetched.files;
+      }
+      const composed = composeOutgoing({
+        mode: claimed.mode,
+        body: claimed.body,
+        source:
+          chosen === null
+            ? null
+            : {
+                from: chosen.from,
+                to: chosen.to,
+                cc: chosen.cc,
+                date: chosen.date,
+                subject: chosen.subject,
+                text: chosen.body,
+                html: formatted?.html ?? null,
+                inlineImages: formatted?.inlineImages ?? {},
+              },
+        files,
+      });
       const outgoing = {
         from: { name: account.displayName, address: account.email },
         to: claimed.to,
         cc: claimed.cc,
         subject: claimed.subject,
-        text: claimed.body,
+        text: composed.text,
+        html: composed.html,
+        attachments: composed.attachments,
         messageId,
-        inReplyTo: last?.messageId ?? null,
+        inReplyTo: target?.messageId ?? null,
         references: [
-          ...(last?.references ?? []),
-          ...(last?.messageId ? [last.messageId] : []),
+          ...(target?.references ?? []),
+          ...(target?.messageId ? [target.messageId] : []),
         ].slice(-20),
       };
       const sent = yield* Effect.tryPromise({
@@ -1678,8 +1778,12 @@ const make = Effect.gen(function* () {
             references: outgoing.references,
             seen: true,
             outgoing: true,
-            size: claimed.body.length,
-            attachments: [],
+            size: raw.length,
+            attachments: files.map((file) => ({
+              filename: file.filename,
+              contentType: file.contentType,
+              size: file.content.length,
+            })),
             listUnsubscribe: false,
             listId: null,
             precedence: null,
@@ -1687,13 +1791,16 @@ const make = Effect.gen(function* () {
             calendar: false,
             textPart: null,
           });
-          yield* store.setMessageBody(local.id, claimed.body);
+          yield* store.setMessageBody(local.id, composed.text);
           yield* store.refreshThreadAggregate(claimed.threadId);
           const thread = yield* store.getThread(claimed.threadId);
           if (thread !== null && partial && thread.state !== "active") {
             yield* store.patchThread(thread.id, activePatch(sentAt));
           } else if (thread !== null && !partial && thread.state !== "settled") {
-            yield* store.patchThread(thread.id, settledPatch(sentAt, "replied", "user"));
+            yield* store.patchThread(
+              thread.id,
+              settledPatch(sentAt, forward ? "done" : "replied", "user"),
+            );
             yield* mirror(thread, "archive");
           }
           yield* store.insertAction({

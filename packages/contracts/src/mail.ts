@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -134,13 +135,15 @@ export type MailMessageBodyInput = typeof MailMessageBodyInput.Type;
 export const MailMessage = Schema.Struct({
   id: Schema.String,
   from: MailAddress,
+  /** Where the sender asks replies to go. Empty when unknown; reply to `from` then. */
+  replyTo: Schema.Array(MailAddress).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   to: Schema.Array(MailAddress),
   cc: Schema.Array(MailAddress),
   date: IsoDateTime,
   subject: Schema.String,
   /** Cleaned text: no HTML, tracking junk, signature or quoted chain. */
   text: Schema.NullOr(Schema.String),
-  /** Text with quotes and signature kept, for "show original". */
+  /** Text with quotes and signature kept. */
   fullText: Schema.NullOr(Schema.String),
   attachments: Schema.Array(MailAttachment),
   outgoing: Schema.Boolean,
@@ -150,6 +153,10 @@ export type MailMessage = typeof MailMessage.Type;
 
 export const MailDraftStatus = Schema.Literals(["draft", "sending", "sent", "failed"]);
 export type MailDraftStatus = typeof MailDraftStatus.Type;
+
+/** A forward carries the message and its attachments; a reply quotes it. */
+export const MailDraftMode = Schema.Literals(["reply", "forward"]);
+export type MailDraftMode = typeof MailDraftMode.Type;
 
 export const MailDraft = Schema.Struct({
   id: MailDraftId,
@@ -164,6 +171,11 @@ export const MailDraft = Schema.Struct({
   error: Schema.NullOr(Schema.String),
   /** Bumped by every save. Sending names the revision the user reviewed. */
   revision: NonNegativeInt,
+  mode: MailDraftMode.pipe(Schema.withDecodingDefaultKey(Effect.succeed("reply" as const))),
+  /** The message this answers or forwards; null on older drafts, sent as written. */
+  targetMessageId: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
   updatedAt: IsoDateTime,
   sentAt: Schema.NullOr(IsoDateTime),
 });
@@ -471,6 +483,8 @@ export const MailSaveDraftInput = Schema.Struct({
   cc: Schema.Array(Schema.String),
   subject: Schema.String,
   body: Schema.String,
+  mode: Schema.optionalKey(MailDraftMode),
+  targetMessageId: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export const MailDraftInput = Schema.Struct({
   draftId: MailDraftId,

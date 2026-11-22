@@ -77,6 +77,8 @@ export interface ParsedMessage {
   readonly gmailThreadId: string | null;
   readonly labels: ReadonlyArray<string> | null;
   readonly from: MailAddress;
+  /** Where the sender asks replies to go; IMAP reports the sender here when there is none. */
+  readonly replyTo: ReadonlyArray<MailAddress>;
   readonly to: ReadonlyArray<MailAddress>;
   readonly cc: ReadonlyArray<MailAddress>;
   readonly subject: string;
@@ -218,6 +220,7 @@ function parseFetched(message: FetchMessageObject): ParsedMessage {
     gmailThreadId: message.threadId ?? null,
     labels: message.labels ? [...message.labels] : null,
     from: toAddress(envelope.from?.[0] ?? envelope.sender?.[0]),
+    replyTo: (envelope.replyTo ?? []).map(toAddress),
     to: (envelope.to ?? []).map(toAddress),
     cc: (envelope.cc ?? []).map(toAddress),
     subject: envelope.subject?.trim() ?? "",
@@ -492,6 +495,64 @@ export class ImapSession {
       }
     }
     return { html, inlineImages };
+  }
+
+  /** Reply-To for messages synced before it was recorded. */
+  async fetchReplyTo(
+    uids: ReadonlyArray<number>,
+  ): Promise<ReadonlyArray<{ uid: number; replyTo: ReadonlyArray<MailAddress> }>> {
+    if (uids.length === 0) return [];
+    const found: Array<{ uid: number; replyTo: ReadonlyArray<MailAddress> }> = [];
+    for await (const message of this.client.fetch(
+      uids.join(","),
+      { envelope: true },
+      { uid: true },
+    ))
+      found.push({ uid: message.uid, replyTo: (message.envelope?.replyTo ?? []).map(toAddress) });
+    return found;
+  }
+
+  /**
+   * The message's attachments as files, for forwarding; stops at `maxBytes` decoded bytes in total.
+   * Inline parts keep their Content-ID so forwarded HTML still shows them.
+   */
+  async fetchAttachments(uid: number, maxBytes: number) {
+    const message = await this.client.fetchOne(String(uid), { bodyStructure: true }, { uid: true });
+    if (!message || !message.bodyStructure) throw new Error("Message structure unavailable");
+    const parts: Array<{ part: string; filename: string; contentType: string; cid?: string }> = [];
+    walkStructure(message.bodyStructure, (node, part) => {
+      const type = node.type.toLowerCase();
+      const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
+      const cid = node.id?.replace(/^<|>$/g, "");
+      if (node.disposition === "attachment" || (filename !== null && !type.startsWith("text/")))
+        parts.push({
+          part,
+          filename: filename ?? "attachment",
+          contentType: type,
+          ...(cid ? { cid } : {}),
+        });
+    });
+    const files: Array<{ filename: string; contentType: string; content: Buffer; cid?: string }> =
+      [];
+    let remaining = maxBytes;
+    for (const part of parts) {
+      const download = await this.client.download(String(uid), part.part, { uid: true });
+      if (!download.content) throw new Error("Attachment unavailable");
+      const chunks: Array<Buffer> = [];
+      // Structure sizes are transfer-encoded, so the budget counts the decoded bytes as they arrive.
+      for await (const chunk of download.content) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        remaining -= buffer.length;
+        if (remaining < 0) {
+          download.content.destroy?.();
+          return { files, complete: false };
+        }
+        chunks.push(buffer);
+      }
+      const { part: _part, ...file } = part;
+      files.push({ ...file, content: Buffer.concat(chunks) });
+    }
+    return { files, complete: true };
   }
 
   /** Gmail server-side search; returns All Mail UIDs. */

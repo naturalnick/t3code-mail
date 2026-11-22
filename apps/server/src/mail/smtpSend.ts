@@ -16,6 +16,13 @@ export interface OutgoingMessage {
   readonly cc: ReadonlyArray<string>;
   readonly subject: string;
   readonly text: string;
+  readonly html?: string | null;
+  readonly attachments?: ReadonlyArray<{
+    readonly filename: string;
+    readonly contentType: string;
+    readonly content: Buffer;
+    readonly cid?: string;
+  }>;
   readonly messageId: string;
   readonly inReplyTo: string | null;
   readonly references: ReadonlyArray<string>;
@@ -31,6 +38,17 @@ export async function buildRaw(message: OutgoingMessage): Promise<Buffer> {
     cc: message.cc.length > 0 ? [...message.cc] : undefined,
     subject: message.subject,
     text: message.text,
+    ...(message.html ? { html: message.html } : {}),
+    ...(message.attachments && message.attachments.length > 0
+      ? {
+          attachments: message.attachments.map((file) => ({
+            filename: file.filename,
+            contentType: file.contentType,
+            content: file.content,
+            ...(file.cid ? { cid: file.cid } : {}),
+          })),
+        }
+      : {}),
     messageId: message.messageId,
     inReplyTo: message.inReplyTo ?? undefined,
     references: message.references.length > 0 ? [...message.references] : undefined,

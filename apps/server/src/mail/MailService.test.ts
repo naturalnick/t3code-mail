@@ -48,6 +48,7 @@ interface MessageInput {
   from?: string;
   at: string;
   listUnsubscribe?: boolean;
+  replyTo?: ReadonlyArray<{ name: string; address: string }>;
 }
 
 const message = (input: MessageInput): ParsedMessage => {
@@ -58,6 +59,7 @@ const message = (input: MessageInput): ParsedMessage => {
     gmailThreadId: null,
     labels: null,
     from: { name: "Acme Builds", address: input.from ?? "updates@acme.dev" },
+    replyTo: input.replyTo ?? [],
     to: [{ name: "Nick", address: me }],
     cc: [],
     subject: input.subject,
@@ -110,6 +112,19 @@ const testLayer = (mailDir: string, reply: ModelReply, credentials = MailCredent
             wake: () => Effect.void,
             enqueue: (id, op) =>
               enqueueOp(id, op, at).pipe(Effect.provideService(MailStore.MailStore, store)),
+            getMessageBody: () =>
+              Effect.succeed({ html: "<p>Original <b>formatted</b></p>", inlineImages: {} }),
+            getAttachments: () =>
+              Effect.succeed({
+                files: [
+                  {
+                    filename: "invoice.pdf",
+                    contentType: "application/pdf",
+                    content: Buffer.from("pdf"),
+                  },
+                ],
+                complete: true,
+              }),
           }),
         ),
       ),
@@ -908,7 +923,9 @@ describe("MailService model usage and replies", () => {
           const local = (yield* store.threadMessages(threadId)).filter(
             (message) => message.outgoing,
           );
-          expect(local.map((message) => message.body).sort()).toEqual([...bodies].sort());
+          expect(local.map((message) => message.body?.split("\n\n")[0]).sort()).toEqual(
+            [...bodies].sort(),
+          );
           expect(new Set(local.map((message) => message.uid)).size).toBe(2);
           for (const [index, message] of local.entries()) {
             expect(message.uid).toBeLessThan(0);
@@ -924,6 +941,115 @@ describe("MailService model usage and replies", () => {
           ).toHaveLength(2);
         }),
       ),
+  );
+
+  it.effect("answers the chosen message: threads under it, quotes it and forwards its files", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const store = yield* MailStore.MailStore;
+        yield* addSendingAccount;
+        const threadId = yield* deliver({ subject: "Plans", body: "First message", at });
+        const original = (yield* store.threadMessages(threadId))[0]!;
+        yield* store.upsertMessage({
+          ...original,
+          uid: original.uid + 1,
+          messageId: "<later@acme.dev>",
+          date: "2026-11-03T09:00:00.000Z",
+        });
+        const sent: Array<Parameters<typeof Smtp.sendRaw>[1]> = [];
+        using _send = vi.spyOn(Smtp, "sendRaw").mockImplementation(async (_config, message) => {
+          sent.push(message);
+          return { accepted: [...message.to, ...message.cc], rejected: [] };
+        });
+        const reply = yield* mail.saveDraft(
+          {
+            threadId,
+            to: ["sam@example.org"],
+            cc: [],
+            subject: "Re: Plans",
+            body: "Sounds good.",
+            targetMessageId: String(original.id),
+          },
+          { actor: "user" },
+        );
+        expect(reply).toMatchObject({ mode: "reply", targetMessageId: String(original.id) });
+        yield* mail.sendDraft({ draftId: reply.id, revision: reply.revision });
+        expect(sent[0]).toMatchObject({
+          inReplyTo: original.messageId,
+          references: [original.messageId],
+        });
+        expect(sent[0]!.text).toMatch(/^Sounds good\.\n\nOn .+ wrote:\n\n> First message/);
+        expect(sent[0]!.html).toContain("<blockquote");
+        expect(sent[0]!.html).toContain("Original <b>formatted</b>");
+        expect((yield* rowOf(threadId)).settledReason).toBe("replied");
+
+        yield* mail.act({ threadIds: [threadId], action: { type: "unsettle" } }, { actor: "user" });
+        yield* store.sql`UPDATE mail_messages SET attachments_json = ${JSON.stringify([
+          { filename: "invoice.pdf", contentType: "application/pdf", size: 3 },
+        ])} WHERE id = ${original.id}`;
+        const forward = yield* mail.saveDraft(
+          {
+            threadId,
+            to: ["accountant@example.org"],
+            cc: [],
+            subject: "Fwd: Plans",
+            body: "FYI",
+            mode: "forward",
+            targetMessageId: String(original.id),
+          },
+          { actor: "user" },
+        );
+        yield* mail.sendDraft({ draftId: forward.id, revision: forward.revision });
+        expect(sent[1]!.text).toContain("---------- Forwarded message ---------");
+        expect(sent[1]!.attachments?.map((file) => file.filename)).toEqual(["invoice.pdf"]);
+        expect((yield* rowOf(threadId)).settledReason).toBe("done");
+
+        const later = (yield* store.threadMessages(threadId)).find(
+          (message) => message.messageId === "<later@acme.dev>",
+        )!;
+        const second = yield* mail.saveDraft(
+          {
+            threadId,
+            to: ["lawyer@example.org"],
+            cc: [],
+            subject: "Fwd: Plans",
+            body: "FYI",
+            mode: "forward",
+            targetMessageId: String(later.id),
+          },
+          { actor: "user" },
+        );
+        yield* mail.sendDraft({ draftId: second.id, revision: second.revision });
+        expect(sent).toHaveLength(3);
+
+        const legacy = yield* mail.saveDraft(
+          { threadId, to: ["sam@example.org"], cc: [], subject: "Re: Plans", body: "As written" },
+          { actor: "user" },
+        );
+        yield* store.sql`UPDATE mail_drafts SET target_message = NULL WHERE id = ${legacy.id}`;
+        yield* mail.sendDraft({ draftId: legacy.id, revision: legacy.revision });
+        expect(sent[3]).toMatchObject({ text: "As written", html: null });
+
+        const orphan = yield* mail.saveDraft(
+          {
+            threadId,
+            to: ["sam@example.org"],
+            cc: [],
+            subject: "Re: Plans",
+            body: "Still there?",
+            targetMessageId: String(original.id),
+          },
+          { actor: "user" },
+        );
+        yield* store.sql`UPDATE mail_messages SET removed = 1 WHERE id = ${original.id}`;
+        const error = yield* Effect.flip(
+          mail.sendDraft({ draftId: orphan.id, revision: orphan.revision }),
+        );
+        expect(error.message).toContain("no longer in the thread");
+        expect(sent).toHaveLength(4);
+      }),
+    ),
   );
 
   it.effect("requires fresh approval for only the rejected recipients of a partial delivery", () =>

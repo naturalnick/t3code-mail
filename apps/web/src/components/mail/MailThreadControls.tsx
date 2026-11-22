@@ -9,6 +9,7 @@ import {
   EllipsisIcon,
   ForwardIcon,
   MessageSquareIcon,
+  ReplyAllIcon,
   ReplyIcon,
   SquareMenuIcon,
   Undo2Icon,
@@ -22,6 +23,7 @@ import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuItemDetail, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import type { ComposeMode } from "./mailCompose.logic";
 import { settleReasonLabel } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 
@@ -107,6 +109,7 @@ export function MailThreadToolbar({
   environmentId,
   thread,
   canReply,
+  canReplyAll,
   onCompose,
   detailsOpen,
   onToggleDetails,
@@ -117,7 +120,9 @@ export function MailThreadToolbar({
   environmentId: EnvironmentId;
   thread: MailThreadRow;
   canReply: boolean;
-  onCompose: (mode: "reply" | "forward") => void;
+  /** Whether the message Reply answers has anyone else on it. */
+  canReplyAll: boolean;
+  onCompose: (mode: ComposeMode) => void;
   detailsOpen: boolean;
   onToggleDetails: (() => void) | null;
   chatOpen: boolean;
@@ -156,6 +161,17 @@ export function MailThreadToolbar({
         <ReplyIcon />
         <T>Reply</T>
       </Button>
+      {canReplyAll ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={!canReply}
+          onClick={() => onCompose("replyAll")}
+        >
+          <ReplyAllIcon />
+          <T>Reply all</T>
+        </Button>
+      ) : null}
       <Button size="sm" variant="ghost" disabled={!canReply} onClick={() => onCompose("forward")}>
         <ForwardIcon />
         <T>Forward</T>
