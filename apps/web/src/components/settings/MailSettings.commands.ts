@@ -24,21 +24,19 @@ export function useMailCommand<I, A, E>(
     if (!allowed || running.current) return null;
     running.current = true;
     setPending(true);
-    try {
-      const result = await execute({ environmentId, input });
-      if (result._tag === "Success") return result;
-      if (!isAtomCommandInterrupted(result)) {
-        toastManager.add({
-          type: "error",
-          title: failureTitle,
-          description: formatEnvironmentQueryError(result.cause, messages),
-        });
-      }
-      return null;
-    } finally {
+    const result = await execute({ environmentId, input }).finally(() => {
       running.current = false;
       setPending(false);
+    });
+    if (result._tag === "Success") return result;
+    if (!isAtomCommandInterrupted(result)) {
+      toastManager.add({
+        type: "error",
+        title: failureTitle,
+        description: formatEnvironmentQueryError(result.cause, messages),
+      });
     }
+    return null;
   };
   return { run, pending, disabled: !allowed || pending };
 }
