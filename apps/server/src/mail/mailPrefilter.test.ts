@@ -105,7 +105,7 @@ describe("prefilter", () => {
         reason: "receipt",
       },
     ];
-    expect(prefilter({ ...base, fromAddress: "billing@mail.acme.dev" }, rules).rule).toEqual({
+    expect(prefilter({ ...base, fromAddress: "billing@mail.acme.dev" }, rules).rule).toMatchObject({
       id: "acme",
       reason: "receipt",
     });

@@ -110,6 +110,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       environmentId={environmentId}
       thread={thread}
       isActive={isActive(thread)}
+      readerOpen={thread.id === routeMailThreadId}
       actions={actions}
       onIntent={prefetch}
       onContextMenu={openRowMenu}
@@ -237,6 +238,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                   environmentId={environmentId}
                   thread={thread}
                   isActive={isActive(thread)}
+                  readerOpen={thread.id === routeMailThreadId}
                   actions={actions}
                   timestamp={thread.lastOutgoingAt ?? thread.lastMessageAt}
                   onIntent={prefetch}

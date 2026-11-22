@@ -285,6 +285,7 @@ const RPC_AGGREGATES = {
   [MAIL_WS_METHODS.mailUpdateAccount]: "mail",
   [MAIL_WS_METHODS.mailRemoveAccount]: "mail",
   [MAIL_WS_METHODS.mailSyncNow]: "mail",
+  [MAIL_WS_METHODS.mailSaveRule]: "mail",
   [MAIL_WS_METHODS.mailUpdateSettings]: "mail",
   [MAIL_WS_METHODS.mailReadEmailMd]: "mail",
   [MAIL_WS_METHODS.mailWriteEmailMd]: "mail",

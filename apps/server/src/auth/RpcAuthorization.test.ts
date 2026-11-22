@@ -5,6 +5,7 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthAccessWriteScope,
+  clientRpcRequiredScopes,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProviderDriverKind,
@@ -52,6 +53,16 @@ describe("RPC authorization scopes", () => {
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }
+  });
+
+  it("requires settings access to create a sender rule through a legacy mail action", () => {
+    const settle = (type: "settle" | "settle_sender") =>
+      clientRpcRequiredScopes(WS_METHODS.mailAct, { threadIds: ["mail"], action: { type } });
+    expect(settle("settle")).toEqual([AuthOrchestrationOperateScope]);
+    expect(settle("settle_sender")).toEqual([
+      AuthOrchestrationOperateScope,
+      AuthSettingsWriteScope,
+    ]);
   });
 
   it("lets only a session that operates threads approve sending a feedback report", () => {

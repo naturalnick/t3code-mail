@@ -222,6 +222,10 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-command:mail:write-email-md",
       tag: WS_METHODS.mailWriteEmailMd,
     }),
+    saveRule: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:save-rule",
+      tag: WS_METHODS.mailSaveRule,
+    }),
     dryRunRule: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:dry-run-rule",
       tag: WS_METHODS.mailDryRunRule,

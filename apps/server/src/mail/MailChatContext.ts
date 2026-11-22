@@ -9,7 +9,8 @@ import * as Schema from "effect/Schema";
 
 import { buildComposePrompt, buildSessionPrompt, relevantEmailMd } from "./mailPrompts.ts";
 import * as MailStore from "./MailStore.ts";
-import { cleanForModel, domainOf } from "./mailText.ts";
+import { domainOf } from "@t3tools/shared/mailRule";
+import { cleanForModel } from "./mailText.ts";
 
 export class MailChatContext extends Context.Service<
   MailChatContext,

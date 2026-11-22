@@ -754,6 +754,7 @@ export function messageView(message: StoredMessage, clean: (text: string) => str
   return {
     id: String(message.id),
     from: message.from,
+    listId: message.listId,
     replyTo: message.replyTo ?? [],
     to: message.to,
     cc: message.cc,

@@ -55,27 +55,21 @@ export function newRule(patch: Partial<MailRule> = {}): MailRule {
   };
 }
 
-/** Saves one rule into the environment's rule list, adding it or replacing it by id. */
 export function useSaveRule(environmentId: EnvironmentId) {
   const gt = useGT();
-  const save = useMailCommand(
+  const command = useMailCommand(
     environmentId,
-    mailEnvironment.updateSettings,
+    mailEnvironment.saveRule,
     gt("Could not save rules"),
   );
   return {
-    disabled: save.disabled,
-    run: async (rules: readonly MailRule[], saved: MailRule) => {
-      // Saving it yourself makes it yours, whoever added it.
-      const { addedBy: _addedBy, ...rule } = saved;
-      return Boolean(
-        await save.run({
-          rules: rules.some((r) => r.id === rule.id)
-            ? rules.map((r) => (r.id === rule.id ? rule : r))
-            : [...rules, rule],
-        }),
-      );
-    },
+    ...command,
+    save: (rule: MailRule, editing: boolean) =>
+      command.run({
+        ...(editing ? { ruleId: rule.id } : { reason: rule.reason }),
+        match: rule.match,
+        when: rule.when ?? "",
+      }),
   };
 }
 
@@ -216,11 +210,6 @@ export function MailRules({
   const gt = useGT();
   const searchable = useSearchableSetting();
   const summary = useRuleSummary();
-  const save = useMailCommand(
-    environmentId,
-    mailEnvironment.updateSettings,
-    gt("Could not save rules"),
-  );
   const saveRule = useSaveRule(environmentId);
   const [editing, setEditing] = useState<{ rule: MailRule; adding: boolean } | null>(null);
   return (
@@ -230,7 +219,7 @@ export function MailRules({
         <Button
           size="sm"
           variant="outline"
-          disabled={save.disabled}
+          disabled={saveRule.disabled}
           onClick={() => setEditing({ adding: true, rule: newRule() })}
         >
           {gt("Add rule")}
@@ -254,17 +243,13 @@ export function MailRules({
                 <Switch
                   aria-label={gt("Enable rule")}
                   checked={rule.enabled}
-                  disabled={save.disabled}
-                  onCheckedChange={(enabled) =>
-                    void save.run({
-                      rules: rules.map((r) => (r.id === rule.id ? { ...r, enabled } : r)),
-                    })
-                  }
+                  disabled={saveRule.disabled}
+                  onCheckedChange={(enabled) => void saveRule.run({ ruleId: rule.id, enabled })}
                 />
                 <Button
                   variant="outline"
                   size="xs"
-                  disabled={save.disabled}
+                  disabled={saveRule.disabled}
                   onClick={() => setEditing({ adding: false, rule })}
                 >
                   {gt("Edit")}
@@ -272,8 +257,8 @@ export function MailRules({
                 <Button
                   variant="ghost"
                   size="xs"
-                  disabled={save.disabled}
-                  onClick={() => void save.run({ rules: rules.filter((r) => r.id !== rule.id) })}
+                  disabled={saveRule.disabled}
+                  onClick={() => void saveRule.run({ ruleId: rule.id, delete: true })}
                 >
                   {gt("Delete")}
                 </Button>
@@ -290,7 +275,7 @@ export function MailRules({
           disabled={saveRule.disabled}
           onClose={() => setEditing(null)}
           onSave={async (rule) => {
-            if (await saveRule.run(rules, rule)) setEditing(null);
+            if (await saveRule.save(rule, !editing.adding)) setEditing(null);
           }}
         />
       )}

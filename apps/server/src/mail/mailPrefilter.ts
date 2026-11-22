@@ -1,6 +1,6 @@
-import type { MailCategory, MailGuardrail, MailRule, MailSettleReason } from "@t3tools/contracts";
+import type { MailCategory, MailGuardrail, MailRule } from "@t3tools/contracts";
 
-import { domainOf } from "./mailText.ts";
+import { domainOf, matchesRule } from "@t3tools/shared/mailRule";
 
 export interface PrefilterInput {
   readonly fromAddress: string;
@@ -25,15 +25,12 @@ export interface PrefilterResult {
   readonly guardrail: MailGuardrail | null;
   readonly bulk: boolean;
   /** A rule with no condition that matched; it decides without the model. */
-  readonly rule: MatchedRule | null;
+  readonly rule: MailRule | null;
   /** Rules in scope whose plain-language condition the model checks. */
-  readonly conditional: ReadonlyArray<MatchedRule & { readonly when: string }>;
+  readonly conditional: ReadonlyArray<ConditionalRule>;
 }
 
-export interface MatchedRule {
-  readonly id: string;
-  readonly reason: MailSettleReason;
-}
+export type ConditionalRule = MailRule & { readonly when: string };
 
 const OTP =
   /\b(verification|security|login|sign[- ]in|one[- ]time|confirmation|access|auth(entication)?) code\b|\bOTP\b|\bpasscode\b|\byour code is\b/i;
@@ -107,28 +104,6 @@ function categorize(input: PrefilterInput, bulk: boolean): MailCategory {
   return "person";
 }
 
-export function matchesRule(
-  rule: MailRule,
-  input: Pick<PrefilterInput, "fromAddress" | "subject" | "listId">,
-): boolean {
-  if (!rule.enabled) return false;
-  const { from, domain, subjectContains, listId } = rule.match;
-  // A rule with a condition may cover all mail; without one it needs a scope.
-  if (!from && !domain && !subjectContains && !listId) return Boolean(rule.when);
-  const address = input.fromAddress.toLowerCase();
-  if (from && !`<${address}>`.includes(from.toLowerCase())) return false;
-  if (domain) {
-    const wanted = domain.toLowerCase().replace(/^@/, "");
-    const actual = domainOf(address);
-    if (actual !== wanted && !actual.endsWith(`.${wanted}`)) return false;
-  }
-  if (subjectContains && !input.subject.toLowerCase().includes(subjectContains.toLowerCase())) {
-    return false;
-  }
-  if (listId && !(input.listId ?? "").toLowerCase().includes(listId.toLowerCase())) return false;
-  return true;
-}
-
 export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>): PrefilterResult {
   const precedence = input.precedence?.toLowerCase() ?? "";
   const bulk =
@@ -140,18 +115,12 @@ export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>)
   const category = categorize(input, bulk);
   const guardrail = guardrailFor(input, category);
   const matched = rules.filter((rule) => matchesRule(rule, input));
-  const decided = (rule: MailRule): MatchedRule => ({
-    id: rule.id,
-    reason: rule.reason,
-  });
   const exact = matched.find((rule) => !rule.when);
   return {
     category,
     guardrail,
     bulk,
-    rule: exact ? decided(exact) : null,
-    conditional: exact
-      ? []
-      : matched.flatMap((rule) => (rule.when ? [{ ...decided(rule), when: rule.when }] : [])),
+    rule: exact ?? null,
+    conditional: exact ? [] : matched.filter((rule): rule is ConditionalRule => Boolean(rule.when)),
   };
 }

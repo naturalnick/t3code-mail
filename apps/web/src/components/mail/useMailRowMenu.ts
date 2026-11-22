@@ -90,7 +90,7 @@ export function useMailRowMenu(
               },
             ]),
       settled
-        ? { id: "unsettle", label: gt("Move back to Active") }
+        ? { id: "unsettle", label: gt("Move to inbox") }
         : { id: "settle", label: gt("Settle") },
       ...(thread.suggestion && !settled
         ? [{ id: "dismiss_suggestion", label: gt("Dismiss suggestion") }]
@@ -108,8 +108,8 @@ export function useMailRowMenu(
             },
           ]),
       {
-        id: "settle_sender",
-        label: gt("Always settle from this sender"),
+        id: "rule",
+        label: gt("Auto-settle…"),
         separatorBefore: senderAi.disabled,
       },
       { id: "delete", label: gt("Delete"), destructive: true },
@@ -143,7 +143,7 @@ export function useMailRowMenu(
         return;
       case "unsnooze":
       case "unsettle":
-        void actions.act(ids, { type: clicked }, gt("Moved back to Active"));
+        void actions.act(ids, { type: clicked }, gt("Moved to inbox"));
         return;
       case "settle":
         void actions.act(
@@ -163,12 +163,12 @@ export function useMailRowMenu(
       case "toggle_ai":
         void senderAi.toggle(thread.from.address);
         return;
-      case "settle_sender":
-        void actions.act(
-          ids,
-          { type: "settle_sender" },
-          gt("Future mail from this sender will settle"),
-        );
+      case "rule":
+        void navigate({
+          to: "/mail/$mailThreadId",
+          params: { mailThreadId: thread.id },
+          search: { rule: true },
+        });
         return;
       case "delete": {
         const deleted = await actions.act(ids, { type: "delete" }, gt("Moved to Trash"));

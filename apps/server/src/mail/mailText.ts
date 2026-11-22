@@ -169,11 +169,6 @@ export function looksLikeInstructionsToAi(text: string): boolean {
   return INJECTION_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-export function domainOf(address: string): string {
-  const at = address.lastIndexOf("@");
-  return at < 0 ? "" : address.slice(at + 1).toLowerCase();
-}
-
 export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4);
 }

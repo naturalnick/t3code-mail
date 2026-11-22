@@ -35,6 +35,7 @@ import {
   type AuthAccessStreamEvent,
   AuthOrchestrationOperateScope,
   AuthProvidersManageScope,
+  AuthSettingsWriteScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
@@ -2010,7 +2011,10 @@ export const layerWsRpc = (
         [WS_METHODS.mailListTrash]: (input) => mail.listTrash(input),
         [WS_METHODS.mailSearch]: (input) => mail.search(input),
         [WS_METHODS.mailAct]: (input) => mail.act(input, mailUser),
-        [WS_METHODS.mailUndo]: (input) => mail.undo(input.actionId),
+        [WS_METHODS.mailUndo]: (input) =>
+          mail.undo(input.actionId, {
+            canEditRules: currentSession.scopes.includes(AuthSettingsWriteScope),
+          }),
         [WS_METHODS.mailListActions]: (input) => mail.listActions(input),
         [WS_METHODS.mailCompose]: (input) => mail.compose(input, mailUser),
         [WS_METHODS.mailSaveDraft]: (input) => mail.saveDraft(input, mailUser),
@@ -2025,6 +2029,7 @@ export const layerWsRpc = (
         [WS_METHODS.mailUpdateSettings]: (input) => mail.updateSettings(input),
         [WS_METHODS.mailReadEmailMd]: () => mail.readEmailMd,
         [WS_METHODS.mailWriteEmailMd]: (input) => mail.writeEmailMd(input.content),
+        [WS_METHODS.mailSaveRule]: (input) => mail.saveRule(input, mailUser),
         [WS_METHODS.mailDryRunRule]: (input) => mail.dryRunRule(input.rule),
         [WS_METHODS.mailSeedVoice]: () => mail.seedVoice,
         [WS_METHODS.mailDismissRecap]: (input) => mail.dismissRecap(input.date),

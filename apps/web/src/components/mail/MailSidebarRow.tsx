@@ -41,6 +41,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   readonly environmentId: EnvironmentId;
   readonly thread: MailThreadRow;
   readonly isActive: boolean;
+  readonly readerOpen: boolean;
   readonly actions: ReturnType<typeof useMailActions>;
   /** The time to show instead of the latest message's, such as when it was sent. */
   readonly timestamp?: string;
@@ -91,18 +92,19 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
     );
   };
 
-  const controls = isNew ? null : thread.state === "settled" ? (
+  const hideRowActions = isNew || (props.readerOpen && !isMobile);
+  const controls = hideRowActions ? null : settled ? (
     <Tooltip>
       <TooltipTrigger
         render={
           <button
             type="button"
             disabled={actions.disabled}
-            aria-label={gt("Move back to Active")}
+            aria-label={gt("Move to inbox")}
             className={rowActionClassName}
             onClick={(event) => {
               stop(event);
-              void actions.act([thread.id], { type: "unsettle" }, gt("Moved back to Active"));
+              void actions.act([thread.id], { type: "unsettle" }, gt("Moved to inbox"));
             }}
           />
         }
@@ -110,7 +112,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
         <Undo2Icon className="size-3.5" />
       </TooltipTrigger>
       <TooltipPopup side="top">
-        <T>Move back to Active</T>
+        <T>Move to inbox</T>
       </TooltipPopup>
     </Tooltip>
   ) : thread.state === "snoozed" ? (
@@ -124,7 +126,7 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             className={rowActionClassName}
             onClick={(event) => {
               stop(event);
-              void actions.act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"));
+              void actions.act([thread.id], { type: "unsnooze" }, gt("Moved to inbox"));
             }}
           />
         }
@@ -215,7 +217,9 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
           <span className="relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs">
             <span
               className={cn(
-                "pointer-events-none flex items-center self-center tabular-nums text-secondary-label group-hover/sidebar-row:absolute group-hover/sidebar-row:right-0 group-hover/sidebar-row:opacity-0 group-has-[:focus-visible]/sidebar-row:absolute group-has-[:focus-visible]/sidebar-row:right-0 group-has-[:focus-visible]/sidebar-row:opacity-0",
+                "pointer-events-none flex items-center self-center tabular-nums text-secondary-label",
+                controls !== null &&
+                  "group-hover/sidebar-row:absolute group-hover/sidebar-row:right-0 group-hover/sidebar-row:opacity-0 group-has-[:focus-visible]/sidebar-row:absolute group-has-[:focus-visible]/sidebar-row:right-0 group-has-[:focus-visible]/sidebar-row:opacity-0",
                 snoozeMenuOpen && "absolute right-0 opacity-0",
               )}
             >

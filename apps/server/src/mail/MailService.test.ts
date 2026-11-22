@@ -358,6 +358,7 @@ describe("MailService rules and feedback", () => {
     "only suggests until the user saves a rule, then the rule settles what it covers",
     () => {
       const prompts: Array<string> = [];
+      let changeRuleDuringCall = Effect.void;
       return withMail(
         Effect.gen(function* () {
           const mail = yield* MailService.MailService;
@@ -487,6 +488,21 @@ describe("MailService rules and feedback", () => {
             suggestion: { reason: "fyi" },
           });
 
+          for (const [subject, rules] of [
+            ["Removed while reviewing", []],
+            ["Narrowed while reviewing", [{ ...rule, match: { from: "<other@acme.dev>" } }]],
+          ] as const) {
+            yield* mail.updateSettings({ rules: [rule] });
+            changeRuleDuringCall = mail.updateSettings({ rules }).pipe(Effect.asVoid, Effect.orDie);
+            const pending = yield* deliver({ subject, body: "Build passed.", at });
+            expect(yield* rowOf(pending)).toMatchObject({
+              state: "active",
+              ruleId: null,
+              suggestion: { reason: "fyi" },
+            });
+          }
+          changeRuleDuringCall = Effect.void;
+
           // With AI off for the sender, its mail never reaches a model and waits for the user.
           yield* mail.setSenderAi({ sender: "acme.dev", enabled: false });
           const callsBeforeOff = (yield* engine.usage).calls;
@@ -526,6 +542,8 @@ describe("MailService rules and feedback", () => {
               ? { rule: "r1" }
               : {};
         },
+        MailCredentials.layerMemory,
+        () => changeRuleDuringCall,
       );
     },
   );
@@ -844,7 +862,9 @@ describe("MailService rules and feedback", () => {
           ["draft", "Inbox helper", false],
           ["propose", "Inbox helper", true],
         ]);
-        expect((yield* mail.undo(log.actions[0]!.id).pipe(Effect.flip)).code).toBe("invalid");
+        expect(yield* mail.undo(log.actions[0]!.id).pipe(Effect.flip)).toMatchObject({
+          code: "invalid",
+        });
         yield* mail.undo(log.actions[1]!.id);
         expect(yield* rowOf(threadId)).toMatchObject({ suggestion: null, hasDraft: true });
         expect((yield* mail.getThread(threadId)).drafts[0]?.body).toBe(edited.body);
@@ -948,7 +968,16 @@ describe("MailService rules and feedback", () => {
         expect((yield* Effect.flip(mail.saveRule({ ruleId: "gone" }, agent))).code).toBe(
           "not_found",
         );
-        expect(yield* mail.saveRule({ ruleId: added!.id, delete: true }, agent)).toEqual([]);
+        const [, other] = yield* mail.saveRule(
+          { match: { domain: "shop.example" }, reason: "receipt" },
+          { actor: "user" },
+        );
+        expect(other?.reason).toBe("receipt");
+        expect(yield* mail.saveRule({ ruleId: added!.id, delete: true }, agent)).toEqual([other]);
+        expect(
+          (yield* Effect.flip(mail.saveRule({ ruleId: added!.id, when: "Later edit" }, agent)))
+            .code,
+        ).toBe("not_found");
       }),
     ),
   );
@@ -1001,7 +1030,12 @@ describe("MailService rules and feedback", () => {
         // An exact rule needs no body, so one that failed to download still settles.
         const next = yield* deliver({ subject: "Status report 2", body: "", at });
         expect(yield* rowOf(next)).toMatchObject({ state: "settled", settledBy: "rule" });
-        yield* mail.undo(actionId!);
+        expect(yield* mail.undo(actionId!).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: "settings:write",
+        });
+        expect((yield* engine.settings).rules).toEqual([rule]);
+        expect((yield* rowOf(first)).state).toBe("settled");
+        yield* mail.undo(actionId!, { canEditRules: true });
         expect((yield* engine.settings).rules).toEqual([]);
         expect((yield* rowOf(first)).state).toBe("active");
 
@@ -1016,7 +1050,9 @@ describe("MailService rules and feedback", () => {
         const [created] = (yield* engine.settings).rules;
         const changed = { ...created!, when: "Only build reports" };
         yield* mail.updateSettings({ rules: [changed] });
-        expect((yield* Effect.flip(mail.undo(secondId!))).code).toBe("invalid");
+        expect(yield* Effect.flip(mail.undo(secondId!, { canEditRules: true }))).toMatchObject({
+          code: "invalid",
+        });
         expect((yield* engine.settings).rules).toEqual([changed]);
       }),
     ),
@@ -1081,7 +1117,9 @@ describe("MailService rules and feedback", () => {
             (action) => action.id === moved.actionIds[0],
           )?.undoable,
         ).toBe(false);
-        expect((yield* mail.undo(moved.actionIds[0]!).pipe(Effect.flip)).code).toBe("invalid");
+        expect(yield* mail.undo(moved.actionIds[0]!).pipe(Effect.flip)).toMatchObject({
+          code: "invalid",
+        });
         expect(yield* rowOf(threadId)).toMatchObject({
           state: "active",
           messageCount: 2,

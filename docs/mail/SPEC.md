@@ -1,6 +1,6 @@
 # T3 Code Mail — Spec
 
-Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](https://docs.google.com/document/d/1txJMz6rXY1bciAQXli2wY2NegdDpRuQcq_VjTYJX128/edit)
+Design scope for the Mail fork. For setup and current behavior, see the [Mail guide](../user/mail.md).
 
 ## Overview
 
@@ -39,7 +39,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 ## Settings
 
 - New Mail section in T3 Code's existing Settings, same UI style.
-- Connected accounts (IMAP/SMTP; app passwords kept in the OS keychain).
+- Connected accounts (IMAP/SMTP; app passwords stored in the OS keychain when available, with a local secrets-file fallback).
 - Default email model.
 - Rules, with dry-run.
 - EMAIL.md editor or link.

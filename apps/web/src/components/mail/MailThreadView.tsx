@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   MailDraft,
   MailRule,
+  MailThreadAction,
   MailThreadDetail,
   MailThreadId,
   MailThreadRow,
@@ -11,15 +12,16 @@ import type {
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { Link } from "@tanstack/react-router";
 import { useGT, useMessages } from "gt-react";
-import { TriangleAlertIcon } from "lucide-react";
+import { CheckIcon, ListFilterPlusIcon, TriangleAlertIcon } from "lucide-react";
 import * as Schema from "effect/Schema";
 import { useState, type ReactNode } from "react";
 
+import { requestConfirmDialog } from "../../confirmDialog";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { mailEnvironment, useMailStatus } from "../../state/mail";
+import { mailEnvironment } from "../../state/mail";
 import { useEnvironmentQuery } from "../../state/query";
 import { formatDateTimeTimestamp } from "../../timestampFormat";
 import { useMailCommand } from "../settings/MailSettings.commands";
@@ -29,7 +31,7 @@ import { MailChatAside } from "./MailChatPanel";
 import { type ComposeTask, MailComposer } from "./MailComposer";
 import { MailConversation } from "./MailConversation";
 import { MailDecider } from "./MailDecider";
-import { mailDecision } from "./mailDecision";
+import { mailDecision, threadAutoSettleRules } from "./mailDecision";
 import {
   type ComposeMode,
   defaultReplyTarget,
@@ -112,6 +114,7 @@ function MailThreadDetails({
   thread,
   detail,
   account,
+  autoSettle,
   timestampFormat,
   refresh,
 }: {
@@ -119,31 +122,26 @@ function MailThreadDetails({
   thread: MailThreadRow;
   detail: MailThreadDetail | null;
   account: string | null;
+  autoSettle: ReactNode;
   timestampFormat: TimestampFormat;
   refresh: () => void;
 }) {
   const gt = useGT();
   const resolve = useMessages();
-  const { act, disabled } = useMailActions(environmentId);
   const senderAi = useSenderAi(environmentId);
   const aiEntry = senderAi.entryFor(thread.from.address);
   const aiOff = aiEntry !== null;
   const decision = mailDecision(thread);
   const nudge = nudgeLabel(thread.nudge, resolve);
-  const rules = useMailStatus(environmentId)?.settings.rules ?? [];
-  const rule = thread.ruleId ? (rules.find((entry) => entry.id === thread.ruleId) ?? null) : null;
-  const summary = useRuleSummary();
-  const saveRule = useSaveRule(environmentId);
-  const [ruleEditor, setRuleEditor] = useState<{ rule: MailRule; creating: boolean } | null>(null);
-  const suggestion = thread.state === "active" ? thread.suggestion : null;
-  const approve = () =>
-    suggestion
-      ? act(
-          [thread.id],
-          { type: "approve", revisions: { [thread.id]: suggestion.revision } },
-          gt("Settled"),
-        )
-      : Promise.resolve(false);
+  const decisionText =
+    decision?.why ??
+    (decision?.actor === "rule"
+      ? thread.state === "settled"
+        ? gt("Settled by your rule")
+        : gt("Suggested by your rule")
+      : decision && thread.state === "settled"
+        ? gt("Settled by AI")
+        : null);
   const status =
     thread.state === "settled"
       ? gt("Settled", { $context: "email state" })
@@ -161,12 +159,10 @@ function MailThreadDetails({
   const hasStatus =
     status !== null ||
     aiOff ||
-    decision !== null ||
+    decisionText !== null ||
     nudge !== null ||
     thread.injectionWarning ||
-    suggestion !== null ||
-    rule !== null ||
-    thread.suggestedAction !== null ||
+    (!thread.suggestion && thread.suggestedAction !== null) ||
     account !== null;
   return (
     <>
@@ -174,7 +170,7 @@ function MailThreadDetails({
         <DetailsSection>
           <div className="space-y-2 text-sm wrap-anywhere">
             {status ? <p>{status}</p> : null}
-            {decision ? (
+            {decision && decisionText ? (
               <p className="flex items-start gap-1.5 text-muted-foreground">
                 <span className="flex h-5 shrink-0 items-center">
                   <MailDecider
@@ -183,14 +179,7 @@ function MailThreadDetails({
                     decidedBy={thread.decidedBy}
                   />
                 </span>
-                {decision.why ??
-                  (decision.actor === "rule"
-                    ? thread.state === "settled"
-                      ? gt("Settled by your rule")
-                      : gt("Suggested by your rule")
-                    : thread.state === "settled"
-                      ? gt("Settled by AI")
-                      : gt("Suggested by AI"))}
+                {decisionText}
               </p>
             ) : null}
             {aiOff ? (
@@ -218,47 +207,7 @@ function MailThreadDetails({
                 {gt("This email reads like instructions to an AI.")}
               </p>
             ) : null}
-            {rule ? (
-              <div className="flex items-center justify-between gap-2">
-                <p className="min-w-0 text-muted-foreground">
-                  {gt("Your rule: {rule}", { rule: rule.when ?? summary(rule) })}
-                </p>
-                <Button
-                  size="compact"
-                  variant="outline"
-                  disabled={saveRule.disabled}
-                  onClick={() => setRuleEditor({ rule, creating: false })}
-                >
-                  {gt("Edit rule")}
-                </Button>
-              </div>
-            ) : null}
-            {suggestion ? (
-              <div className="flex flex-wrap gap-2">
-                <Button size="compact" disabled={disabled} onClick={() => void approve()}>
-                  {gt("Settle")}
-                </Button>
-                {rule ? null : (
-                  <Button
-                    size="compact"
-                    variant="outline"
-                    disabled={saveRule.disabled}
-                    onClick={() =>
-                      setRuleEditor({
-                        creating: true,
-                        rule: newRule({
-                          match: thread.from.address ? { from: `<${thread.from.address}>` } : {},
-                          when: detail?.kind ?? "",
-                          reason: suggestion.reason,
-                        }),
-                      })
-                    }
-                  >
-                    {gt("Auto-settle…")}
-                  </Button>
-                )}
-              </div>
-            ) : thread.suggestedAction ? (
+            {!thread.suggestion && thread.suggestedAction ? (
               <dl>
                 <dt className="text-xs text-muted-foreground">{gt("Suggested next step")}</dt>
                 <dd>{thread.suggestedAction}</dd>
@@ -273,21 +222,7 @@ function MailThreadDetails({
           </div>
         </DetailsSection>
       ) : null}
-      {ruleEditor ? (
-        <RuleDialog
-          environmentId={environmentId}
-          initial={ruleEditor.rule}
-          title={ruleEditor.creating ? gt("Auto-settle") : gt("Edit rule")}
-          {...(ruleEditor.creating && suggestion ? { saveLabel: gt("Save and settle") } : {})}
-          disabled={saveRule.disabled}
-          onClose={() => setRuleEditor(null)}
-          onSave={async (saved) => {
-            if (!(await saveRule.run(rules, saved))) return;
-            setRuleEditor(null);
-            if (ruleEditor.creating) void approve();
-          }}
-        />
-      ) : null}
+      {autoSettle}
       {detail && detail.related.length > 0 ? (
         <DetailsSection title={gt("Related mail")}>
           <ul>
@@ -322,23 +257,142 @@ function MailThreadDetails({
   );
 }
 
-function hasDetails(
-  thread: MailThreadRow,
-  detail: MailThreadDetail | null,
-  account: string | null,
-  aiOff: boolean,
-) {
+function AutoSettleSection({
+  environmentId,
+  matching,
+  ready,
+  onOpen,
+}: {
+  environmentId: EnvironmentId;
+  matching: ReturnType<typeof threadAutoSettleRules>;
+  ready: boolean;
+  onOpen: (rule: MailRule | null) => void;
+}) {
+  const gt = useGT();
+  const summary = useRuleSummary();
+  const command = useSaveRule(environmentId);
+  const disabled = !ready || command.disabled;
+  const remove = async (rule: MailRule) => {
+    const message = gt("Remove this auto-settle rule for all matching mail?");
+    if (
+      await (requestConfirmDialog(message, { variant: "destructive" }) ?? window.confirm(message))
+    ) {
+      await command.run({ ruleId: rule.id, delete: true });
+    }
+  };
   return (
-    thread.state !== "active" ||
-    aiOff ||
-    mailDecision(thread) !== null ||
-    thread.nudge !== null ||
-    thread.injectionWarning ||
-    thread.suggestion !== null ||
-    thread.suggestedAction !== null ||
-    thread.guardrail !== null ||
-    account !== null ||
-    (detail !== null && (detail.related.length > 0 || detail.actions.length > 0))
+    <DetailsSection>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-medium">
+          {matching.inScope.length ? (
+            gt("Auto-settle")
+          ) : (
+            <Button
+              size="compact"
+              variant="outline"
+              disabled={disabled}
+              onClick={() => onOpen(null)}
+            >
+              <ListFilterPlusIcon aria-hidden />
+              {gt("Auto-settle")}
+            </Button>
+          )}
+        </h2>
+        {ready ? (
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            {matching.applied && <CheckIcon aria-hidden className="size-3" />}
+            {matching.applied ? gt("On") : matching.inScope.length ? gt("Conditional") : gt("Off")}
+          </span>
+        ) : null}
+      </div>
+      {matching.inScope.map((rule) => (
+        <div key={rule.id} className="space-y-1.5 py-1.5 [&+&]:border-t [&+&]:border-border/60">
+          <p className="text-sm wrap-anywhere">{summary(rule)}</p>
+          {rule.when && (
+            <p className="text-xs wrap-anywhere text-muted-foreground">
+              {gt("Only when: {when}", { when: rule.when })}
+            </p>
+          )}
+          <div className="flex items-center gap-1">
+            <Button
+              size="compact"
+              variant="outline"
+              disabled={disabled}
+              onClick={() => onOpen(rule)}
+            >
+              {gt("Edit rule")}
+            </Button>
+            <Button
+              size="compact"
+              variant="ghost"
+              disabled={disabled}
+              onClick={() => void remove(rule)}
+            >
+              {gt("Remove")}
+            </Button>
+          </div>
+        </div>
+      ))}
+      {matching.inScope.length > 0 && matching.applied === null && (
+        <Button size="compact" variant="outline" disabled={disabled} onClick={() => onOpen(null)}>
+          {gt("Add rule")}
+        </Button>
+      )}
+    </DetailsSection>
+  );
+}
+
+function ThreadRuleDialog({
+  environmentId,
+  existing,
+  sender,
+  detail,
+  onClose,
+}: {
+  environmentId: EnvironmentId;
+  existing: MailRule | null;
+  sender: string;
+  detail: MailThreadDetail;
+  onClose: () => void;
+}) {
+  const gt = useGT();
+  const saveRule = useSaveRule(environmentId);
+  const actions = useMailActions(environmentId);
+  // Capture the suggestion revision and rule the user opened, even if fresh mail arrives.
+  const [editor] = useState(() => {
+    const { thread } = detail;
+    const action: MailThreadAction | null =
+      existing || thread.state === "settled" || actions.disabled
+        ? null
+        : thread.suggestion
+          ? { type: "approve", revisions: { [thread.id]: thread.suggestion.revision } }
+          : { type: "settle" };
+    return {
+      action,
+      editing: existing !== null,
+      initial:
+        existing ??
+        newRule({
+          match: sender ? { from: `<${sender}>` } : {},
+          when: detail.kind ?? "",
+          reason: thread.suggestion?.reason ?? "fyi",
+        }),
+    };
+  });
+  return (
+    <RuleDialog
+      environmentId={environmentId}
+      initial={editor.initial}
+      title={editor.editing ? gt("Edit rule") : gt("Auto-settle")}
+      {...(editor.action ? { saveLabel: gt("Save and settle") } : {})}
+      disabled={saveRule.disabled || (editor.action !== null && actions.disabled)}
+      onClose={onClose}
+      onSave={async (saved) => {
+        if (!(await saveRule.save(saved, editor.editing))) return;
+        onClose();
+        if (editor.action) await actions.act([detail.thread.id], editor.action, gt("Settled"));
+      }}
+    />
   );
 }
 
@@ -347,6 +401,8 @@ export function MailThreadView({
   threadId,
   chatOpen,
   onChatOpenChange,
+  ruleOpen,
+  onRuleOpenChange,
   requestedCompose,
   onComposeHandled,
 }: {
@@ -356,6 +412,8 @@ export function MailThreadView({
   onChatOpenChange: (open: boolean) => void;
   /** Reply or Forward chosen from the sidebar menu before the email opened. */
   requestedCompose: ComposeMode | null;
+  ruleOpen: boolean | string;
+  onRuleOpenChange: (open: boolean | string) => void;
   onComposeHandled: () => void;
 }) {
   const gt = useGT();
@@ -406,6 +464,7 @@ export function MailThreadView({
     gt("Could not open mail chat"),
   );
   const canSaveDraft = useAtomValue(mailEnvironment.saveDraft.permissionAtom(environmentId));
+  const canSaveRule = useAtomValue(mailEnvironment.saveRule.permissionAtom(environmentId));
   const senderAi = useSenderAi(environmentId);
   // The sidebar row is already in memory, so the header paints before the thread arrives.
   const thread = detail?.thread ?? view?.threads.get(threadId) ?? null;
@@ -446,8 +505,11 @@ export function MailThreadView({
     onChatOpenChange(true);
   };
   const aiOff = senderAi.entryFor(thread.from.address) !== null;
-  const showDetails = hasDetails(thread, detail, account, aiOff);
-  const detailsOpen = showDetails && !showChat && (wide ? widePanel : narrowPanel);
+  const rules = view?.status.settings.rules;
+  const matching = threadAutoSettleRules(rules ?? [], replyTarget, thread.ruleId);
+  const existing =
+    typeof ruleOpen === "string" ? rules?.find((entry) => entry.id === ruleOpen) : matching.applied;
+  const detailsOpen = !showChat && (wide ? widePanel : narrowPanel);
   const toggleDetails = () => {
     if (showChat) {
       onChatOpenChange(false);
@@ -461,6 +523,14 @@ export function MailThreadView({
       environmentId={environmentId}
       thread={thread}
       detail={detail}
+      autoSettle={
+        <AutoSettleSection
+          environmentId={environmentId}
+          matching={matching}
+          ready={Boolean(rules && detail)}
+          onOpen={(rule) => onRuleOpenChange(rule?.id ?? true)}
+        />
+      }
       account={account}
       timestampFormat={timestampFormat}
       refresh={query.refresh}
@@ -482,13 +552,16 @@ export function MailThreadView({
         <MailThreadToolbar
           environmentId={environmentId}
           thread={thread}
+          hasRule={matching.applied !== null}
+          ruleDisabled={!detail || !rules || !canSaveRule}
+          onOpenRule={() => onRuleOpenChange(true)}
           canReply={canReply && replyTarget !== null}
           canReplyAll={replyTarget !== null && hasOtherRecipients(replyTarget, mine)}
           onCompose={(mode) =>
             replyTarget && openCompose({ mode, targetId: replyTarget.id, draft: null })
           }
           detailsOpen={detailsOpen}
-          onToggleDetails={showDetails ? toggleDetails : null}
+          onToggleDetails={toggleDetails}
           chatOpen={showChat}
           // An open chat can still be closed after AI is turned off for the sender.
           chatDisabled={(chatThreadId === null && openSession.disabled) || (aiOff && !showChat)}
@@ -497,6 +570,15 @@ export function MailThreadView({
       }
       scroll={false}
     >
+      {ruleOpen && rules && detail && existing !== undefined ? (
+        <ThreadRuleDialog
+          environmentId={environmentId}
+          existing={existing}
+          sender={replyTarget && !replyTarget.outgoing ? replyTarget.from.address : ""}
+          detail={detail}
+          onClose={() => onRuleOpenChange(false)}
+        />
+      ) : null}
       <div className="relative flex h-full min-h-0 gap-3 px-3 pb-3">
         <section
           aria-label={gt("Email")}

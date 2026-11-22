@@ -149,6 +149,7 @@ export const MailMessageBodyInput = Schema.Struct({
 export type MailMessageBodyInput = typeof MailMessageBodyInput.Type;
 
 export const MailMessage = Schema.Struct({
+  listId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   id: Schema.String,
   from: MailAddress,
   /** Where the sender asks replies to go. Empty when unknown; reply to `from` then. */
@@ -605,6 +606,16 @@ export const MailUpdateSettingsInput = Schema.Struct({
 
 export const MailEmailMd = Schema.Struct({ path: Schema.String, content: Schema.String });
 export const MailWriteEmailMdInput = Schema.Struct({ content: Schema.String });
+
+export const MailSaveRuleInput = Schema.Struct({
+  ruleId: Schema.optionalKey(TrimmedNonEmptyString),
+  delete: Schema.optionalKey(Schema.Boolean),
+  match: Schema.optionalKey(MailRule.fields.match),
+  when: Schema.optionalKey(TrimmedString.check(Schema.isMaxLength(300))),
+  enabled: Schema.optionalKey(Schema.Boolean),
+  reason: Schema.optionalKey(MailSettleReason),
+});
+export type MailSaveRuleInput = typeof MailSaveRuleInput.Type;
 
 export const MailDryRunRuleInput = Schema.Struct({ rule: MailRule });
 export const MailDryRunRuleResult = Schema.Struct({

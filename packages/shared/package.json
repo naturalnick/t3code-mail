@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./mailRule": {
+      "types": "./src/mailRule.ts",
+      "import": "./src/mailRule.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"

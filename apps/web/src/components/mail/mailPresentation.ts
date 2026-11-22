@@ -28,7 +28,7 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "approve":
       return resolve(msg("Settled", { $context: "email action log" }));
     case "unsettle":
-      return resolve(msg("Moved back to Active"));
+      return resolve(msg("Moved to inbox"));
     case "reject":
       return resolve(msg("Dismissed suggestion"));
     case "settle_sender":

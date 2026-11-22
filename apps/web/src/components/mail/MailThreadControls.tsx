@@ -108,6 +108,9 @@ function SnoozePresetItems({
 export function MailThreadToolbar({
   environmentId,
   thread,
+  hasRule,
+  ruleDisabled,
+  onOpenRule,
   canReply,
   canReplyAll,
   onCompose,
@@ -119,6 +122,9 @@ export function MailThreadToolbar({
 }: {
   environmentId: EnvironmentId;
   thread: MailThreadRow;
+  hasRule: boolean;
+  ruleDisabled: boolean;
+  onOpenRule: () => void;
   canReply: boolean;
   /** Whether the message Reply answers has anyone else on it. */
   canReplyAll: boolean;
@@ -181,7 +187,7 @@ export function MailThreadToolbar({
           size="sm"
           variant="ghost"
           disabled={disabled}
-          onClick={() => void act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"))}
+          onClick={() => void act([thread.id], { type: "unsnooze" }, gt("Moved to inbox"))}
         >
           <AlarmClockOffIcon />
           <T>Wake now</T>
@@ -200,10 +206,10 @@ export function MailThreadToolbar({
           size="sm"
           variant="ghost"
           disabled={disabled}
-          onClick={() => void act([thread.id], { type: "unsettle" }, gt("Moved back to Active"))}
+          onClick={() => void act([thread.id], { type: "unsettle" }, gt("Moved to inbox"))}
         >
           <Undo2Icon />
-          <T>Move back to Active</T>
+          <T>Move to inbox</T>
         </Button>
       ) : (
         <Button
@@ -226,7 +232,7 @@ export function MailThreadToolbar({
       )}
       <Menu>
         <MenuTrigger
-          disabled={disabled}
+          disabled={disabled && ruleDisabled && senderAi.disabled}
           render={
             <Button size="icon-sm" variant="ghost-muted" aria-label={gt("More mail actions")} />
           }
@@ -234,8 +240,12 @@ export function MailThreadToolbar({
           <EllipsisIcon />
         </MenuTrigger>
         <MenuPopup align="end">
+          <MenuItem disabled={ruleDisabled} onClick={onOpenRule}>
+            {hasRule ? gt("Edit rule") : gt("Auto-settle…")}
+          </MenuItem>
           {(thread.pinnedAt || !settled) && (
             <MenuItem
+              disabled={disabled}
               onClick={() =>
                 void act(
                   [thread.id],
@@ -249,6 +259,7 @@ export function MailThreadToolbar({
           )}
           {!settled && thread.workingReason !== "waiting" && (
             <MenuItem
+              disabled={disabled}
               onClick={() =>
                 void act([thread.id], { type: "wait_for_reply" }, gt("Waiting for reply"))
               }
@@ -258,21 +269,22 @@ export function MailThreadToolbar({
           )}
           {thread.state === "working" && (
             <MenuItem
-              onClick={() =>
-                void act([thread.id], { type: "unsettle" }, gt("Moved back to Active"))
-              }
+              disabled={disabled}
+              onClick={() => void act([thread.id], { type: "unsettle" }, gt("Moved to inbox"))}
             >
-              {gt("Move back to Active")}
+              {gt("Move to inbox")}
             </MenuItem>
           )}
           {thread.suggestion && (
             <MenuItem
+              disabled={disabled}
               onClick={() => void act([thread.id], { type: "keep" }, gt("Suggestion dismissed"))}
             >
               {gt("Dismiss suggestion")}
             </MenuItem>
           )}
           <MenuItem
+            disabled={disabled}
             onClick={() => void act([thread.id], { type: "mark_unread" }, gt("Marked as unread"))}
           >
             {gt("Mark as unread")}
@@ -282,19 +294,9 @@ export function MailThreadToolbar({
               {senderAi.toggleLabel(thread.from.address)}
             </MenuItem>
           )}
-          <MenuItem
-            onClick={() =>
-              void act(
-                [thread.id],
-                { type: "settle_sender" },
-                gt("Future mail from this sender will settle"),
-              )
-            }
-          >
-            {gt("Always settle from this sender")}
-          </MenuItem>
           <MenuSeparator />
           <MenuItem
+            disabled={disabled}
             variant="destructive"
             onClick={async () => {
               const deleted = await act([thread.id], { type: "delete" }, gt("Moved to Trash"));

@@ -14,6 +14,7 @@ import {
 } from "./auth.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS } from "./rpc.ts";
+import { MailActInput } from "./mail.ts";
 import { MAIL_RPC_SCOPES } from "./mailRpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
@@ -99,6 +100,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
+const decodeMailAct = Schema.decodeUnknownSync(MailActInput);
 const decodePrepareThread = Schema.decodeUnknownSync(GitPreparePullRequestThreadInput);
 const decodeStackedAction = Schema.decodeUnknownSync(GitRunStackedActionInput);
 
@@ -106,6 +108,13 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (
+    method === WS_METHODS.mailAct &&
+    input !== undefined &&
+    decodeMailAct(input).action.type === "settle_sender"
+  ) {
+    return [AuthOrchestrationOperateScope, AuthSettingsWriteScope];
+  }
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {
     const payload = decodePrepareThread(input);
     if (payload.mode === "worktree" && payload.threadId !== undefined)

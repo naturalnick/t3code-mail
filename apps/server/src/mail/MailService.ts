@@ -1,5 +1,8 @@
+import { domainOf, matchesRule } from "@t3tools/shared/mailRule";
 import {
+  AuthSettingsWriteScope,
   CommandId,
+  type EnvironmentAuthorizationError,
   MAIL_SESSION_PROJECT_ID,
   type MailAccount,
   MailAccountId,
@@ -42,6 +45,7 @@ import type {
   MailOpenSessionInput,
   MailOpenSessionResult,
   MailSaveDraftInput,
+  MailSaveRuleInput,
   MailSearchInput,
   MailSearchResult,
   MailSeedVoiceResult,
@@ -69,6 +73,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TxReentrantLock from "effect/TxReentrantLock";
 
+import { rpcAuthorizationError } from "../auth/RpcAuthorization.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import { publishTriageNotes, triageOutcome, triageText } from "./mailChatHistory.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -81,8 +86,7 @@ import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
 import {
   categoryGuardrail,
-  matchesRule,
-  type MatchedRule,
+  type ConditionalRule,
   prefilter,
   type PrefilterResult,
 } from "./mailPrefilter.ts";
@@ -99,7 +103,6 @@ import {
   asksQuestion,
   cleanForDisplay,
   cleanForModel,
-  domainOf,
   estimateTokens,
   firstLine,
   looksLikeInstructionsToAi,
@@ -274,14 +277,6 @@ export interface MailActorInfo {
 }
 
 /** One rule change an agent makes for the user. Without `ruleId` it adds a rule. */
-export interface MailSaveRuleInput {
-  readonly ruleId?: string | undefined;
-  readonly delete?: boolean | undefined;
-  readonly match?: MailRule["match"] | undefined;
-  readonly when?: string | undefined;
-  readonly enabled?: boolean | undefined;
-}
-
 export class MailService extends Context.Service<
   MailService,
   {
@@ -304,7 +299,10 @@ export class MailService extends Context.Service<
       input: MailActInput,
       actor: MailActorInfo,
     ) => Effect.Effect<MailActResult, MailError>;
-    readonly undo: (actionId: number) => Effect.Effect<void, MailError>;
+    readonly undo: (
+      actionId: number,
+      permissions?: { readonly canEditRules: boolean },
+    ) => Effect.Effect<void, MailError | EnvironmentAuthorizationError>;
     /** An agent's settle proposal: shown like the AI's, settled only when the user approves. */
     readonly propose: (
       input: { readonly threadIds: ReadonlyArray<MailThreadId>; readonly reason: MailSettleReason },
@@ -767,12 +765,14 @@ const make = Effect.gen(function* () {
   const staleUndo = () => invalid("This item changed after that action.");
 
   const undo: MailService["Service"]["undo"] = Effect.fn("MailService.undo")(
-    function* (actionId) {
+    function* (actionId, permissions) {
       const action = yield* store.getAction(actionId);
       if (action === null) return yield* notFound("action");
       const history = action.undo;
       if (!history || action.undoneAt !== null)
         return yield* invalid("That action cannot be undone.");
+      if (history.rule && !permissions?.canEditRules)
+        return yield* rpcAuthorizationError(AuthSettingsWriteScope);
       const now = yield* nowIso;
       if (history.trash) {
         // The email left this list with the delete; restored messages arrive again through sync.
@@ -885,7 +885,7 @@ const make = Effect.gen(function* () {
     ),
     Effect.tap(() => engine.publishStatus),
     Effect.asVoid,
-    sqlSafe,
+    Effect.catchTags({ SqlError: () => Effect.fail(storeError()) }),
   );
 
   const propose: MailService["Service"]["propose"] = Effect.fn("MailService.propose")(
@@ -1108,12 +1108,18 @@ const make = Effect.gen(function* () {
         readonly injection: boolean;
         readonly suggestOnly: boolean;
         /** The conditional rule the model said this email meets, already checked in scope. */
-        readonly conditional?: (MatchedRule & { readonly when: string }) | null;
+        readonly conditional?: ConditionalRule | null;
       },
     ) {
       const now = yield* nowIso;
       const thread = yield* store.getThread(seen.id);
       if (thread === null || !isFresh(seen, thread)) return;
+      const matched = input.prefiltered.rule ?? input.conditional;
+      if (matched) {
+        const current = (yield* engine.settings).rules.find((rule) => rule.id === matched.id);
+        // Leave it pending so the next round decides with the edited rules.
+        if (!current || !sameRule(matched, current)) return;
+      }
       const guardrail = input.guardrail;
       yield* store.setTriage(thread.id, {
         suggestedAction: input.suggestedAction,
@@ -2705,7 +2711,7 @@ const make = Effect.gen(function* () {
           id: yield* uuid,
           enabled: true,
           match: {},
-          reason: "fyi" as const,
+          reason: input.reason ?? "fyi",
         };
         const rule: MailRule = {
           ...base,

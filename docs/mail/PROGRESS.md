@@ -23,7 +23,7 @@ Mail v1 is implemented on the fork’s `mail` branch. [SPEC.md](SPEC.md) defines
 
 1. In this checkout run `T3CODE_DEV_INSTANCE=mail-v1 vp run dev --home-dir "$HOME/.t3-mail-v1" --no-seed`. Open the local web address and use the pairing URL printed by this server. This keeps the fork’s accounts, mail and chats separate from your installed T3 Code.
 2. Open **Mail → Mail settings → Add account**. For Gmail, enable 2-Step Verification, create a Google app password using the link in the dialog, then enter your Gmail address and the generated password. Gmail accounts whose administrator disables app passwords need OAuth, which is outside v1.
-3. Pick a **Default mail model** from your configured T3 providers. Review the initial suggestions in **Mail home**. Choose **Auto-settle…** on a suggestion to make a rule.
+3. Pick a **Default mail model** from your configured T3 providers. Open an email and choose **Auto-settle** in its details to make a rule.
 4. Use the **Daily recap** in **Mail review** to inspect or undo automatic settles. Open a thread to draft, review and explicitly approve a reply. Server archiving is opt-in.
 
 See [the Mail guide](../user/mail.md) for other providers, rules, MCP tools and CLI examples.
