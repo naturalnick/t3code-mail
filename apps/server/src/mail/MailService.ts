@@ -106,7 +106,6 @@ type MailStreamEventType = MailStreamEvent;
 
 const L1_BATCH = 12;
 const L1_TEXT_CHARS = 1_200;
-const BODY_WAIT_MS = 5 * 60_000;
 const SESSION_MESSAGE_CHARS = 3_000;
 const SEND_DEDUPE_MS = 10 * 60_000;
 const MAX_DRAFT_EDITS = 5;
@@ -777,14 +776,13 @@ const make = Effect.gen(function* () {
   const prepare = Effect.fn("MailService.prepare")(function* (
     thread: MailStore.ThreadRecord,
     settings: MailSettings,
-    now: number,
   ) {
     const messages = yield* store.threadMessages(thread.id);
     const incoming = messages.filter((message) => !message.outgoing);
     const latest = incoming.at(-1) ?? messages.at(-1);
     if (latest === undefined) return null;
-    if (latest.bodyState === "pending" && now - isoMillis(latest.date) < BODY_WAIT_MS)
-      return "wait" as const;
+    // Sync fetches every pending body (or marks it unavailable) and then wakes triage again.
+    if (latest.bodyState === "pending") return "wait" as const;
     const account = yield* store.getAccount(thread.accountId);
     const me = account?.email.toLowerCase() ?? "";
     const text = cleanForModel(latest.body ?? "", L1_TEXT_CHARS);
@@ -865,12 +863,11 @@ const make = Effect.gen(function* () {
     if (ids.length === 0) return false;
     const settings = yield* engine.settings;
     const usage = yield* engine.usage;
-    const now = DateTime.toEpochMillis(yield* DateTime.now);
     const threads = yield* store.getThreads(ids);
     const forModel: Array<Prepared> = [];
     let progressed = false;
     for (const thread of threads) {
-      const prepared = yield* prepare(thread, settings, now);
+      const prepared = yield* prepare(thread, settings);
       if (prepared === "wait") continue;
       progressed = true;
       if (prepared === null) {
@@ -1294,6 +1291,7 @@ const make = Effect.gen(function* () {
       const thread = yield* store.getThread(draft.threadId);
       if (thread !== null && thread.state !== "settled") {
         yield* store.patchThread(thread.id, settledPatch(sentAt, "replied", "user"));
+        yield* mirror(thread, "archive");
       }
       yield* engine.afterBodies([draft.threadId]);
       yield* store.insertAction({

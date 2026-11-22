@@ -29,3 +29,4 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - RPC scopes: reads use the orchestration read scope; acting on mail, drafts, send and sessions use operate; accounts, settings, trust and EMAIL.md writes use settings-write.
 - Nudges are stored as short codes (`waiting:N`, `unanswered:N`) and rendered by the client, so the server never stores translated copy.
 - A mail session that ends without leaving a draft returns its thread from Working to Active on the next minute tick.
+- With server mirroring on, a reply sent from T3 archives the thread on the server like any other settle; replies sent from another client leave the server copy where that client put it.
