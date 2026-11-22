@@ -8,6 +8,7 @@ import {
   MAIL_SESSION_PROJECT_ID,
   type EnvironmentId,
   type MailStatus,
+  type MailThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
@@ -41,6 +42,7 @@ export function readIsMailChatThread(ref: ScopedThreadRef): boolean {
   );
 }
 
+const EMPTY_VIEW = Atom.make(null).pipe(Atom.withLabel("web-mail:empty-view"));
 const EMPTY_SHELL = Atom.make(null).pipe(Atom.withLabel("web-mail:empty-shell"));
 
 export function useIsMailChatThread(ref: ScopedThreadRef | null): boolean {
@@ -50,11 +52,26 @@ export function useIsMailChatThread(ref: ScopedThreadRef | null): boolean {
   );
 }
 
+/**
+ * The email a mail chat belongs to: undefined while that is unknown, null for a mail chat whose
+ * email is gone (or a thread that is not a mail chat).
+ */
+export function useMailThreadForChat(ref: ScopedThreadRef | null): MailThreadId | null | undefined {
+  const mailChat = useIsMailChatThread(ref);
+  const view = useAtomValue(
+    mailChat && ref !== null ? mailEnvironment.view(ref.environmentId) : EMPTY_VIEW,
+  );
+  if (!mailChat || ref === null) return null;
+  if (view === null) return undefined;
+  for (const thread of view.threads.values()) {
+    if (thread.chatThreadId === ref.threadId) return thread.id;
+  }
+  return null;
+}
+
 export function useMailEnvironmentId(): EnvironmentId | null {
   return useAtomValue(mailEnvironmentIdAtom);
 }
-
-const EMPTY_VIEW = Atom.make(null).pipe(Atom.withLabel("web-mail:empty-view"));
 
 const threadsAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get) => get(mailEnvironment.view(environmentId))?.threads ?? null),

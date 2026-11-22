@@ -26,7 +26,7 @@ import type * as SqlError from "effect/sql/SqlError";
 import * as NodeCrypto from "node:crypto";
 
 import type { ParsedMessage } from "./imapSession.ts";
-import { asksQuestion, firstLine, stripQuoted } from "./mailText.ts";
+import { asksQuestion, stripQuoted } from "./mailText.ts";
 import * as MailStore from "./MailStore.ts";
 
 const DEFAULT_SETTINGS: MailSettings = {
@@ -457,7 +457,6 @@ const make = Effect.gen(function* () {
           subject: newest.subject,
           fromName: newest.from.name,
           fromAddress: newest.from.address,
-          line: newest.subject,
           suggestedAction: null,
           lastMessageAt: newest.date,
           lastIncomingAt: null,
@@ -619,13 +618,6 @@ const make = Effect.gen(function* () {
         const thread = yield* store.getThread(id);
         const latest = yield* store.latestMessage(id);
         if (thread === null || latest === null || latest.body === null) continue;
-        if (thread.triageState === "pending" && thread.line === thread.subject) {
-          // A readable line until L1 writes the summary.
-          yield* store.setTriage(id, {
-            triageState: "pending",
-            line: firstLine(latest.body) || thread.subject,
-          });
-        }
         if (
           latest.outgoing &&
           thread.state === "settled" &&

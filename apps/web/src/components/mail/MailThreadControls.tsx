@@ -1,32 +1,130 @@
 import type { EnvironmentId, MailThreadRow } from "@t3tools/contracts";
-import { Link, useRouter } from "@tanstack/react-router";
-import { useGT, useMessages } from "gt-react";
-import { EllipsisIcon, MessageSquareIcon } from "lucide-react";
+import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { T, useGT, useMessages } from "gt-react";
+import {
+  AlarmClockOffIcon,
+  CheckIcon,
+  ClockIcon,
+  EllipsisIcon,
+  MessageSquareIcon,
+  ReplyIcon,
+  SquareMenuIcon,
+  Undo2Icon,
+} from "lucide-react";
 import { useEffect, useEffectEvent, useRef } from "react";
 
-import { mailEnvironment } from "../../state/mail";
-import { useMailCommand } from "../settings/MailSettings.commands";
+import { useClientSettings } from "../../hooks/useSettings";
+import { requestCustomSnooze } from "../CustomSnoozeDialog";
+import { pickSnoozePreset, resolveSnoozePresets } from "../Sidebar.snooze";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { Menu, MenuItem, MenuItemDetail, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { Toggle } from "../ui/toggle";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { settleReasonLabel } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 
-export function MailThreadControls({
+function SnoozeMenu({
   environmentId,
-  thread,
+  disabled,
+  onSnooze,
 }: {
   environmentId: EnvironmentId;
-  thread: MailThreadRow;
+  disabled: boolean;
+  onSnooze: (until: string | null) => void;
 }) {
   const gt = useGT();
   const resolve = useMessages();
-  const router = useRouter();
-  const { act, disabled } = useMailActions(environmentId);
-  const openSession = useMailCommand(
-    environmentId,
-    mailEnvironment.openSession,
-    gt("Could not open mail chat"),
+  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  return (
+    <Menu>
+      <MenuTrigger
+        disabled={disabled}
+        render={<Button size="sm" variant="ghost" aria-label={gt("Snooze")} />}
+      >
+        <ClockIcon />
+        <T>Snooze</T>
+      </MenuTrigger>
+      <MenuPopup align="end">
+        <SnoozePresetItems
+          environmentId={environmentId}
+          timestampFormat={timestampFormat}
+          resolve={resolve}
+          onSnooze={onSnooze}
+        />
+        <MenuItem onClick={() => onSnooze(null)}>
+          <T>Until reply</T>
+        </MenuItem>
+        <MenuItem
+          onClick={async () => {
+            const choice = await requestCustomSnooze();
+            if (choice) onSnooze(choice.snoozedUntil);
+          }}
+        >
+          <T>Custom…</T>
+        </MenuItem>
+      </MenuPopup>
+    </Menu>
   );
+}
+
+/** Mounted only while the menu is open, so each opening reads a fresh time. */
+function SnoozePresetItems({
+  environmentId,
+  timestampFormat,
+  resolve,
+  onSnooze,
+}: {
+  environmentId: EnvironmentId;
+  timestampFormat: TimestampFormat;
+  resolve: ReturnType<typeof useMessages>;
+  onSnooze: (until: string) => void;
+}) {
+  // oxlint-disable-next-line react/purity -- The menu content mounts on open, so this reads the time the menu opened.
+  const presets = resolveSnoozePresets(new Date(), timestampFormat, environmentId, resolve);
+  if (presets.length === 0) return null;
+  return (
+    <>
+      {presets.map((preset) => (
+        <MenuItem
+          key={preset.id}
+          onClick={() => {
+            const picked = pickSnoozePreset(presets, preset.id, timestampFormat, environmentId);
+            if (picked) onSnooze(picked.snoozedUntil);
+          }}
+        >
+          {preset.label}
+          <MenuItemDetail>{preset.whenLabel}</MenuItemDetail>
+        </MenuItem>
+      ))}
+      <MenuSeparator />
+    </>
+  );
+}
+
+export function MailThreadToolbar({
+  environmentId,
+  thread,
+  canReply,
+  onReply,
+  detailsOpen,
+  onToggleDetails,
+  chatOpen,
+  chatDisabled,
+  onChatOpenChange,
+}: {
+  environmentId: EnvironmentId;
+  thread: MailThreadRow;
+  canReply: boolean;
+  onReply: () => void;
+  detailsOpen: boolean;
+  onToggleDetails: (() => void) | null;
+  chatOpen: boolean;
+  chatDisabled: boolean;
+  onChatOpenChange: (open: boolean) => void;
+}) {
+  const gt = useGT();
+  const resolve = useMessages();
+  const { act, disabled } = useMailActions(environmentId);
   const markRead = useEffectEvent(() => void act([thread.id], { type: "mark_read" }));
   const readAt = useRef<string | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Opening unread mail acknowledges it on the server.
@@ -37,55 +135,57 @@ export function MailThreadControls({
     if (thread.unread) markRead();
   }, [disabled, thread.id, thread.lastMessageAt, thread.messageCount, thread.unread]);
 
+  const settled = thread.state === "settled";
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {thread.chatThreadId && openSession.disabled && !openSession.pending ? (
+    <div className="flex shrink-0 items-center gap-1">
+      <Toggle
+        variant="ghost"
+        size="sm"
+        pressed={chatOpen}
+        disabled={chatDisabled}
+        onPressedChange={onChatOpenChange}
+      >
+        <MessageSquareIcon />
+        <T>Chat</T>
+      </Toggle>
+      <Button size="sm" variant="ghost" disabled={!canReply} onClick={onReply}>
+        <ReplyIcon />
+        <T>Reply</T>
+      </Button>
+      {thread.state === "snoozed" ? (
         <Button
           size="sm"
-          variant="outline"
-          render={
-            <Link
-              to="/$environmentId/$threadId"
-              params={{ environmentId, threadId: thread.chatThreadId }}
-            />
+          variant="ghost"
+          disabled={disabled}
+          onClick={() => void act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"))}
+        >
+          <AlarmClockOffIcon />
+          <T>Wake now</T>
+        </Button>
+      ) : settled ? null : (
+        <SnoozeMenu
+          environmentId={environmentId}
+          disabled={disabled}
+          onSnooze={(until) =>
+            void act([thread.id], { type: "snooze", until, onReply: true }, gt("Snoozed"))
           }
-        >
-          <MessageSquareIcon />
-          {gt("Open chat")}
-        </Button>
-      ) : (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={openSession.disabled}
-          onClick={async () => {
-            const location = router.state.location;
-            const result = await openSession.run({ threadId: thread.id });
-            if (result && router.state.location === location) {
-              await router.navigate({
-                to: "/$environmentId/$threadId",
-                params: { environmentId, threadId: result.value.threadId },
-              });
-            }
-          }}
-        >
-          <MessageSquareIcon />
-          {gt("Open chat")}
-        </Button>
+        />
       )}
-      {thread.state === "settled" ? (
+      {settled ? (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
           disabled={disabled}
           onClick={() => void act([thread.id], { type: "unsettle" }, gt("Moved back to Active"))}
         >
-          {gt("Move back to Active")}
+          <Undo2Icon />
+          <T>Move back to Active</T>
         </Button>
       ) : (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
           disabled={disabled}
           onClick={() =>
             void act(
@@ -97,31 +197,12 @@ export function MailThreadControls({
             )
           }
         >
+          <CheckIcon />
           {thread.suggestion
             ? gt("Settle as {reason}", {
                 reason: settleReasonLabel(thread.suggestion.reason, resolve),
               })
             : gt("Settle")}
-        </Button>
-      )}
-      {thread.suggestion && (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={disabled}
-          onClick={() => void act([thread.id], { type: "keep" }, gt("Kept in Active"))}
-        >
-          {gt("Keep in Active")}
-        </Button>
-      )}
-      {thread.state === "snoozed" && (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={disabled}
-          onClick={() => void act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"))}
-        >
-          {gt("Wake now")}
         </Button>
       )}
       <Menu>
@@ -134,7 +215,7 @@ export function MailThreadControls({
           <EllipsisIcon />
         </MenuTrigger>
         <MenuPopup align="end">
-          {(thread.pinnedAt || thread.state !== "settled") && (
+          {(thread.pinnedAt || !settled) && (
             <MenuItem
               onClick={() =>
                 void act(
@@ -147,53 +228,23 @@ export function MailThreadControls({
               {thread.pinnedAt ? gt("Unpin") : gt("Pin")}
             </MenuItem>
           )}
-          {thread.state !== "settled" && (
-            <>
-              <MenuItem
-                onClick={() =>
-                  void act(
-                    [thread.id],
-                    {
-                      type: "snooze",
-                      until: new Date(Date.now() + 86_400_000).toISOString(),
-                      onReply: true,
-                    },
-                    gt("Snoozed"),
-                  )
-                }
-              >
-                {gt("Snooze for one day or until reply")}
-              </MenuItem>
-              <MenuItem
-                onClick={() =>
-                  void act(
-                    [thread.id],
-                    { type: "snooze", until: null, onReply: true },
-                    gt("Snoozed"),
-                  )
-                }
-              >
-                {gt("Snooze until reply")}
-              </MenuItem>
-              {thread.workingReason !== "waiting" && (
-                <MenuItem
-                  onClick={() =>
-                    void act([thread.id], { type: "wait_for_reply" }, gt("Waiting for reply"))
-                  }
-                >
-                  {gt("Wait for reply")}
-                </MenuItem>
-              )}
-              {thread.state === "working" && (
-                <MenuItem
-                  onClick={() =>
-                    void act([thread.id], { type: "unsettle" }, gt("Moved back to Active"))
-                  }
-                >
-                  {gt("Move back to Active")}
-                </MenuItem>
-              )}
-            </>
+          {!settled && thread.workingReason !== "waiting" && (
+            <MenuItem
+              onClick={() =>
+                void act([thread.id], { type: "wait_for_reply" }, gt("Waiting for reply"))
+              }
+            >
+              {gt("Wait for reply")}
+            </MenuItem>
+          )}
+          {thread.state === "working" && (
+            <MenuItem
+              onClick={() =>
+                void act([thread.id], { type: "unsettle" }, gt("Moved back to Active"))
+              }
+            >
+              {gt("Move back to Active")}
+            </MenuItem>
           )}
           <MenuItem
             onClick={() => void act([thread.id], { type: "never_show" }, gt("Sender muted"))}
@@ -202,6 +253,27 @@ export function MailThreadControls({
           </MenuItem>
         </MenuPopup>
       </Menu>
+      {onToggleDetails === null ? null : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="shrink-0"
+                pressed={detailsOpen}
+                onPressedChange={onToggleDetails}
+                aria-label={gt("Toggle mail details")}
+                variant="ghost"
+                size="sm"
+              />
+            }
+          >
+            <SquareMenuIcon className="size-4" />
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            <T>Toggle mail details</T>
+          </TooltipPopup>
+        </Tooltip>
+      )}
     </div>
   );
 }

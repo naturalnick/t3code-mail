@@ -123,7 +123,6 @@ export interface MailTriageGenerationInput {
 
 export interface MailTriageVerdict {
   id: string;
-  summary: string;
   decision: "settle" | "keep";
   reason: string;
   category: string;

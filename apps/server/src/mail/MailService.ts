@@ -900,7 +900,6 @@ const make = Effect.gen(function* () {
         readonly verdict: MailStore.ThreadVerdict;
         readonly model?: string;
         readonly prefiltered: PrefilterResult;
-        readonly line: string;
         readonly suggestedAction: string | null;
         readonly category: MailCategory;
         readonly guardrail: PrefilterResult["guardrail"];
@@ -913,7 +912,6 @@ const make = Effect.gen(function* () {
       if (thread === null || !isFresh(seen, thread)) return;
       const guardrail = input.guardrail;
       yield* store.setTriage(thread.id, {
-        line: input.line,
         suggestedAction: input.suggestedAction,
         category: input.category,
         guardrail,
@@ -925,11 +923,7 @@ const make = Effect.gen(function* () {
       });
       // The user may have moved it while L1 ran; their choice wins.
       const saveNote = (outcome: string) =>
-        store.addTriageNote(
-          thread.id,
-          now,
-          triageText(input.verdict.source, input.model, input.line, outcome),
-        );
+        store.addTriageNote(thread.id, now, triageText(input.verdict.source, input.model, outcome));
       if (thread.state !== "active" || thread.pinnedAt !== null) {
         yield* saveNote("Reviewed. Kept your existing thread state.");
         return thread.chatThreadId;
@@ -1156,7 +1150,6 @@ const make = Effect.gen(function* () {
               source: fromMemory && !prepared.prefiltered.rule ? "memory" : "rule",
             },
             prefiltered: prepared.prefiltered,
-            line: firstLine(prepared.text) || thread.subject,
             suggestedAction: null,
             category: prepared.prefiltered.category,
             guardrail: prepared.prefiltered.guardrail,
@@ -1175,7 +1168,6 @@ const make = Effect.gen(function* () {
       if (capped || selection === null) {
         for (const prepared of batch) {
           yield* setTriageIfFresh(prepared.thread, {
-            line: firstLine(prepared.text) || prepared.thread.subject,
             category: prepared.prefiltered.category,
             guardrail: prepared.prefiltered.guardrail,
             bulk: prepared.prefiltered.bulk,
@@ -1243,10 +1235,6 @@ const make = Effect.gen(function* () {
               source: better ? "escalated" : "model",
             },
             prefiltered: prepared.prefiltered,
-            line:
-              verdict.summary.trim().slice(0, 140) ||
-              firstLine(prepared.text) ||
-              prepared.thread.subject,
             suggestedAction: verdict.action.trim().slice(0, 40) || null,
             category,
             guardrail:
@@ -1763,7 +1751,7 @@ const make = Effect.gen(function* () {
           yield* store.addTriageNote(
             thread.id,
             current.lastMessageAt,
-            triageText(current.verdict.source, undefined, current.line, outcome),
+            triageText(current.verdict.source, undefined, outcome),
           );
         }),
       );

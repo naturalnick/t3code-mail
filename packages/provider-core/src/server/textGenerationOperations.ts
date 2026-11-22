@@ -25,7 +25,6 @@ export const MailTriageOutput = Schema.Struct({
   verdicts: Schema.Array(
     Schema.Struct({
       id: Schema.String,
-      summary: Schema.String,
       decision: Schema.Literals(["settle", "keep"]),
       reason: Schema.String,
       category: Schema.String,

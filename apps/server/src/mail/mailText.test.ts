@@ -32,7 +32,7 @@ describe("mail text", () => {
     expect(cleanForModel("a".repeat(5_000), 1_200).length).toBeLessThanOrEqual(1_202);
   });
 
-  it("skips greetings for the sidebar line", () => {
+  it("skips greetings in the first line", () => {
     expect(firstLine("Hi Nick,\n\nThe contract is signed and attached.")).toBe(
       "The contract is signed and attached.",
     );

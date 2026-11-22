@@ -33,6 +33,9 @@ import { type EnqueueOp, enqueueOp, replayOp } from "./mailServerOp.ts";
 const INITIAL_PAGE = 200;
 const BACKFILL_PAGE = 150;
 const BODY_ROUND = 40;
+const DISPLAY_ROUND = 20;
+/** Recently settled mail is often opened to check what the AI settled. */
+const DISPLAY_PREFETCH_DAYS = 14;
 const FLAG_WINDOW = 400;
 const IDLE_REFRESH_MS = 25 * 60_000;
 const BACKFILL_INTERVAL_MS = 20_000;
@@ -393,6 +396,27 @@ const make = Effect.gen(function* () {
       yield* store.dropFailedOps.pipe(Effect.orDie);
     });
 
+    // Opening an email paints from the saved formatted body, so fetch it before anyone asks.
+    const displayFailed = new Set<number>();
+    const fetchDisplayBodies = Effect.fn("MailSync.fetchDisplayBodies")(function* () {
+      const since = DateTime.formatIso(
+        DateTime.subtract(yield* DateTime.now, { days: DISPLAY_PREFETCH_DAYS }),
+      );
+      const bodyPauseUntil = yield* store.getKv(bodyPauseKey).pipe(Effect.orDie);
+      if (bodyPauseUntil !== null && bodyPauseUntil > (yield* nowIso)) return 0;
+      const pending = yield* store
+        .pendingDisplayBodies(accountId, since, [...displayFailed], DISPLAY_ROUND)
+        .pipe(Effect.orDie);
+      for (const row of pending) {
+        const body = yield* loadMessageBody({
+          threadId: MailThreadId.make(row.thread_id),
+          messageId: row.id,
+        }).pipe(Effect.orDie);
+        if (body === undefined) displayFailed.add(row.id);
+      }
+      return pending.length;
+    });
+
     // First pass: primary, sent, bodies, ops.
     yield* setStatus(accountId, { status: "syncing", statusDetail: null });
     yield* syncMailbox(roles.primary, "primary");
@@ -401,6 +425,7 @@ const make = Effect.gen(function* () {
     while ((yield* fetchBodies(roles.primary)) === BODY_ROUND) {}
     if (roles.sent !== null) yield* fetchBodies(roles.sent);
     yield* setStatus(accountId, { status: "idle", lastSyncAt: yield* nowIso });
+    while ((yield* fetchDisplayBodies()) === DISPLAY_ROUND) {}
 
     let lastSent = yield* Clock.currentTimeMillis;
     let lastBackfill = 0;
@@ -428,6 +453,7 @@ const make = Effect.gen(function* () {
       yield* runOps;
       yield* fetchBodies(roles.primary);
       if (roles.sent !== null) yield* fetchBodies(roles.sent);
+      yield* fetchDisplayBodies();
       if (backfilling && loopAt - lastBackfill >= BACKFILL_INTERVAL_MS) {
         lastBackfill = loopAt;
         yield* backfill(roles.primary, "primary");
@@ -526,10 +552,9 @@ const make = Effect.gen(function* () {
 
   const displayLock = yield* KeyedLock.make<number>();
   const displayBodyJson = Schema.fromJsonString(Schema.NullOr(MailFormattedBody));
-  const getMessageBody: MailSync["Service"]["getMessageBody"] = Effect.fn(
-    "MailSync.getMessageBody",
-  )(
-    function* ({ threadId, messageId }) {
+  /** Undefined when the body could not be read right now, so a later call tries again. */
+  const loadMessageBody = Effect.fn("MailSync.loadMessageBody")(
+    function* ({ threadId, messageId }: MailMessageBodyInput) {
       const cached = yield* store.sql<{
         content: string;
       }>`SELECT d.content FROM mail_display_bodies d
@@ -537,11 +562,11 @@ const make = Effect.gen(function* () {
       if (cached[0])
         return yield* Schema.decodeEffect(displayBodyJson)(cached[0].content).pipe(Effect.orDie);
       const [target] = yield* store.messageTargets(threadId, [messageId]);
-      if (!target) return null;
+      if (!target) return undefined;
       const imap = live.get(target.accountId)?.imap;
-      if (!imap) return null;
+      if (!imap) return undefined;
       const pause = yield* store.getKv(`body-quota:${target.accountId}`);
-      if (pause && pause > (yield* nowIso)) return null;
+      if (pause && pause > (yield* nowIso)) return undefined;
       const result = yield* promise(() =>
         imap.withMailbox(target.mailbox, null, async (box) =>
           box.uidValidity === target.uidValidity
@@ -562,11 +587,11 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
-      if (!result) return null;
+      if (!result) return undefined;
       return yield* store.transaction(
         Effect.gen(function* () {
           const [current] = yield* store.messageTargets(threadId, [messageId]);
-          if (current?.identity !== target.identity) return null;
+          if (current?.identity !== target.identity) return undefined;
           const content = yield* Schema.encodeEffect(displayBodyJson)(result.body).pipe(
             Effect.orDie,
           );
@@ -577,6 +602,8 @@ const make = Effect.gen(function* () {
     },
     (operation, input) => displayLock.withLock(input.messageId, operation),
   );
+  const getMessageBody: MailSync["Service"]["getMessageBody"] = (input) =>
+    loadMessageBody(input).pipe(Effect.map((body) => body ?? null));
   const searchGmail: MailSync["Service"]["searchGmail"] = Effect.fn("MailSync.searchGmail")(
     function* (accountId, query) {
       const session = live.get(accountId);

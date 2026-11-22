@@ -46,3 +46,5 @@ One line each. Made during the unattended v1 build; revisit any of them.
 - An approval names the revision of each visible suggestion. If a reply or a new proposal changes any of them, the batch must be reviewed again.
 - Partial SMTP acceptance keeps a delivery record and creates a new revision of the same draft for the rejected recipients. Sending it requires another approval.
 - Body download quota responses pause downloads and backfill for 24 hours. New message headers continue to sync, and completed body downloads in the same batch are retained.
+- Rows and headers show the email's own subject. L1 no longer writes a summary line: model summaries hid the descriptive subjects senders already write, and dropping them shortens every triage reply.
+- Sync downloads the formatted body of mail in Active, Working, Snoozed, Pinned, and anything settled in the last 14 days. The reader shows nothing for a message until its formatted body is known, then the formatted email or, when there is no HTML part, the plain text, so raw text never flashes first.

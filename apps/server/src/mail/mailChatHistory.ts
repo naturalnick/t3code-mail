@@ -40,7 +40,6 @@ export function triageOutcome(decision: TrustDecision, guardrail: MailGuardrail 
 export function triageText(
   source: ThreadVerdict["source"],
   model: string | undefined,
-  line: string,
   outcome: string,
 ) {
   const author =
@@ -49,13 +48,7 @@ export function triageText(
       : source === "memory"
         ? "Sender preference"
         : (model ?? "Mail model");
-  // Chat renders Markdown. A sender's subject or excerpt must never embed a remote image.
-  const plain = (value: string) =>
-    value
-      .replace(/\s+/gu, " ")
-      .trim()
-      .replace(/[\\`*_{}[\]()<>#+.!|~&-]/gu, "\\$&");
-  return `${plain(author)} · ${outcome}\n\n${plain(line)}`.trim();
+  return `${author} · ${outcome}`;
 }
 
 export const publishTriageNotes = Effect.fn("Mail.publishTriageNotes")(function* (

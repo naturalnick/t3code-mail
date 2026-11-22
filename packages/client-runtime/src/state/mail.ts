@@ -114,7 +114,8 @@ export function createMailEnvironmentAtoms<R, E>(
     }),
     messageBody: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:message-body",
-      idleTtlMs: 0,
+      // Long enough to reopen a read email at once; bodies are too large to keep for long.
+      idleTtlMs: 60_000,
       tag: WS_METHODS.mailGetMessageBody,
       refreshTrigger: ({ environmentId, input }) =>
         Atom.make((get) => {

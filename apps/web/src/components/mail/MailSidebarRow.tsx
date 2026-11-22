@@ -4,20 +4,21 @@ import { T, useGT, useMessages } from "gt-react";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
-  CheckIcon,
-  CircleCheckIcon,
-  PinIcon,
   BotIcon,
+  CheckIcon,
+  PinIcon,
   SquarePenIcon,
   TriangleAlertIcon,
   Undo2Icon,
 } from "lucide-react";
-import { memo, type MouseEvent } from "react";
+import { memo, useState, type MouseEvent } from "react";
 
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime, formatShortTimestamp } from "../../timestampFormat";
+import { SnoozeMenuButton } from "../sidebar/SidebarThreadRow";
+import { MenuItem } from "../ui/menu";
 import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { nudgeLabel, senderName, settleReasonLabel } from "./mailPresentation";
@@ -31,126 +32,200 @@ function MailTime({ timestamp }: { timestamp: string }) {
 }
 
 const rowActionClassName =
-  "pointer-events-none absolute inset-y-0 right-0 z-[2] inline-flex cursor-pointer items-center rounded-md px-1.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100";
+  "inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground disabled:pointer-events-none";
 
 export const MailSidebarRow = memo(function MailSidebarRow(props: {
   readonly environmentId: EnvironmentId;
   readonly thread: MailThreadRow;
   readonly isActive: boolean;
   readonly actions: ReturnType<typeof useMailActions>;
+  readonly onIntent?: ((thread: MailThreadRow | null) => void) | undefined;
 }) {
-  const { thread, isActive, actions } = props;
+  const { environmentId, thread, isActive, actions, onIntent } = props;
   const gt = useGT();
   const resolve = useMessages();
   const { isMobile, setOpenMobile } = useSidebar();
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
   const stop = (event: MouseEvent) => event.stopPropagation();
   const sender = senderName(thread.from);
+  const subject = thread.subject || gt("(No subject)");
   const nudge = nudgeLabel(thread.nudge, resolve);
-  const settledByAi = thread.state === "settled" && thread.settledBy === "ai";
-  const quiet = thread.state === "settled" && !isActive;
+  const settled = thread.state === "settled";
+  const recede = settled && !isActive;
+  const unread = thread.unread && !settled;
+  const settledByAi = settled && thread.settledBy === "ai";
+  const suggestion = thread.state === "active" ? thread.suggestion : null;
+  // A settle suggestion already says what to do, so its next-step text would repeat it.
+  const metaText =
+    nudge ?? (thread.state === "active" && suggestion === null ? thread.suggestedAction : null);
+  const metaReason = suggestion?.reason ?? (settled ? thread.settledReason : null);
 
-  const rowAction =
+  const snooze = (until: string | null) =>
+    void actions.act([thread.id], { type: "snooze", until, onReply: true }, gt("Snoozed"));
+  const settle = (event: MouseEvent) => {
+    stop(event);
+    void actions.act(
+      [thread.id],
+      suggestion
+        ? { type: "approve", revisions: { [thread.id]: suggestion.revision } }
+        : { type: "settle" },
+      gt("Settled"),
+    );
+  };
+
+  const controls =
     thread.state === "settled" ? (
-      <button
-        type="button"
-        disabled={actions.disabled}
-        aria-label={gt("Move back to Active")}
-        className={rowActionClassName}
-        onClick={(event) => {
-          stop(event);
-          void actions.act([thread.id], { type: "unsettle" }, gt("Moved back to Active"));
-        }}
-      >
-        <Undo2Icon className="size-3.5" />
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              disabled={actions.disabled}
+              aria-label={gt("Move back to Active")}
+              className={rowActionClassName}
+              onClick={(event) => {
+                stop(event);
+                void actions.act([thread.id], { type: "unsettle" }, gt("Moved back to Active"));
+              }}
+            />
+          }
+        >
+          <Undo2Icon className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <T>Move back to Active</T>
+        </TooltipPopup>
+      </Tooltip>
     ) : thread.state === "snoozed" ? (
-      <button
-        type="button"
-        disabled={actions.disabled}
-        aria-label={gt("Wake now")}
-        className={rowActionClassName}
-        onClick={(event) => {
-          stop(event);
-          void actions.act([thread.id], { type: "unsnooze" });
-        }}
-      >
-        <AlarmClockOffIcon className="size-3.5" />
-      </button>
-    ) : (
-      <button
-        type="button"
-        disabled={actions.disabled}
-        aria-label={gt("Settle")}
-        className={rowActionClassName}
-        onClick={(event) => {
-          stop(event);
-          void actions.act([thread.id], { type: "settle" }, gt("Settled"));
-        }}
-      >
-        <CircleCheckIcon className="size-3.5" />
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              disabled={actions.disabled}
+              aria-label={gt("Wake now")}
+              className={rowActionClassName}
+              onClick={(event) => {
+                stop(event);
+                void actions.act([thread.id], { type: "unsnooze" }, gt("Moved back to Active"));
+              }}
+            />
+          }
+        >
+          <AlarmClockOffIcon className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <T>Wake now</T>
+        </TooltipPopup>
+      </Tooltip>
+    ) : actions.disabled ? null : (
+      <>
+        <SnoozeMenuButton
+          open={snoozeMenuOpen}
+          onOpenChange={setSnoozeMenuOpen}
+          onSnooze={(preset) => snooze(preset.snoozedUntil)}
+          timestampFormat={timestampFormat}
+          environmentId={environmentId}
+          label={gt("Snooze")}
+          extraItems={
+            <MenuItem
+              onClick={(event) => {
+                event.stopPropagation();
+                snooze(null);
+              }}
+            >
+              <T>Until reply</T>
+            </MenuItem>
+          }
+        />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                aria-label={
+                  suggestion
+                    ? gt("Settle as {reason}", {
+                        reason: settleReasonLabel(suggestion.reason, resolve),
+                      })
+                    : gt("Settle")
+                }
+                className={cn(rowActionClassName, "-mr-1")}
+                onClick={settle}
+              />
+            }
+          >
+            <CheckIcon className="size-3.5" />
+            <T>Settle</T>
+          </TooltipTrigger>
+          <TooltipPopup side="top">
+            {suggestion ? (
+              gt("Settle as {reason}", { reason: settleReasonLabel(suggestion.reason, resolve) })
+            ) : (
+              <T>Settle</T>
+            )}
+          </TooltipPopup>
+        </Tooltip>
+      </>
     );
 
   return (
-    <li className="list-none [content-visibility:auto] [contain-intrinsic-size:auto_--spacing(13)]">
+    <li className="list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_60px]">
       <div
         data-mail-row={thread.id}
+        onPointerEnter={() => onIntent?.(thread)}
+        onPointerLeave={() => onIntent?.(null)}
+        onFocus={() => onIntent?.(thread)}
         className={cn(
-          "group/sidebar-row relative flex w-full cursor-pointer flex-col justify-center gap-0.5 overflow-hidden rounded-md px-2.5 py-1.5 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md px-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none",
           isActive
             ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
-            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+            : recede
+              ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
         )}
       >
         <Link
-          className="absolute inset-0 z-[1] rounded-md focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          className="absolute inset-0 z-[1] rounded-md focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none"
           to="/mail/$mailThreadId"
           params={{ mailThreadId: thread.id }}
-          aria-label={`${sender}: ${thread.subject}`}
+          aria-label={`${sender}: ${subject}`}
           aria-current={isActive ? "page" : undefined}
           onClick={() => {
             if (isMobile) setOpenMobile(false);
           }}
         />
         <div className="flex h-5 min-w-0 items-center gap-1.5">
-          {thread.unread && thread.state !== "settled" ? (
-            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
-          ) : null}
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate text-sm",
-              thread.unread && !quiet ? "font-semibold text-foreground" : "font-medium",
-              quiet && "text-foreground/75",
-            )}
-          >
-            {sender}
-            {thread.messageCount > 1 ? (
-              <span className="ms-1 font-normal text-secondary-label tabular-nums">
-                {thread.messageCount}
-              </span>
-            ) : null}
-          </span>
-          {thread.injectionWarning ? (
-            <TriangleAlertIcon
-              aria-label={gt("Reads like instructions to an AI")}
-              className="size-3 shrink-0 text-warning"
+          {unread ? (
+            <span
+              role="img"
+              aria-label={gt("Unread")}
+              className="size-1.5 shrink-0 rounded-full bg-primary"
             />
           ) : null}
           {thread.hasDraft ? (
             <SquarePenIcon aria-label={gt("Draft")} className="size-3 shrink-0 text-warning" />
           ) : null}
           {thread.pinnedAt !== null ? (
-            <PinIcon aria-label={gt("Pinned")} className="size-3 shrink-0 text-muted-foreground" />
-          ) : null}
-          {settledByAi ? (
-            <BotIcon
-              aria-label={gt("Settled by AI")}
-              className="size-3 shrink-0 text-muted-foreground"
+            <PinIcon
+              aria-label={gt("Pinned")}
+              className="size-3 shrink-0 text-muted-foreground/65"
             />
           ) : null}
-          <span className="relative ml-auto flex h-5 min-w-8 shrink-0 items-center justify-end">
-            <span className="text-xs text-secondary-label tabular-nums transition-opacity group-hover/sidebar-row:opacity-0">
+          <span className="min-w-0 flex-1 truncate text-xs text-secondary-label">
+            {sender}
+            {thread.messageCount > 1 ? (
+              <span className="ms-1 tabular-nums">{thread.messageCount}</span>
+            ) : null}
+          </span>
+          <span className="relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs">
+            <span
+              className={cn(
+                "pointer-events-none flex items-center self-center tabular-nums text-secondary-label group-hover/sidebar-row:absolute group-hover/sidebar-row:right-0 group-hover/sidebar-row:opacity-0 group-has-[:focus-visible]/sidebar-row:absolute group-has-[:focus-visible]/sidebar-row:right-0 group-has-[:focus-visible]/sidebar-row:opacity-0",
+                snoozeMenuOpen && "absolute right-0 opacity-0",
+              )}
+            >
               {thread.state === "snoozed" && thread.snoozedUntil !== null ? (
                 <span className="inline-flex items-center gap-1 text-info-foreground">
                   <AlarmClockIcon aria-hidden className="size-3" />
@@ -160,57 +235,59 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
                 <MailTime timestamp={thread.lastMessageAt} />
               )}
             </span>
-            {rowAction}
+            {controls === null ? null : (
+              <span
+                className={cn(
+                  // Relative, not static, so the controls stay above the row link.
+                  "pointer-events-none absolute inset-y-0 right-0 z-[2] flex items-stretch opacity-0 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:relative has-[:focus-visible]:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:relative group-hover/sidebar-row:opacity-100",
+                  snoozeMenuOpen && "pointer-events-auto relative opacity-100",
+                )}
+              >
+                {controls}
+              </span>
+            )}
           </span>
         </div>
-        <div className="flex h-4 min-w-0 items-center gap-1.5 text-xs">
+        <div className="mt-1 flex min-w-0 items-center gap-1.5">
           <span
             className={cn(
-              "min-w-0 flex-1 truncate",
-              nudge !== null ? "text-warning-foreground" : "text-secondary-label",
+              "min-w-0 flex-1 truncate text-sm",
+              unread ? "font-semibold text-foreground" : recede ? "font-normal" : "font-medium",
+              recede && "text-foreground/75 group-hover/sidebar-row:text-foreground",
             )}
           >
-            {nudge ?? thread.line}
+            {subject}
           </span>
-          {thread.state === "active" && thread.suggestion !== null ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    disabled={actions.disabled}
-                    onClick={(event) => {
-                      stop(event);
-                      void actions.act(
-                        [thread.id],
-                        {
-                          type: "approve",
-                          revisions: { [thread.id]: thread.suggestion!.revision },
-                        },
-                        gt("Settled"),
-                      );
-                    }}
-                    className="relative z-[2] inline-flex h-4 shrink-0 cursor-pointer items-center gap-0.5 rounded-sm border border-border px-1 text-2xs font-medium text-muted-foreground hover:border-primary/40 hover:text-primary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none"
-                  />
-                }
-              >
-                <CheckIcon aria-hidden className="size-2.5" />
-                {settleReasonLabel(thread.suggestion.reason, resolve)}
-              </TooltipTrigger>
-              <TooltipPopup side="top">
-                <T>Settle as suggested</T>
-              </TooltipPopup>
-            </Tooltip>
-          ) : thread.state === "active" && thread.suggestedAction ? (
-            <span className="shrink-0 text-2xs text-muted-foreground">
-              {thread.suggestedAction}
-            </span>
-          ) : thread.state === "settled" && thread.settledReason !== null ? (
-            <span className="shrink-0 text-2xs text-muted-foreground">
-              {settleReasonLabel(thread.settledReason, resolve)}
-            </span>
+          {thread.injectionWarning ? (
+            <TriangleAlertIcon
+              aria-label={gt("Reads like instructions to an AI")}
+              className="size-3 shrink-0 text-warning"
+            />
           ) : null}
         </div>
+        {metaText !== null || metaReason !== null ? (
+          <div className="mt-0.5 flex h-4 min-w-0 items-center gap-1.5 text-xs">
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate",
+                nudge !== null ? "text-warning-foreground" : "text-secondary-label",
+              )}
+            >
+              {metaText}
+            </span>
+            {metaReason !== null ? (
+              <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-muted-foreground">
+                {suggestion || settledByAi ? (
+                  <BotIcon
+                    aria-label={suggestion ? gt("Suggested by AI") : gt("Settled by AI")}
+                    className="size-3"
+                  />
+                ) : null}
+                {settleReasonLabel(metaReason, resolve)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </li>
   );

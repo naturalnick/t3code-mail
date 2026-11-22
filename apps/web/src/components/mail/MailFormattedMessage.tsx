@@ -3,6 +3,7 @@ import DOMPurify from "dompurify";
 import { useGT } from "gt-react";
 import { useEffect, useRef, useState } from "react";
 import { observeResize } from "../../lib/observeResize";
+import { cn } from "../../lib/utils";
 import { InlineButton } from "../ui/button";
 
 function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
@@ -50,26 +51,57 @@ function prepareDocument(body: MailFormattedBody, loadImages: boolean) {
   return { srcDoc, remoteImages };
 }
 
-export function MailFormattedMessage({ body, title }: { body: MailFormattedBody; title: string }) {
+const MAX_REMEMBERED_HEIGHTS = 200;
+// Each message's last measured height, so reopening an email lays it out once instead of growing.
+const measuredHeights = new Map<string, number>();
+
+export function rememberedMessageHeight(id: string): number | undefined {
+  return measuredHeights.get(id);
+}
+
+function rememberHeight(id: string, height: number) {
+  measuredHeights.delete(id);
+  measuredHeights.set(id, height);
+  if (measuredHeights.size > MAX_REMEMBERED_HEIGHTS) {
+    const oldest = measuredHeights.keys().next().value;
+    if (oldest !== undefined) measuredHeights.delete(oldest);
+  }
+}
+
+export function MailFormattedMessage({
+  id,
+  body,
+  title,
+}: {
+  id: string;
+  body: MailFormattedBody;
+  title: string;
+}) {
   const gt = useGT();
   const [loadImages, setLoadImages] = useState(false);
   const { srcDoc, remoteImages } = prepareDocument(body, loadImages);
+  const remembered = measuredHeights.get(id);
+  const [measured, setMeasured] = useState(remembered !== undefined);
   const stop = useRef<(() => void) | undefined>(undefined);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The observer belongs to the iframe document and must be disconnected on unmount.
   useEffect(() => () => stop.current?.(), []);
   return (
     <>
       {remoteImages && !loadImages && (
-        <InlineButton tone="muted" onClick={() => setLoadImages(true)}>
-          {gt("Load remote images")}
-        </InlineButton>
+        <p className="mb-2 text-xs">
+          <InlineButton tone="muted" onClick={() => setLoadImages(true)}>
+            {gt("Load remote images")}
+          </InlineButton>
+        </p>
       )}
       <iframe
         title={title}
         sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
         referrerPolicy="no-referrer"
         srcDoc={srcDoc}
-        className="block w-full min-w-0 border-0"
+        // Hidden until measured so the default iframe height never shows.
+        className={cn("block w-full min-w-0 border-0", !measured && "invisible")}
+        style={remembered === undefined ? undefined : { height: remembered }}
         onLoad={(event) => {
           stop.current?.();
           const frame = event.currentTarget;
@@ -77,9 +109,13 @@ export function MailFormattedMessage({ body, title }: { body: MailFormattedBody;
           if (!element) return;
           // Viewport-relative email styles can otherwise grow the frame every time it resizes.
           const resize = () => {
-            frame.style.height =
-              Math.min(Math.ceil(element.getBoundingClientRect().height), window.innerHeight * 3) +
-              "px";
+            const height = Math.min(
+              Math.ceil(element.getBoundingClientRect().height),
+              window.innerHeight * 3,
+            );
+            frame.style.height = height + "px";
+            rememberHeight(id, height);
+            setMeasured(true);
           };
           stop.current = observeResize(element, resize);
           resize();

@@ -21,7 +21,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - Separate Mail tab in a T3 Code fork. Kept apart from coding sessions.
 - IMAP \+ SMTP for every provider, Gmail included, straight from the user's machine. No Gmail API by default.
 - Initial sync is recent-first, then a slow backfill: Gmail IMAP caps downloads at about 2.5 GB/day and limits simultaneous connections, so one connection per account plus IDLE.
-- **Local store:** message index, local full-text search index, thread state, summaries, memory, action log.
+- **Local store:** message index, local full-text search index, thread state, memory, action log.
 - **Sync:** IDLE for near-live updates while the app is open; CONDSTORE/QRESYNC where supported, UID tracking otherwise; full re-sync if UIDVALIDITY changes.
 - **Pipeline per new email:** pre-filter → clean → L1 batch → sidebar state → (L2 / auto-settle when triggered).
 - Reuses T3 providers (Codex, Claude, etc.) for all model calls.
@@ -60,7 +60,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 ## Inbox
 
-- Each email shows as a text-message-style row: sender, one line, suggested action.
+- Each email shows as a row like a coding thread: sender, subject, suggested action, with Snooze and Settle on hover.
 - Tap opens the full email, thread, and details.
 - Settled view filterable by reason (FYI, receipt, noise, replied) and by "settled by AI."
 - **One-tap corrections:** "keep in Active" / "settle these" / "never show." Each one updates memory.
@@ -78,7 +78,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 
 - **Pre-filter (no AI):** sender rules, List-Unsubscribe headers, OTP and delivery patterns, known newsletters.
 - **Clean before any model call:** strip HTML, signatures, quoted chains, tracking junk.
-- **L1, every email, batched:** one-line summary, settle-or-keep verdict with reason, suggested action. Small model (haiku-class).
+- **L1, every email, batched:** settle-or-keep verdict with reason, suggested action. Small model (haiku-class).
 - **L2, chat session:** runs only when the user opens the email or L1 marks it Active. Full context, drafts, lookups. User approves anything outgoing.
 - **Escalation:** L1 uses a smarter model when confidence is low or the sender matters.
 
@@ -105,12 +105,12 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - **Key metric:** how fast email drains plan usage. Still a concern, but much smaller since it runs on the user's own AI subscriptions.
 - **Meter:** "Email used X% of your usage this week."
 - **User cap:** weekly budget. When hit, fall back to pre-filter and settle-memory only; pause L1.
-- Keep L1 cheap: pre-filter, clean, batch, small model, cache summaries; graduated senders skip the model entirely.
+- Keep L1 cheap: pre-filter, clean, batch, small model, cache verdicts; graduated senders skip the model entirely.
 
 ## Agents & API
 
 - Local MCP server and CLI over the same store.
-- **Read:** Active list, thread summaries, full thread on request, search.
+- **Read:** Active list, thread rows, full thread on request, search.
 - **Write:** leave drafts, propose settles, move a thread back to Active. No send.
 - External agents (Grok Bot, Claude, Codex) use the same API.
 - Every agent action goes in the action log with undo.
@@ -157,7 +157,7 @@ Draft rev 3, Nov 21, 2026\. Background research: [AI email client research doc](
 - Sync, pre-filter, L1 verdicts, T3 sidebar states, Active by default.
 - Suggest mode, graduation, demotion, settled-by-AI log with undo, daily recap.
 - EMAIL.md and settle-memory.
-- Text summaries, full email on tap.
+- Sender and subject rows, formatted email on tap.
 - Drafts with approve-to-send.
 - Usage meter and cap.
 - Local MCP: read Active, leave drafts.

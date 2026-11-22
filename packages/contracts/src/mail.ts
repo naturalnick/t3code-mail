@@ -86,8 +86,6 @@ export const MailThreadRow = Schema.Struct({
   accountId: MailAccountId,
   subject: Schema.String,
   from: MailAddress,
-  /** L1's one-line summary, or the cleaned first line until L1 runs. */
-  line: Schema.String,
   suggestedAction: Schema.NullOr(Schema.String),
   lastMessageAt: IsoDateTime,
   messageCount: NonNegativeInt,

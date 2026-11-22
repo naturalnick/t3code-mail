@@ -85,7 +85,6 @@ const textGeneration = (reply: ModelReply) =>
       Effect.sync(() => ({
         verdicts: [...input.prompt.matchAll(/<email id="(e\d+)">/g)].map((match) => ({
           id: match[1]!,
-          summary: "Nightly build passed",
           decision: "settle" as const,
           reason: "fyi",
           category: "notification",
@@ -242,6 +241,43 @@ it.effect("lists newest messages first and pages settled mail by message date", 
   ),
 );
 
+it.effect("prefetches formatted bodies only for mail a reader is likely to open", () =>
+  withMail(
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const store = yield* MailStore.MailStore;
+      const active = yield* deliver({
+        subject: "Active",
+        body: "Open",
+        at: "2026-11-05T06:00:00.000Z",
+      });
+      const cached = yield* deliver({
+        subject: "Cached",
+        body: "Open",
+        at: "2026-11-04T06:00:00.000Z",
+      });
+      const recent = yield* deliver({
+        subject: "Recent",
+        body: "Done",
+        at: "2026-11-03T06:00:00.000Z",
+      });
+      const old = yield* deliver({ subject: "Old", body: "Done", at: "2026-10-01T06:00:00.000Z" });
+      yield* mail.act({ threadIds: [recent, old], action: { type: "settle" } }, { actor: "user" });
+      const messageOf = (threadId: MailThreadId) =>
+        store.sql<{ id: number }>`SELECT id FROM mail_messages WHERE thread_id = ${threadId}`.pipe(
+          Effect.map((rows) => rows[0]!.id),
+        );
+      yield* store.sql`INSERT INTO mail_display_bodies(id, content) VALUES (${yield* messageOf(cached)}, 'null')`;
+      const pending = (skip: ReadonlyArray<number>) =>
+        store
+          .pendingDisplayBodies(accountId, "2026-11-01T00:00:00.000Z", skip, 10)
+          .pipe(Effect.map((rows) => rows.map((row) => row.thread_id)));
+      expect(yield* pending([])).toEqual([active, recent]);
+      expect(yield* pending([yield* messageOf(active)])).toEqual([recent]);
+    }),
+  ),
+);
+
 describe("MailService trust ramp", () => {
   it.effect("suggests until approved three times, then settles on its own and undo demotes", () =>
     withMail(
@@ -258,7 +294,7 @@ describe("MailService trust ramp", () => {
             at: `2026-11-0${night}T06:00:00.000Z`,
           });
           const row = yield* rowOf(threadId);
-          expect(row).toMatchObject({ state: "active", line: "Nightly build passed" });
+          expect(row).toMatchObject({ state: "active", suggestedAction: "Settle" });
           expect(row.suggestion).toMatchObject({ reason: "fyi" });
           // A repeated approve (double tap, stale client) is not a second approval.
           for (const _ of [1, 2]) {
@@ -385,11 +421,11 @@ describe("MailService trust ramp", () => {
         });
         expect(yield* rowOf(threadId)).toMatchObject({
           state: "active",
-          line: "Reviewed report",
+          suggestedAction: "Read report",
           suggestion: { reason: "fyi" },
         });
       }),
-      (model) => (model === "review" ? { summary: "Reviewed report" } : { confidence: 0 }),
+      (model) => (model === "review" ? { action: "Read report" } : { confidence: 0 }),
     ),
   );
 

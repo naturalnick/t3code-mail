@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Navigate, Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { GlobalVoiceInputIndicator } from "../components/chat/GlobalVoiceInputIndicator";
@@ -8,10 +8,26 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import { retainThreadFindForRoute } from "../components/chat/threadFindStore";
 import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { useShownThreadRouteTarget } from "../hooks/useShownThreadRouteTarget";
+import { useMailThreadForChat } from "../state/mail";
 
 function ChatRouteLayout() {
   // Render both routes here so draft promotion keeps the same ChatView mounted.
   const { shownTarget, modalOpen } = useShownThreadRouteTarget();
+  // A mail chat opens beside its email, so every link to one lands there.
+  const mailThreadId = useMailThreadForChat(
+    shownTarget?.kind === "server" && !modalOpen ? shownTarget.threadRef : null,
+  );
+  if (mailThreadId === undefined) return null;
+  if (mailThreadId !== null) {
+    return (
+      <Navigate
+        to="/mail/$mailThreadId"
+        params={{ mailThreadId }}
+        search={{ chat: true }}
+        replace
+      />
+    );
+  }
   return (
     <>
       {shownTarget?.kind === "server" && !modalOpen ? (

@@ -28,7 +28,6 @@ const MailRow = Schema.Struct({
   threadId: MailThreadId,
   from: Schema.String,
   subject: Schema.String,
-  line: Schema.String,
   state: MailThreadState,
   lastMessageAt: Schema.String,
   unread: Schema.Boolean,

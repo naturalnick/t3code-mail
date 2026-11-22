@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, MailDraft, MailThreadDetail } from "@t3tools/contracts";
 import { useGT } from "gt-react";
-import { useId, useState } from "react";
+import { useId } from "react";
 
 import { mailEnvironment } from "../../state/mail";
 import { useMailCommand } from "../settings/MailSettings.commands";
@@ -18,7 +18,7 @@ import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { parseRecipients, replySubject } from "./mailPresentation";
 
-type DraftTask =
+export type DraftTask =
   | { kind: "edit"; draft: MailDraft | null }
   | { kind: "send" | "discard"; draft: MailDraft };
 
@@ -30,7 +30,7 @@ interface DraftProps {
   refresh: () => void;
 }
 
-function DraftDialog({
+export function MailDraftDialog({
   environmentId,
   detail,
   from,
@@ -187,15 +187,19 @@ function DraftDialog({
   );
 }
 
-export function MailThreadDrafts(props: DraftProps) {
+export function MailThreadDrafts(props: {
+  environmentId: EnvironmentId;
+  drafts: MailThreadDetail["drafts"];
+  onTask: (task: DraftTask) => void;
+}) {
   const gt = useGT();
-  const [task, setTask] = useState<DraftTask | null>(null);
+  const setTask = props.onTask;
   const canSave = useAtomValue(mailEnvironment.saveDraft.permissionAtom(props.environmentId));
   const canSend = useAtomValue(mailEnvironment.sendDraft.permissionAtom(props.environmentId));
   const canDiscard = useAtomValue(mailEnvironment.discardDraft.permissionAtom(props.environmentId));
   return (
-    <section className="space-y-3">
-      {props.detail.drafts.map((draft) => (
+    <>
+      {props.drafts.map((draft) => (
         <article key={draft.id} className="space-y-2 rounded-lg border border-border p-3">
           <h2 className="text-sm font-semibold">
             {draft.status === "sending"
@@ -235,15 +239,6 @@ export function MailThreadDrafts(props: DraftProps) {
           )}
         </article>
       ))}
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={!canSave}
-        onClick={() => setTask({ kind: "edit", draft: null })}
-      >
-        {gt("Draft reply")}
-      </Button>
-      {task && <DraftDialog {...props} task={task} close={() => setTask(null)} />}
-    </section>
+    </>
   );
 }

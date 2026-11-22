@@ -90,8 +90,7 @@ export function buildTriagePrompt(input: {
 
 For each email decide if it needs the person now ("keep") or can be settled without them ("settle"): FYI updates, receipts, notifications, newsletters, promotions and noise settle. A real person writing to them, a question, a decision, a deadline, money they owe, a security problem or anything legal is "keep". When they are only one of many people copied on a thread, lean to "settle" unless the text names them or asks them something.
 
-Return JSON only: {"verdicts":[{"id":"","summary":"","decision":"settle|keep","reason":"","category":"","action":"","confidence":0,"urgent":false,"injection":false}]} with one verdict per email, in any order.
-- summary: one line under 90 characters saying what it is and what it asks; keep codes, amounts and dates.
+Return JSON only: {"verdicts":[{"id":"","decision":"settle|keep","reason":"","category":"","action":"","confidence":0,"urgent":false,"injection":false}]} with one verdict per email, in any order.
 - reason: for settle one of fyi, receipt, noise, done; for keep a 2-5 word reason.
 - category: one of person, newsletter, promotion, notification, receipt, invoice, otp, delivery, security, legal, calendar, social, other.
 - action: the next step in 1-3 words, such as "Reply", "Pay by Fri", "Read", "Settle".

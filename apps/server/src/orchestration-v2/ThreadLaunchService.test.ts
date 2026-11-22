@@ -465,7 +465,6 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
       yield* store.setTriage(threadId, {
         triageState: "done",
         triagedCount: 1,
-        line: "Ada wants to meet on Thursday.",
         verdict: { decision: "keep", source: "model", confidence: 0.92, reason: "question" },
       });
       const open = mail.openSession({ threadId, modelSelection });
@@ -493,12 +492,12 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
       assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
       assert.equal((yield* store.getThread(threadId))?.state, "active");
       assert.equal(first.messages[0]!.role, "assistant");
-      assert.include(first.messages[0]!.text, "Ada wants to meet on Thursday");
+      assert.include(first.messages[0]!.text, "Recommended keeping this in Active.");
       assert.equal(first.visibleTurnItems[0]?.item.type, "assistant_message");
       const context = yield* MailChatContext.MailChatContext;
       const firstPrompt = yield* context.forTurn(accepted.id, true);
       assert.include(firstPrompt, "Meet on Thursday.");
-      assert.include(firstPrompt, "Ada wants to meet on Thursday");
+      assert.include(firstPrompt, "Recommended keeping this in Active.");
       for (const match of firstPrompt.matchAll(/`([^`]+)`/g)) {
         assert.property(MailToolkit.tools, match[1]!);
       }
@@ -532,7 +531,7 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
       assert.equal(live?.type, "assistant_message");
       if (live?.type !== "assistant_message") assert.fail("Missing saved triage");
       assert.include(live.text, "Sender preference");
-      assert.include(live.text, "Confirmed for Saturday");
+      assert.include(live.text, "Settled as noise");
       yield* Effect.all([open, open], { concurrency: "unbounded" });
       const refreshed = yield* projection;
       assert.lengthOf(refreshed.messages, 3);

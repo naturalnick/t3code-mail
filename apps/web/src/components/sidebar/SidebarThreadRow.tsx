@@ -403,12 +403,14 @@ function SidebarThreadTooltip({
   );
 }
 
-function SnoozeMenuButton(props: {
+export function SnoozeMenuButton(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSnooze: (preset: Pick<SnoozePreset, "snoozedUntil">) => void;
   timestampFormat: TimestampFormat;
   environmentId: EnvironmentId;
+  label?: string;
+  extraItems?: ReactNode;
 }) {
   const { open, onOpenChange, onSnooze, timestampFormat, environmentId } = props;
   const gt = useGT();
@@ -426,7 +428,7 @@ function SnoozeMenuButton(props: {
               render={
                 <button
                   type="button"
-                  aria-label={gt("Snooze thread")}
+                  aria-label={props.label ?? gt("Snooze thread")}
                   onClick={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
                   className="inline-flex h-full cursor-pointer items-center gap-0.5 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
@@ -437,9 +439,7 @@ function SnoozeMenuButton(props: {
         >
           <ClockIcon className="size-3" />
         </TooltipTrigger>
-        <TooltipPopup>
-          <T>Snooze thread</T>
-        </TooltipPopup>
+        <TooltipPopup>{props.label ?? <T>Snooze thread</T>}</TooltipPopup>
       </Tooltip>
       <MenuPopup side="bottom" align="end">
         {presets.map((preset) => (
@@ -456,6 +456,7 @@ function SnoozeMenuButton(props: {
           </MenuItem>
         ))}
         {presets.length > 0 ? <MenuSeparator /> : null}
+        {props.extraItems}
         <MenuItem
           onClick={async (event) => {
             event.stopPropagation();

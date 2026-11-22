@@ -318,6 +318,7 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TRIGGER delete_mail_triage_notes AFTER DELETE ON mail_threads
       BEGIN DELETE FROM mail_triage_notes WHERE thread_id = OLD.id; END`,
   ],
+  [`ALTER TABLE mail_threads DROP COLUMN line`],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -404,7 +405,6 @@ export interface ThreadRecord {
   readonly subject: string;
   readonly fromName: string;
   readonly fromAddress: string;
-  readonly line: string;
   readonly suggestedAction: string | null;
   readonly lastMessageAt: string;
   readonly lastIncomingAt: string | null;
@@ -551,7 +551,6 @@ const toThread = (row: Row): ThreadRecord => ({
   subject: str(row.subject),
   fromName: str(row.from_name),
   fromAddress: str(row.from_address),
-  line: str(row.line),
   suggestedAction: strOrNull(row.suggested_action),
   lastMessageAt: str(row.last_message_at),
   lastIncomingAt: strOrNull(row.last_incoming_at),
@@ -588,7 +587,6 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
     accountId: thread.accountId,
     subject: thread.subject,
     from: { name: thread.fromName, address: thread.fromAddress },
-    line: thread.line,
     suggestedAction: thread.suggestedAction,
     lastMessageAt: thread.lastMessageAt,
     messageCount: thread.messageCount,
@@ -1013,6 +1011,21 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       WHERE account_id = ${accountId} AND mailbox = ${mailbox} AND body_state = 'pending' AND removed = 0
       ORDER BY date DESC LIMIT ${limit}`;
 
+  /** Messages a reader is likely to open that have no formatted body saved yet, newest first. */
+  const pendingDisplayBodies = (
+    accountId: MailAccountId,
+    since: string,
+    skip: ReadonlyArray<number>,
+    limit: number,
+  ) =>
+    sql<{ id: number; thread_id: string }>`SELECT m.id, m.thread_id FROM mail_messages m
+      JOIN mail_threads t ON t.id = m.thread_id
+      LEFT JOIN mail_display_bodies d ON d.id = m.id
+      WHERE m.account_id = ${accountId} AND m.removed = 0 AND m.mailbox != '__local' AND d.id IS NULL
+        AND (t.state != 'settled' OR t.pinned_at IS NOT NULL OR t.last_message_at >= ${since})
+        AND m.id NOT IN (SELECT value FROM json_each(${toJson(skip)}))
+      ORDER BY m.date DESC LIMIT ${limit}`;
+
   const updateFlags = (
     accountId: MailAccountId,
     mailbox: string,
@@ -1183,14 +1196,14 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         );
 
   const insertThread = (thread: Omit<ThreadRecord, "workflowVersion" | "pinVersion">) =>
-    sql`INSERT INTO mail_threads (id, account_id, subject, from_name, from_address, line,
+    sql`INSERT INTO mail_threads (id, account_id, subject, from_name, from_address,
         suggested_action, last_message_at, last_incoming_at, last_outgoing_at, message_count,
         incoming_count, unread, in_inbox, state, state_at, pinned_at, working_reason, settled_reason,
         settled_by, snoozed_until, snooze_on_reply, suggestion_reason, suggestion_confidence,
         category, guardrail, bulk, verdict_json, triage_state, triaged_count, nudge, chat_thread_id,
         injection, created_at)
       VALUES (${thread.id}, ${thread.accountId}, ${thread.subject}, ${thread.fromName},
-        ${thread.fromAddress}, ${thread.line}, ${thread.suggestedAction}, ${thread.lastMessageAt},
+        ${thread.fromAddress}, ${thread.suggestedAction}, ${thread.lastMessageAt},
         ${thread.lastIncomingAt}, ${thread.lastOutgoingAt}, ${thread.messageCount},
         ${thread.incomingCount}, ${thread.unread ? 1 : 0}, ${thread.inInbox ? 1 : 0},
         ${thread.state}, ${thread.stateAt}, ${thread.pinnedAt}, ${thread.workingReason},
@@ -1274,7 +1287,6 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const setTriage = (
     id: MailThreadId,
     patch: {
-      readonly line?: string;
       readonly suggestedAction?: string | null;
       readonly category?: MailCategory | null;
       readonly guardrail?: MailGuardrail | null;
@@ -1286,7 +1298,6 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     },
   ) =>
     sql`UPDATE mail_threads SET
-        line = COALESCE(${patch.line ?? null}, line),
         suggested_action = CASE WHEN ${patch.suggestedAction === undefined ? 0 : 1} = 1 THEN ${patch.suggestedAction ?? null} ELSE suggested_action END,
         category = CASE WHEN ${patch.category === undefined ? 0 : 1} = 1 THEN ${patch.category ?? null} ELSE category END,
         guardrail = CASE WHEN ${patch.guardrail === undefined ? 0 : 1} = 1 THEN ${patch.guardrail ?? null} ELSE guardrail END,
@@ -1638,6 +1649,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     setMessageBody,
     bodyFetchFailed,
     pendingBodies,
+    pendingDisplayBodies,
     updateFlags,
     markRemoved,
     moveMessage,

@@ -46,27 +46,30 @@ import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUp
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
 
-function WorkspaceTabs() {
+/** Code and Mail tabs appear once a server has Mail; without it the brand reads "T3 Code". */
+function useHasWorkspaceTabs() {
   const connected = useMailEnvironmentId();
   const inMail = useInMailTab();
+  return { shown: connected !== null || inMail, inMail };
+}
+
+function WorkspaceTabs({ inMail }: { inMail: boolean }) {
   const switchTab = useSwitchAppTab();
-  if (connected === null && !inMail) return null;
   return (
-    <div className="px-2.5 pb-1">
-      <ToggleGroup
-        value={[inMail ? "mail" : "code"]}
-        onValueChange={([tab]) => {
-          if (tab === "mail" || tab === "code") void switchTab(tab);
-        }}
-      >
-        <Toggle value="code">
-          <T>Code</T>
-        </Toggle>
-        <Toggle value="mail">
-          <T>Mail</T>
-        </Toggle>
-      </ToggleGroup>
-    </div>
+    <ToggleGroup
+      className="[-webkit-app-region:no-drag]"
+      value={[inMail ? "mail" : "code"]}
+      onValueChange={([tab]) => {
+        if (tab === "mail" || tab === "code") void switchTab(tab);
+      }}
+    >
+      <Toggle value="code">
+        <T>Code</T>
+      </Toggle>
+      <Toggle value="mail">
+        <T>Mail</T>
+      </Toggle>
+    </ToggleGroup>
   );
 }
 
@@ -76,6 +79,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron: boolean;
 }) {
   const stageLabel = useEnvironmentStageLabel();
+  const tabs = useHasWorkspaceTabs();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const gt = useGT();
   const backdropVariant = resolveSidebarStageBackdropVariant(
@@ -105,7 +109,8 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         </div>
         <div className="relative z-10 flex h-8 min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden py-0.5">
           <div className="flex shrink-0 items-center gap-1">
-            <SidebarBrand onBackdrop={backdropVariant !== null} />
+            <SidebarBrand onBackdrop={backdropVariant !== null} product={!tabs.shown} />
+            {tabs.shown ? <WorkspaceTabs inMail={tabs.inMail} /> : null}
             {isElectron ? (
               <div className="hidden items-center md:flex">
                 <HistoryNavigationButton direction="back" onBackdrop={backdropVariant !== null} />
@@ -125,7 +130,6 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           ) : null}
         </div>
       </div>
-      <WorkspaceTabs />
     </>
   );
 });
@@ -137,6 +141,7 @@ export function SidebarBrandWidthProbe({
   isElectron: boolean;
   onWidthChange: (width: number) => void;
 }) {
+  const tabs = useHasWorkspaceTabs();
   const observeWidth = (probe: HTMLDivElement) => {
     return observeResize(probe, ([entry]) => {
       if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
@@ -150,7 +155,8 @@ export function SidebarBrandWidthProbe({
       ref={observeWidth}
     >
       <div className="ml-[var(--workspace-titlebar-content-left)] flex gap-1">
-        <SidebarBrandMark onBackdrop={false} />
+        <SidebarBrandMark onBackdrop={false} product={!tabs.shown} />
+        {tabs.shown ? <WorkspaceTabs inMail={tabs.inMail} /> : null}
         {isElectron ? <div className="w-[calc(2*var(--workspace-titlebar-control-size))]" /> : null}
       </div>
     </div>
@@ -200,7 +206,7 @@ function HistoryNavigationButton({
   );
 }
 
-function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+function SidebarBrand({ onBackdrop, product }: { onBackdrop: boolean; product: boolean }) {
   const gt = useGT();
   return (
     <Link
@@ -211,24 +217,26 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
       )}
       to="/"
     >
-      <SidebarBrandMark onBackdrop={onBackdrop} />
+      <SidebarBrandMark onBackdrop={onBackdrop} product={product} />
     </Link>
   );
 }
 
-function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+function SidebarBrandMark({ onBackdrop, product }: { onBackdrop: boolean; product: boolean }) {
   return (
     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
       <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
-      <span
-        className={cn(
-          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-          onBackdrop ? "text-white/70" : "text-muted-foreground",
-        )}
-      >
-        {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
-        {"Code"}
-      </span>
+      {product ? (
+        <span
+          className={cn(
+            "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+            onBackdrop ? "text-white/70" : "text-muted-foreground",
+          )}
+        >
+          {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
+          {"Code"}
+        </span>
+      ) : null}
     </span>
   );
 }

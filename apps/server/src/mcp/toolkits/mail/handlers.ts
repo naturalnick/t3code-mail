@@ -19,7 +19,6 @@ const row = (thread: MailThreadRow) => ({
   threadId: thread.id,
   from: address(thread.from),
   subject: thread.subject,
-  line: thread.line,
   state: thread.state,
   lastMessageAt: thread.lastMessageAt,
   unread: thread.unread,
