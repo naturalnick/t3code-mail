@@ -169,6 +169,7 @@ export const MailActionKind = Schema.Literals([
   "send",
   "trust",
   "returned",
+  "propose",
 ]);
 export type MailActionKind = typeof MailActionKind.Type;
 

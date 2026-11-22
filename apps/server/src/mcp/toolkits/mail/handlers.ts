@@ -1,0 +1,132 @@
+import {
+  OrchestratorMcpFailure,
+  type MailAddress,
+  type MailError,
+  type MailThreadRow,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+
+import * as MailService from "../../../mail/MailService.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { MailToolkit } from "./tools.ts";
+
+const address = (entry: MailAddress) =>
+  entry.name ? `${entry.name} <${entry.address}>` : entry.address;
+
+const row = (thread: MailThreadRow) => ({
+  threadId: thread.id,
+  from: address(thread.from),
+  subject: thread.subject,
+  line: thread.line,
+  state: thread.state,
+  lastMessageAt: thread.lastMessageAt,
+  unread: thread.unread,
+  hasDraft: thread.hasDraft,
+  ...(thread.suggestion ? { suggestedSettle: thread.suggestion.reason } : {}),
+});
+
+const failure = <A, R>(effect: Effect.Effect<A, MailError, R>) =>
+  effect.pipe(
+    Effect.mapError(
+      (error) =>
+        new OrchestratorMcpFailure({
+          code: error.code === "not_found" ? "invalid_request" : "orchestration_error",
+          message: error.message,
+        }),
+    ),
+  );
+
+/** The log names who acted: the calling thread's title, or the MCP client's name. */
+const agentActor = Effect.gen(function* () {
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  if (scope.thread !== undefined) {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const threadId = scope.thread.threadId;
+    const title = yield* threads.getThreadTitles([threadId]).pipe(
+      Effect.map((titles) => titles[threadId]),
+      Effect.orElseSucceed(() => undefined),
+    );
+    return { actor: "agent" as const, label: title ?? "Agent" };
+  }
+  return { actor: "agent" as const, label: scope.client?.label ?? "Agent" };
+});
+
+export const layer = McpToolAccess.toLayer(MailToolkit, {
+  t3_mail_list: McpToolAccess.reads(({ state, query, limit }) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const max = limit ?? 30;
+      const threads =
+        query !== undefined && query.trim().length > 0
+          ? (yield* failure(mail.search({ query, limit: max }))).threads
+          : yield* failure(mail.listThreads(state ?? "active", max));
+      return { threads: threads.map(row) };
+    }),
+  ),
+  t3_mail_read: McpToolAccess.reads(({ threadId }) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const detail = yield* failure(mail.getThread(threadId));
+      const related = yield* failure(
+        Effect.forEach(detail.related, (entry) => mail.getThread(entry.id)),
+      );
+      return {
+        subject: detail.thread.subject,
+        state: detail.thread.state,
+        messages: detail.messages.map((message) => ({
+          from: address(message.from),
+          to: message.to.map(address),
+          cc: message.cc.map(address),
+          date: message.date,
+          fromUser: message.outgoing,
+          text: message.text ?? "(not downloaded yet)",
+          attachments: message.attachments.map((attachment) => attachment.filename),
+        })),
+        drafts: detail.drafts
+          .filter((draft) => draft.status !== "sent")
+          .map((draft) => ({ draftId: draft.id, body: draft.body, status: draft.status })),
+        related: related.map((entry) => row(entry.thread)),
+      };
+    }),
+  ),
+  t3_mail_draft: McpToolAccess.writes(({ threadId, body, draftId, to, cc, subject }) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const detail = yield* failure(mail.getThread(threadId));
+      const existing = detail.drafts.find((draft) => draft.id === draftId);
+      const lastIncoming = detail.messages.findLast((message) => !message.outgoing);
+      const subjectLine = detail.thread.subject;
+      const draft = yield* failure(
+        mail.saveDraft(
+          {
+            threadId,
+            ...(draftId === undefined ? {} : { draftId }),
+            to: to ?? existing?.to ?? (lastIncoming ? [lastIncoming.from.address] : []),
+            cc: cc ?? existing?.cc ?? [],
+            subject:
+              subject ??
+              existing?.subject ??
+              (/^re:/i.test(subjectLine) ? subjectLine : `Re: ${subjectLine}`),
+            body,
+          },
+          yield* agentActor,
+        ),
+      );
+      return { draftId: draft.id };
+    }),
+  ),
+  t3_mail_triage: McpToolAccess.writes(({ threadIds, action, reason }) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const actor = yield* agentActor;
+      const result = yield* failure(
+        action === "propose_settle"
+          ? mail.propose({ threadIds, reason: reason ?? "fyi" }, actor)
+          : mail.act({ threadIds: [...threadIds], action: { type: "unsettle" } }, actor),
+      );
+      return { changed: result.actionIds.length };
+    }),
+  ),
+});

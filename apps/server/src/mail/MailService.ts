@@ -42,6 +42,7 @@ import type {
   MailSendDraftInput,
   MailSetTrustInput,
   MailThreadPage,
+  MailThreadState,
   MailTrustList,
   MailUpdateAccountInput,
   MailUpdateSettingsInput,
@@ -226,13 +227,22 @@ export class MailService extends Context.Service<
     readonly subscribe: Stream.Stream<MailStreamEventType, MailError>;
     readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
-    readonly listActive: (limit: number) => Effect.Effect<ReadonlyArray<MailThreadRow>, MailError>;
+    /** Sidebar order: oldest entry first, except Settled, newest first. */
+    readonly listThreads: (
+      state: MailThreadState,
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<MailThreadRow>, MailError>;
     readonly search: (input: MailSearchInput) => Effect.Effect<MailSearchResult, MailError>;
     readonly act: (
       input: MailActInput,
       actor: MailActorInfo,
     ) => Effect.Effect<MailActResult, MailError>;
-    readonly undo: (actionId: number, actor: MailActorInfo) => Effect.Effect<void, MailError>;
+    readonly undo: (actionId: number) => Effect.Effect<void, MailError>;
+    /** An agent's settle proposal: shown like the AI's, settled only when the user approves. */
+    readonly propose: (
+      input: { readonly threadIds: ReadonlyArray<MailThreadId>; readonly reason: MailSettleReason },
+      actor: MailActorInfo,
+    ) => Effect.Effect<MailActResult, MailError>;
     readonly listActions: (input: MailListActionsInput) => Effect.Effect<MailActionPage, MailError>;
     readonly saveDraft: (
       input: MailSaveDraftInput,
@@ -544,7 +554,7 @@ const make = Effect.gen(function* () {
       )
       .pipe(sqlSafe, Effect.withSpan("MailService.act"));
 
-  const undo: MailService["Service"]["undo"] = (actionId, actor) =>
+  const undo: MailService["Service"]["undo"] = (actionId) =>
     stateLock
       .withPermits(1)(
         Effect.gen(function* () {
@@ -556,6 +566,12 @@ const make = Effect.gen(function* () {
           const now = yield* nowIso;
           const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
           for (const record of action.undo.trust ?? []) yield* store.putTrust(record, now);
+          if (action.undo.draftId !== undefined) {
+            const draft = yield* store.getDraft(action.undo.draftId);
+            if (draft !== null && (draft.status === "draft" || draft.status === "failed")) {
+              yield* store.deleteDraft(draft.id);
+            }
+          }
           if (thread !== null && action.undo.threadPatch) {
             yield* store.patchThread(thread.id, action.undo.threadPatch);
             const wasSettle =
@@ -575,12 +591,43 @@ const make = Effect.gen(function* () {
             }
           }
           yield* store.markActionUndone(actionId, now);
-          void actor;
           if (thread !== null) yield* engine.publishThreads([thread.id]);
           yield* engine.publishStatus;
         }),
       )
       .pipe(sqlSafe, Effect.withSpan("MailService.undo"));
+
+  const propose: MailService["Service"]["propose"] = (input, actor) =>
+    stateLock
+      .withPermits(1)(
+        Effect.gen(function* () {
+          const now = yield* nowIso;
+          const actionIds: Array<number> = [];
+          const touched: Array<MailThreadId> = [];
+          for (const thread of yield* store.getThreads(input.threadIds)) {
+            if (thread.state === "settled") continue;
+            yield* store.patchThread(thread.id, {
+              suggestionReason: input.reason,
+              suggestionConfidence: 1,
+            });
+            actionIds.push(
+              yield* store.insertAction({
+                at: now,
+                actor: actor.actor,
+                actorLabel: actor.label ?? null,
+                kind: "propose",
+                threadId: thread.id,
+                reason: input.reason,
+                undo: { threadPatch: statePatchOf(thread) },
+              }),
+            );
+            touched.push(thread.id);
+          }
+          yield* engine.publishThreads(touched);
+          return { actionIds };
+        }),
+      )
+      .pipe(sqlSafe, Effect.withSpan("MailService.propose"));
 
   const listActions: MailService["Service"]["listActions"] = Effect.fn("MailService.listActions")(
     function* (input) {
@@ -662,12 +709,16 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
-  const listActive: MailService["Service"]["listActive"] = (limit) =>
-    store.threadsByState("active").pipe(
+  const listThreads: MailService["Service"]["listThreads"] = (state, limit) =>
+    store.threadsByState(state).pipe(
       Effect.flatMap((threads) =>
         engine.rows(
           [...threads]
-            .sort((a, b) => a.stateAt.localeCompare(b.stateAt))
+            .sort((a, b) =>
+              state === "settled"
+                ? b.stateAt.localeCompare(a.stateAt)
+                : a.stateAt.localeCompare(b.stateAt),
+            )
             .slice(0, limit)
             .map((thread) => thread.id),
         ),
@@ -1130,7 +1181,7 @@ const make = Effect.gen(function* () {
           kind: "draft",
           threadId: thread.id,
           reason: null,
-          undo: null,
+          undo: actor.actor === "user" ? null : { draftId: id },
         });
       }
       // A draft from an agent means the thread needs the user again.
@@ -1781,10 +1832,11 @@ const make = Effect.gen(function* () {
     subscribe: engine.subscribe.pipe(Stream.mapError(() => storeError())),
     getThread,
     listSettled,
-    listActive,
+    listThreads,
     search,
     act,
     undo,
+    propose,
     listActions,
     saveDraft,
     discardDraft,

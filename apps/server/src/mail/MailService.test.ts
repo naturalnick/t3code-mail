@@ -181,7 +181,7 @@ describe("MailService trust ramp", () => {
         const log = yield* mail.listActions({ actor: "ai" });
         const aiSettle = log.actions.find((action) => action.threadId === fourth);
         expect(aiSettle).toMatchObject({ kind: "settle", undoable: true });
-        yield* mail.undo(aiSettle!.id, { actor: "user" });
+        yield* mail.undo(aiSettle!.id);
         expect((yield* rowOf(fourth)).state).toBe("active");
         const trust = yield* mail.listTrust;
         expect(
@@ -197,6 +197,48 @@ describe("MailService trust ramp", () => {
           state: "active",
           suggestion: { reason: "fyi" },
         });
+      }),
+    ),
+  );
+
+  it.effect("logs agent drafts and proposals with undo, and never settles for them", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const agent = { actor: "agent", label: "Inbox helper" } as const;
+        const threadId = yield* deliver({
+          subject: "Can we move Thursday?",
+          from: "sam@example.org",
+          body: "Could we do Friday at 10 instead?",
+          at: "2026-11-02T09:00:00.000Z",
+        });
+
+        yield* mail.propose({ threadIds: [threadId], reason: "done" }, agent);
+        expect(yield* rowOf(threadId)).toMatchObject({
+          state: "active",
+          suggestion: { reason: "done", confidence: 1 },
+        });
+        yield* mail.saveDraft(
+          {
+            threadId,
+            to: ["sam@example.org"],
+            cc: [],
+            subject: "Re: Can we move Thursday?",
+            body: "Friday works.",
+          },
+          agent,
+        );
+        expect((yield* rowOf(threadId)).hasDraft).toBe(true);
+
+        const log = yield* mail.listActions({ actor: "agent" });
+        expect(
+          log.actions.map((action) => [action.kind, action.actorLabel, action.undoable]),
+        ).toEqual([
+          ["draft", "Inbox helper", true],
+          ["propose", "Inbox helper", true],
+        ]);
+        for (const action of log.actions) yield* mail.undo(action.id);
+        expect(yield* rowOf(threadId)).toMatchObject({ suggestion: null, hasDraft: false });
       }),
     ),
   );

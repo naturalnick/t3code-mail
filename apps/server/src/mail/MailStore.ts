@@ -346,6 +346,8 @@ export interface ActionRecord {
   readonly undo: {
     readonly threadPatch?: ThreadStatePatch;
     readonly trust?: ReadonlyArray<TrustRecord>;
+    /** A draft an agent left; undo discards it unless it was sent. */
+    readonly draftId?: MailDraftId;
   } | null;
   readonly undoneAt: string | null;
 }
