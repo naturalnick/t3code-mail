@@ -6,6 +6,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import ProviderTurnCompletionIndex from "./Migrations/109_ProviderTurnCompletionIndex.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
@@ -87,7 +88,8 @@ describe("V2 preview upgrade", () => {
         [105, "TaskFolders"],
         [106, "WorktreePathKeyIndex"],
         [107, "DeferredSlashCommandIndex"],
-        [108, "ProviderTurnCompletionIndex"],
+        [108, "AgentFeedback"],
+        [109, "ProviderTurnCompletionIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -218,8 +220,38 @@ describe("V2 preview upgrade", () => {
         [105, "TaskFolders"],
         [106, "WorktreePathKeyIndex"],
         [107, "DeferredSlashCommandIndex"],
-        [108, "ProviderTurnCompletionIndex"],
+        [108, "AgentFeedback"],
+        [109, "ProviderTurnCompletionIndex"],
       ]);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([106, 108])("upgrades Mail's provider-turn index from migration %s", (id) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: id - 1 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({
+          [`${id}_ProviderTurnCompletionIndex`]: ProviderTurnCompletionIndex,
+        }),
+      });
+      yield* runMigrations();
+      const ledger = yield* sql<{
+        migration_id: number;
+        name: string;
+      }>`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
+      assert.deepStrictEqual(
+        ledger.map((row) => [row.migration_id, row.name] as const),
+        migrationManifest,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM sqlite_schema WHERE name IN ('agent_feedback', 'orchestration_v2_projection_provider_turns_thread_completed_idx') ORDER BY name`,
+        [
+          { name: "agent_feedback" },
+          { name: "orchestration_v2_projection_provider_turns_thread_completed_idx" },
+        ],
+      );
+      assert.deepStrictEqual(yield* runMigrations(), []);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 

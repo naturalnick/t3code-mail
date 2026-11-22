@@ -85,6 +85,17 @@ export class ThreadToolFailedError extends Schema.TaggedError<ThreadToolFailedEr
   }
 }
 
+/** The server answered that it has no such tool: it predates the tool, or hides it from this session. */
+class ThreadToolMissingError extends Schema.TaggedError<ThreadToolMissingError>()(
+  "ThreadToolMissingError",
+  { tool: Schema.String },
+) {
+  override readonly [Runtime.errorReported] = false;
+  override get message(): string {
+    return `This T3 Code server has no ${this.tool} tool. Update T3 Code, then retry.`;
+  }
+}
+
 export class ThreadUsageError extends Schema.TaggedError<ThreadUsageError>()("ThreadUsageError", {
   detail: Schema.String,
 }) {
@@ -132,6 +143,7 @@ const ThreadCliError = Schema.Union([
   ThreadServerNotRunningError,
   ThreadServerUnreachableError,
   ThreadToolFailedError,
+  ThreadToolMissingError,
   ThreadUsageError,
   ThreadProjectNotFoundError,
   ThreadNeedsInputError,
@@ -196,10 +208,18 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
       tool: string,
       args: Readonly<Record<string, unknown>>,
       schema: S,
-    ): Effect.fn.Return<S["Type"], ThreadServerUnreachableError | ThreadToolFailedError> {
-      const raw = yield* session
-        .call(tool, args)
-        .pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
+    ): Effect.fn.Return<
+      S["Type"],
+      ThreadServerUnreachableError | ThreadToolFailedError | ThreadToolMissingError
+    > {
+      const raw = yield* session.call(tool, args).pipe(
+        Effect.mapError((cause) =>
+          // Effect's MCP server words an unknown or hidden tool exactly this way.
+          cause.rpcError?.code === -32602 && cause.rpcError.message === `Tool '${tool}' not found`
+            ? new ThreadToolMissingError({ tool })
+            : new ThreadServerUnreachableError({ origin, cause }),
+        ),
+      );
       const result = yield* decodeToolResult(raw).pipe(Effect.mapError(() => unexpected(tool)));
       if (result.isError === true) {
         return yield* new ThreadToolFailedError({ tool, detail: toolFailureDetail(result) });
@@ -217,7 +237,11 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
  * outside agent does, and revokes that session when the command ends.
  */
 export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
-  flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly json: boolean;
+    readonly clientLabel?: string;
+  },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
   /** Who the server's logs and the Mail action log name for this session. */
   client: { readonly label: string; readonly clientName: string } = {
@@ -237,7 +261,7 @@ export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function*
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const issued = yield* Effect.acquireRelease(
       environmentAuth.issueMcpClientSession({
-        label: client.label,
+        label: flags.clientLabel ?? client.label,
         // The CLI runs as the machine's owner. New threads still start at
         // the project's default mode, never at this ceiling by default.
         access: "full-access",
@@ -1029,7 +1053,12 @@ const threadShowCommand = Command.make("show", {
           const messages = yield* Effect.forEach(latest, (item) =>
             readFullText(tools, threadId, item).pipe(
               Effect.map((text) => ({
-                role: item.type === "user_message" ? "user" : "assistant",
+                role:
+                  item.type === "assistant_message"
+                    ? "assistant"
+                    : item.createdBy === "system"
+                      ? "system"
+                      : "user",
                 runId: item.runId,
                 text,
               })),

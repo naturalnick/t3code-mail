@@ -115,7 +115,8 @@ import Migration0104 from "./Migrations/104_ProjectionProjectsTrackedFolders.ts"
 import Migration0105 from "./Migrations/105_TaskFolders.ts";
 import Migration0106 from "./Migrations/106_WorktreePathKeyIndex.ts";
 import Migration0107 from "./Migrations/107_DeferredSlashCommandIndex.ts";
-import Migration0108 from "./Migrations/108_ProviderTurnCompletionIndex.ts";
+import Migration0108 from "./Migrations/108_AgentFeedback.ts";
+import Migration0109 from "./Migrations/109_ProviderTurnCompletionIndex.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -226,7 +227,8 @@ const migrationEntries = [
   [105, "TaskFolders", Migration0105],
   [106, "WorktreePathKeyIndex", Migration0106],
   [107, "DeferredSlashCommandIndex", Migration0107],
-  [108, "ProviderTurnCompletionIndex", Migration0108],
+  [108, "AgentFeedback", Migration0108],
+  [109, "ProviderTurnCompletionIndex", Migration0109],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -242,6 +244,10 @@ const makeMigrationLoader = (throughId?: number) =>
 
 const FIRST_V2_MIGRATION_ID = 55;
 
+// Published Mail builds used these upstream ids for an idempotent index, always at the ledger head.
+const isFormerMailIndex = (id: number, name: string | undefined) =>
+  (id === 106 || id === 108) && name === "ProviderTurnCompletionIndex";
+
 export function skippedV2Migrations(
   recorded: ReadonlyArray<{ readonly id: number; readonly name: string }>,
   throughId?: number,
@@ -256,19 +262,18 @@ export function skippedV2Migrations(
     )
       return [];
     const recordedName = recordedNames.get(id);
+    if (id === latestRecordedId && isFormerMailIndex(id, recordedName)) return [];
     return recordedName === name ? [] : [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
   });
 }
 
 // Migrators skip ids up to the highest recorded; reject collisions that would skip V2 schema.
-const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
-  throughId?: number,
-) {
+const prepareV2Migrations = Effect.fn("prepareV2Migrations")(function* (throughId?: number) {
   const sql = yield* SqlClient.SqlClient;
   const tables = yield* sql`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
   `;
-  if (tables.length === 0) return;
+  if (tables.length === 0) return [];
   const recorded = yield* sql<{
     readonly migration_id: number;
     readonly name: string;
@@ -278,11 +283,23 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
     throughId,
   );
   const latestRecordedId = Math.max(0, ...recorded.map((row) => row.migration_id));
-  if (skipped.length === 0) return;
-  return yield* new Migrator.MigrationError({
-    kind: "BadState",
-    message: `This database's migration history would skip required schema migrations: ${skipped.join(", ")}. The migrator skips every id up to the highest recorded id (${latestRecordedId}), regardless of name. It was probably written by a different build. Start the build that wrote it, or report this migration history so an upgrade path can be added.`,
-  });
+  if (skipped.length > 0)
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: `This database's migration history would skip required schema migrations: ${skipped.join(", ")}. The migrator skips every id up to the highest recorded id (${latestRecordedId}), regardless of name. It was probably written by a different build. Start the build that wrote it, or report this migration history so an upgrade path can be added.`,
+    });
+  const head = recorded.find((row) => row.migration_id === latestRecordedId);
+  if (
+    !isFormerMailIndex(latestRecordedId, head?.name) ||
+    (throughId !== undefined && throughId < latestRecordedId)
+  )
+    return [];
+  return yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = ${latestRecordedId} AND name = 'ProviderTurnCompletionIndex'`;
+      return yield* run({ loader: makeMigrationLoader(latestRecordedId) });
+    }),
+  );
 });
 
 const latestMigrationId = Math.max(...migrationEntries.map(([id]) => id));
@@ -320,9 +337,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   // The reconcile takes the write lock; CLI startup must not contend with the server for a no-op.
   const previewMigrations = includesV2 && hasPending ? yield* reconcileV2PreviewMigration() : [];
-  if (includesV2) {
-    yield* assertV2MigrationsCanRun(toMigrationInclusive);
-  }
+  const mailMigrations = includesV2 ? yield* prepareV2Migrations(toMigrationInclusive) : [];
   const sql = yield* SqlClient.SqlClient;
   const ledger = yield* sql`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
@@ -340,7 +355,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   );
   // One transaction per migration: an index build on a large database can take minutes, and a
   // restart then resumes after the last finished migration instead of rolling all of them back.
-  const executedMigrations: Array<readonly [id: number, name: string]> = [...previewMigrations];
+  const executedMigrations: Array<readonly [id: number, name: string]> = [
+    ...previewMigrations,
+    ...mailMigrations,
+  ];
   for (const [index, [id, name]] of pending.entries()) {
     if (latestRecordedId > 0) {
       yield* Effect.log(DATABASE_MIGRATION_PROGRESS_MESSAGE).pipe(
