@@ -9,7 +9,9 @@ import {
   MailSettings as MailSettingsSchema,
   MailThreadId,
   MAIL_SESSION_PROJECT_ID,
+  UsageDay,
 } from "@t3tools/contracts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -18,12 +20,13 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlError from "effect/sql/SqlError";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- a synchronous digest keeps thread ids a pure function of the root message.
 import * as NodeCrypto from "node:crypto";
 
 import type { ParsedMessage } from "./imapSession.ts";
-import { firstLine, stripQuoted } from "./mailText.ts";
+import { asksQuestion, firstLine, stripQuoted } from "./mailText.ts";
 import * as MailStore from "./MailStore.ts";
 
 const DEFAULT_SETTINGS: MailSettings = {
@@ -61,16 +64,12 @@ export interface IngestResult {
   readonly threads: ReadonlyArray<MailThreadId>;
 }
 
-const QUESTION = /\?\s*$/m;
 /** Backfilled inbox mail older than this is history; it arrives settled. */
 const BACKLOG_DAYS = 30;
 
 function hashKey(value: string): string {
   return NodeCrypto.createHash("sha1").update(value).digest("hex").slice(0, 20);
 }
-
-const startOfWeekIso = (now: DateTime.DateTime) =>
-  DateTime.formatIso(DateTime.startOf(now, "week", { weekStartsOn: 1 }));
 
 function localDateKey(now: DateTime.DateTime): string {
   const parts = DateTime.toParts(now);
@@ -94,8 +93,9 @@ export class MailEngine extends Context.Service<
         readonly labels: ReadonlyArray<string> | null;
       }>,
     ) => Effect.Effect<void, SqlError.SqlError>;
-    readonly removeEmptyThreads: (
+    readonly finishMailboxReset: (
       accountId: MailAccountId,
+      mailbox: string,
     ) => Effect.Effect<void, SqlError.SqlError>;
     readonly markRemoved: (
       context: Pick<IngestContext, "accountId" | "mailbox">,
@@ -110,10 +110,12 @@ export class MailEngine extends Context.Service<
     ) => Effect.Effect<void, SqlError.SqlError>;
     readonly publishRemoved: (ids: ReadonlyArray<MailThreadId>) => Effect.Effect<void>;
     readonly publishStatus: Effect.Effect<void, SqlError.SqlError>;
+    readonly refreshChatUsage: Effect.Effect<void, SqlError.SqlError>;
     readonly status: Effect.Effect<MailStatus, SqlError.SqlError>;
     readonly rows: (
       ids: ReadonlyArray<MailThreadId>,
     ) => Effect.Effect<ReadonlyArray<MailThreadRow>, SqlError.SqlError>;
+    readonly arrivals: Stream.Stream<{ readonly count: number }>;
     readonly subscribe: Stream.Stream<MailStreamEvent, SqlError.SqlError>;
     readonly settings: Effect.Effect<MailSettings, SqlError.SqlError>;
     readonly putSettings: (settings: MailSettings) => Effect.Effect<void, SqlError.SqlError>;
@@ -121,15 +123,15 @@ export class MailEngine extends Context.Service<
     readonly recap: Effect.Effect<MailRecap | null, SqlError.SqlError>;
     /** Wakes the L1 worker after threads were queued for triage. */
     readonly triageSignal: Queue.Queue<void>;
-    readonly providerTokens: (tokens: number | null) => Effect.Effect<void>;
   }
 >()("t3/mail/MailEngine") {}
 
 const make = Effect.gen(function* () {
   const store = yield* MailStore.MailStore;
   const hub = yield* PubSub.unbounded<MailStreamEvent>();
+  const arrivals = yield* PubSub.sliding<{ readonly count: number }>(1);
   const triageSignal = yield* Queue.sliding<void>(1);
-  let providerTokensThisWeek: number | null = null;
+  const orchestration = yield* SqlClient.SqlClient;
 
   const localNow = DateTime.now.pipe(
     Effect.map((now) => DateTime.setZone(now, DateTime.zoneMakeLocal())),
@@ -146,17 +148,41 @@ const make = Effect.gen(function* () {
   const putSettings = (next: MailSettings) => store.setKv("settings", JSON.stringify(next));
 
   const usage = Effect.gen(function* () {
-    const weekStart = startOfWeekIso(yield* localNow);
-    const used = yield* store.usageSince(weekStart);
+    const now = yield* localNow;
+    const monday = DateTime.startOf(now, "week", { weekStartsOn: 1 });
+    const weekStart = DateTime.formatIso(monday);
+    const estimated = yield* store.usageSince(weekStart);
+    // The projection has one row per provider turn. Its input/output already include cache and reasoning.
+    const [chat] = yield* orchestration<{ tokens: number; calls: number }>`
+      SELECT COALESCE(SUM(
+        COALESCE(json_extract(t.payload_json, '$.turnTokenUsage.inputTokens'), 0)
+        + COALESCE(json_extract(t.payload_json, '$.turnTokenUsage.outputTokens'), 0)
+      ), 0) AS tokens, COUNT(*) AS calls
+      FROM orchestration_v2_projection_threads AS thread
+      JOIN orchestration_v2_projection_provider_turns AS t ON t.thread_id = thread.thread_id
+      WHERE thread.project_id = ${MAIL_SESSION_PROJECT_ID} AND t.completed_at >= ${weekStart}
+        AND t.completed_at <= ${DateTime.formatIso(now)}
+        AND json_extract(t.payload_json, '$.turnTokenUsage.usageStatus') IN ('complete', 'partial')
+        AND COALESCE(json_extract(t.payload_json, '$.turnTokenUsage.localCommand'), 0) = 0
+        AND (json_extract(t.payload_json, '$.turnTokenUsage.inputTokens') IS NOT NULL
+          OR json_extract(t.payload_json, '$.turnTokenUsage.outputTokens') IS NOT NULL)
+    `.pipe(NodeSqliteClient.readOnly);
+    const tokens = estimated.tokens + (chat?.tokens ?? 0);
     const current = yield* settings;
     return {
       weekStart,
-      tokens: used.tokens,
-      calls: used.calls,
-      emails: used.emails,
+      providerWindow: {
+        sinceDay: UsageDay.make(DateTime.formatIsoDate(monday)),
+        untilDay: UsageDay.make(DateTime.formatIsoDate(now)),
+        timeZone: DateTime.zoneToString(now.zone),
+      },
+      tokens,
+      estimatedTokens: estimated.tokens,
+      calls: estimated.calls + (chat?.calls ?? 0),
+      emails: estimated.emails,
       cap: current.weeklyTokenCap,
-      capped: current.weeklyTokenCap !== null && used.tokens >= current.weeklyTokenCap,
-      providerTokens: providerTokensThisWeek,
+      capped: current.weeklyTokenCap !== null && tokens >= current.weeklyTokenCap,
+      providerTokens: null,
     } satisfies MailUsage;
   });
 
@@ -252,6 +278,21 @@ const make = Effect.gen(function* () {
     Effect.asVoid,
   );
 
+  let lastUsageCheck: { day: string; updatedAt: string | null } | undefined;
+  const refreshChatUsage = Effect.gen(function* () {
+    const day = DateTime.formatIsoDate(yield* localNow);
+    // Every provider turn touches its thread. The project/updated_at index also covers empty weeks.
+    const [thread] = yield* orchestration<{ updated_at: string }>`
+      SELECT updated_at FROM orchestration_v2_projection_threads
+      WHERE project_id = ${MAIL_SESSION_PROJECT_ID} ORDER BY updated_at DESC LIMIT 1
+    `.pipe(NodeSqliteClient.readOnly);
+    const updatedAt = thread?.updated_at ?? null;
+    if (lastUsageCheck && (lastUsageCheck.day !== day || lastUsageCheck.updatedAt !== updatedAt)) {
+      yield* publishStatus;
+    }
+    lastUsageCheck = { day, updatedAt };
+  });
+
   const snapshot = Effect.gen(function* () {
     const threads = yield* store.openThreads(SETTLED_IN_SNAPSHOT);
     const drafts = yield* store.threadsWithDrafts(threads.map((thread) => thread.id));
@@ -281,7 +322,11 @@ const make = Effect.gen(function* () {
     const related = [message.inReplyTo, ...message.references].filter(
       (value): value is string => value !== null,
     );
-    const existing = yield* store.findThreadIdByMessageIds(context.accountId, related);
+    const existing = yield* store.findThreadIdByMessageIds(
+      context.accountId,
+      related,
+      message.messageId,
+    );
     if (existing !== null) return existing;
     const root = message.references[0] ?? message.inReplyTo ?? message.messageId;
     return MailThreadId.make(
@@ -300,6 +345,14 @@ const make = Effect.gen(function* () {
       ingestInTransaction(context, messages, now, backlogCutoff),
     );
     yield* publishThreads(result.visible);
+    if (
+      result.arrived > 0 &&
+      !context.initial &&
+      !context.backfill &&
+      (yield* settings).notificationsEnabled
+    ) {
+      yield* PubSub.publish(arrivals, { count: result.arrived });
+    }
     if (result.quiet) yield* publishStatus;
     if (result.queuedTriage) yield* Queue.offer(triageSignal, undefined);
     return { newMessageIds: result.newMessageIds, threads: result.changed };
@@ -314,6 +367,7 @@ const make = Effect.gen(function* () {
   ) {
     const me = context.accountEmail.toLowerCase();
     const newMessageIds: Array<{ id: number; uid: number }> = [];
+    let arrived = 0;
     const touched = new Map<
       string,
       {
@@ -366,6 +420,7 @@ const make = Effect.gen(function* () {
         textPart: message.textPart,
       });
       if (!result.inserted) continue;
+      if (!outgoing && inInbox && !message.seen) arrived++;
       if (message.textPart !== null) newMessageIds.push({ id: result.id, uid: message.uid });
       const entry = touched.get(threadId)!;
       (outgoing ? entry.outgoing : entry.incoming).push(message);
@@ -394,6 +449,8 @@ const make = Effect.gen(function* () {
         // Recent inbox mail that backfill reaches is triaged like new mail.
         const arrivesSettled =
           (!inInbox && !lastIsMine) || (context.backfill && inInbox && newest.date < backlogCutoff);
+        const historical = context.initial || context.backfill;
+        const settledReason = arrivesSettled ? "archived" : lastIsMine ? "replied" : null;
         yield* store.insertThread({
           id,
           accountId: context.accountId,
@@ -409,12 +466,17 @@ const make = Effect.gen(function* () {
           incomingCount: 0,
           unread: false,
           inInbox,
-          state: arrivesSettled || lastIsMine ? "settled" : "active",
-          stateAt: context.initial || context.backfill ? newest.date : now,
+          state: settledReason === null ? "active" : "settled",
+          stateAt: historical ? newest.date : now,
           pinnedAt: null,
           workingReason: null,
-          settledReason: arrivesSettled ? "archived" : lastIsMine ? "replied" : null,
-          settledBy: arrivesSettled || lastIsMine ? "mail" : null,
+          settledReason,
+          settledBy:
+            settledReason === null
+              ? null
+              : settledReason === "replied" && !historical
+                ? "user"
+                : "mail",
           snoozedUntil: null,
           snoozeOnReply: false,
           suggestionReason: null,
@@ -479,7 +541,7 @@ const make = Effect.gen(function* () {
             stateAt: now,
             workingReason: null,
             settledReason: "replied",
-            settledBy: "user",
+            settledBy: context.initial ? "mail" : "user",
             snoozedUntil: null,
             snoozeOnReply: false,
             suggestionReason: null,
@@ -491,28 +553,25 @@ const make = Effect.gen(function* () {
       yield* store.refreshThreadAggregate(id);
       changed.push(id);
     }
-    return { newMessageIds, changed, visible, quiet, queuedTriage };
+    return { newMessageIds, changed, visible, quiet, queuedTriage, arrived };
   });
 
   const applyFlags: MailEngine["Service"]["applyFlags"] = Effect.fn("MailEngine.applyFlags")(
     function* (context, changes) {
       const now = yield* nowIso;
-      const touched = new Map<string, boolean | null>();
-      for (const change of changes) {
-        const inInbox =
-          context.gmail && change.labels !== null ? change.labels.includes("\\Inbox") : undefined;
-        const threadId = yield* store.updateFlags(context.accountId, context.mailbox, change.uid, {
-          seen: change.seen,
-          ...(change.labels === null ? {} : { labels: change.labels }),
-          ...(inInbox === undefined ? {} : { inInbox }),
-        });
-        if (threadId !== null && !touched.has(threadId)) {
-          touched.set(threadId, (yield* store.getThread(threadId))?.inInbox ?? null);
-        }
-      }
+      const touched = yield* store.updateFlags(
+        context.accountId,
+        context.mailbox,
+        changes.map((change) => ({
+          ...change,
+          ...(context.gmail && change.labels !== null
+            ? { inInbox: change.labels.includes("\\Inbox") }
+            : {}),
+        })),
+      );
       const changed: Array<MailThreadId> = [];
-      for (const [rawId, inInboxBefore] of touched) {
-        const id = MailThreadId.make(rawId);
+      for (const id of touched) {
+        const inInboxBefore = context.gmail ? (yield* store.getThread(id))?.inInbox : undefined;
         const thread = yield* store.refreshThreadAggregate(id);
         if (thread === null) continue;
         if (
@@ -571,7 +630,8 @@ const make = Effect.gen(function* () {
           latest.outgoing &&
           thread.state === "settled" &&
           thread.settledReason === "replied" &&
-          QUESTION.test(stripQuoted(latest.body))
+          thread.settledBy === "user" &&
+          asksQuestion(stripQuoted(latest.body))
         ) {
           yield* store.patchThread(id, {
             state: "working",
@@ -588,20 +648,27 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const removeEmptyThreads: MailEngine["Service"]["removeEmptyThreads"] = Effect.fn(
-    "MailEngine.removeEmptyThreads",
-  )(function* (accountId) {
-    const emptied = yield* store.deleteEmptyThreads(accountId);
-    if (emptied.length > 0) yield* publishRemoved(emptied);
+  const finishMailboxReset: MailEngine["Service"]["finishMailboxReset"] = Effect.fn(
+    "MailEngine.finishMailboxReset",
+  )(function* (accountId, mailbox) {
+    yield* publishRemoved(yield* store.finishMailboxReset(accountId, mailbox));
   });
 
   const markRemoved: MailEngine["Service"]["markRemoved"] = Effect.fn("MailEngine.markRemoved")(
     function* (context, uids) {
-      const threads = yield* store.markRemoved(context.accountId, context.mailbox, uids);
-      for (const id of threads) yield* store.refreshThreadAggregate(id);
-      const emptied = yield* store.deleteEmptyThreads(context.accountId);
-      yield* publishThreads(threads.filter((id) => !emptied.includes(id)));
-      if (emptied.length > 0) yield* publishRemoved(emptied);
+      if (uids.length === 0) return;
+      const { changed, removed } = yield* store.transaction(
+        Effect.gen(function* () {
+          const affected = yield* store.markRemoved(context.accountId, context.mailbox, uids);
+          const removed = yield* store.deleteExpungedThreads(affected);
+          const removedSet = new Set(removed);
+          const changed = affected.filter((id) => !removedSet.has(id));
+          for (const id of changed) yield* store.refreshThreadAggregate(id);
+          return { changed, removed };
+        }),
+      );
+      yield* publishThreads(changed);
+      yield* publishRemoved(removed);
     },
   );
 
@@ -609,24 +676,21 @@ const make = Effect.gen(function* () {
     ingest,
     applyFlags,
     markRemoved,
-    removeEmptyThreads,
+    finishMailboxReset,
     afterBodies,
     publishThreads,
     publishRemoved,
     publishStatus,
+    refreshChatUsage,
     status,
     rows,
+    arrivals: Stream.fromPubSub(arrivals),
     subscribe,
     settings,
     putSettings,
     usage,
     recap,
     triageSignal,
-    providerTokens: Effect.fn("MailEngine.providerTokens")((tokens) =>
-      Effect.sync(() => {
-        providerTokensThisWeek = tokens;
-      }),
-    ),
   });
 });
 

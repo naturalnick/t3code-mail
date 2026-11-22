@@ -684,6 +684,7 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
       options: [{ id: "thinking", value: false }],
     };
     const calls: ModelSelection[] = [];
+    const mailDestinations: ProviderInstanceId[] = [];
     const instances: ProviderInstance[] = [primary, fallback].map((instanceId) => {
       const driver = ProviderDriverKind.make(instanceId === primary ? "codex" : "claudeAgent");
       const snapshot: ServerProvider = {
@@ -752,8 +753,16 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
           generateBranchName: () => Effect.die("unused"),
           generateReviewGuide: () => Effect.die("unused"),
           generateTranscriptionPostProcessing: () => Effect.die("unused"),
-          generateMailTriage: () => Effect.die("unused"),
-          generateMailNotes: () => Effect.die("unused"),
+          generateMailTriage: () =>
+            Effect.sync(() => {
+              mailDestinations.push(instanceId);
+              return { verdicts: [] };
+            }),
+          generateMailNotes: () =>
+            Effect.sync(() => {
+              mailDestinations.push(instanceId);
+              return { notes: "" };
+            }),
           generateThreadTitle: (input) =>
             Effect.sync(() => {
               calls.push(input.modelSelection);
@@ -793,6 +802,14 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
           ProviderInstallationGate.layer,
         ),
       ),
+    );
+    const mailInput = { cwd: "/tmp", modelSelection: selection, prompt: "Private mail" };
+    const triage = yield* service.generateMailTriage(mailInput).pipe(Effect.result);
+    const notes = yield* service.generateMailNotes(mailInput).pipe(Effect.result);
+    const mailReady = primaryState === "ready" || primaryState === "pending";
+    expect(mailDestinations).toEqual(mailReady ? [primary, primary] : []);
+    expect([triage._tag, notes._tag]).toEqual(
+      mailReady ? ["Success", "Success"] : ["Failure", "Failure"],
     );
     const generated = yield* service
       .generateThreadTitle({

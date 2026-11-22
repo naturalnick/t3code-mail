@@ -41,8 +41,8 @@ describe("trust ramp", () => {
     expect(approve(demoted, 3).trust).toBe("auto");
   });
 
-  it("keeps never-show through a rejection", () => {
-    expect(recordRejection(setLevel(sender(), "never")).trust).toBe("never");
+  it("demotes a never-show sender when the user keeps their mail", () => {
+    expect(recordRejection(setLevel(sender(), "never")).trust).toBe("suggest");
   });
 
   it.each([
@@ -125,36 +125,30 @@ describe("trust ramp", () => {
   });
 
   it("undoes one action's effect and keeps what happened after it", () => {
-    const entry = (before: TrustRecord, after: TrustRecord | null) => ({
-      key: before.key,
-      kind: before.kind,
-      before,
-      after,
-    });
-    const two = approve(sender(), 2);
-    const graduated = approve(two, 1);
-    const later = approve(graduated, 2);
-    expect(reverseTrust("approve", later, entry(two, graduated))).toMatchObject({
+    const clock = { revision: 3, setting: 0, reset: 0 };
+    const graduated = approve(sender(), 3);
+    expect(reverseTrust("approve", approve(graduated, 2), clock, clock)).toMatchObject({
       trust: "suggest",
       approvals: 4,
-      streak: 4,
+      streak: 0,
     });
-
     const kept = recordRejection(graduated);
-    expect(reverseTrust("reject", approve(kept, 1), entry(graduated, kept))).toMatchObject({
+    expect(reverseTrust("reject", recordRejection(kept), clock, clock)).toMatchObject({
+      trust: "suggest",
+      rejections: 1,
+      streak: 0,
+    });
+    const explicit = setLevel(kept, "auto");
+    expect(reverseTrust("reject", explicit, clock, { ...clock, setting: 1 })).toMatchObject({
       trust: "auto",
+      explicit: true,
       rejections: 0,
-      streak: 4,
     });
-
-    const never = setLevel(two, "never");
-    expect(reverseTrust("level", never, entry(two, never))).toMatchObject({ trust: "suggest" });
-    expect(reverseTrust("level", setLevel(never, "auto"), entry(two, never))).toMatchObject({
-      trust: "auto",
-    });
-    expect(reverseTrust("ai_settle", graduated, entry(graduated, graduated))).toMatchObject({
+    expect(reverseTrust("approve", graduated, clock, { ...clock, reset: 1 })).toEqual(graduated);
+    expect(reverseTrust("ai_settle", graduated, clock, clock)).toMatchObject({
       trust: "suggest",
       streak: 0,
+      rejections: 1,
     });
   });
 

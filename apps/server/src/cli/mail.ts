@@ -44,10 +44,15 @@ const ReadResult = Schema.Struct({
     }),
   ),
   drafts: Schema.Array(
-    Schema.Struct({ draftId: MailDraftId, body: Schema.String, status: Schema.String }),
+    Schema.Struct({
+      draftId: MailDraftId,
+      revision: Schema.Int,
+      body: Schema.String,
+      status: Schema.String,
+    }),
   ),
 });
-const DraftResult = Schema.Struct({ draftId: MailDraftId });
+const DraftResult = Schema.Struct({ draftId: MailDraftId, revision: Schema.Int });
 const TriageResult = Schema.Struct({ changed: Schema.Int });
 
 const threadIdsArgument = Argument.String("thread-id").pipe(
@@ -120,7 +125,9 @@ const showCommand = Command.make("show", {
           }
         }
         for (const draft of result.drafts) {
-          yield* Console.log(`\nDraft ${draft.draftId} (${draft.status}):\n${draft.body}`);
+          yield* Console.log(
+            `\nDraft ${draft.draftId} (revision ${draft.revision}, ${draft.status}):\n${draft.body}`,
+          );
         }
       }),
     ),
@@ -133,6 +140,10 @@ const draftCommand = Command.make("draft", {
   body: Argument.String("body").pipe(Argument.withDescription("The reply text, or - for stdin.")),
   draftId: Flag.String("draft-id").pipe(
     Flag.withDescription("Revise this draft instead of starting one."),
+    Flag.optional,
+  ),
+  expectedRevision: Flag.Int("expected-revision").pipe(
+    Flag.withDescription("Revision shown by mail show for the draft being edited."),
     Flag.optional,
   ),
   json: jsonFlag,
@@ -151,11 +162,19 @@ const draftCommand = Command.make("draft", {
         if (body.trim().length === 0) {
           return yield* new ThreadUsageError({ detail: "The draft is empty." });
         }
+        if (Option.isSome(flags.draftId) !== Option.isSome(flags.expectedRevision)) {
+          return yield* new ThreadUsageError({
+            detail: "Use --draft-id and --expected-revision together.",
+          });
+        }
         const result = yield* tools.call(
           "t3_mail_draft",
           {
             threadId: flags.threadId,
             body,
+            ...(Option.isSome(flags.expectedRevision)
+              ? { expectedRevision: flags.expectedRevision.value }
+              : {}),
             ...Option.match(flags.draftId, {
               onNone: () => ({}),
               onSome: (draftId) => ({ draftId }),

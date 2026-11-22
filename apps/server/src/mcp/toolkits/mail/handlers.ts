@@ -86,36 +86,43 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
         })),
         drafts: detail.drafts
           .filter((draft) => draft.status !== "sent")
-          .map((draft) => ({ draftId: draft.id, body: draft.body, status: draft.status })),
+          .map((draft) => ({
+            draftId: draft.id,
+            revision: draft.revision,
+            body: draft.body,
+            status: draft.status,
+          })),
         related: related.map((entry) => row(entry.thread)),
       };
     }),
   ),
-  t3_mail_draft: McpToolAccess.writes(({ threadId, body, draftId, to, cc, subject }) =>
-    Effect.gen(function* () {
-      const mail = yield* MailService.MailService;
-      const detail = yield* failure(mail.getThread(threadId));
-      const existing = detail.drafts.find((draft) => draft.id === draftId);
-      const lastIncoming = detail.messages.findLast((message) => !message.outgoing);
-      const subjectLine = detail.thread.subject;
-      const draft = yield* failure(
-        mail.saveDraft(
-          {
-            threadId,
-            ...(draftId === undefined ? {} : { draftId }),
-            to: to ?? existing?.to ?? (lastIncoming ? [lastIncoming.from.address] : []),
-            cc: cc ?? existing?.cc ?? [],
-            subject:
-              subject ??
-              existing?.subject ??
-              (/^re:/i.test(subjectLine) ? subjectLine : `Re: ${subjectLine}`),
-            body,
-          },
-          yield* agentActor,
-        ),
-      );
-      return { draftId: draft.id };
-    }),
+  t3_mail_draft: McpToolAccess.writes(
+    ({ threadId, body, draftId, expectedRevision, to, cc, subject }) =>
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const detail = yield* failure(mail.getThread(threadId));
+        const existing = detail.drafts.find((draft) => draft.id === draftId);
+        const lastIncoming = detail.messages.findLast((message) => !message.outgoing);
+        const subjectLine = detail.thread.subject;
+        const draft = yield* failure(
+          mail.saveDraft(
+            {
+              threadId,
+              ...(draftId === undefined ? {} : { draftId }),
+              ...(expectedRevision === undefined ? {} : { expectedRevision }),
+              to: to ?? existing?.to ?? (lastIncoming ? [lastIncoming.from.address] : []),
+              cc: cc ?? existing?.cc ?? [],
+              subject:
+                subject ??
+                existing?.subject ??
+                (/^re:/i.test(subjectLine) ? subjectLine : `Re: ${subjectLine}`),
+              body,
+            },
+            yield* agentActor,
+          ),
+        );
+        return { draftId: draft.id, revision: draft.revision };
+      }),
   ),
   t3_mail_triage: McpToolAccess.writes(({ threadIds, action, reason }) =>
     Effect.gen(function* () {

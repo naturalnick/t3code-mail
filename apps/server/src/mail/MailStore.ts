@@ -26,11 +26,29 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlError from "effect/sql/SqlError";
+import type * as Statement from "effect/sql/Statement";
 
 import * as ServerConfig from "../config.ts";
-import type { TrustRecord, TrustUndo } from "./mailTrust.ts";
+import type { TrustClock, TrustRecord, TrustUndo } from "./mailTrust.ts";
+
+const workflowColumns = [
+  "state",
+  "state_at",
+  "working_reason",
+  "settled_reason",
+  "settled_by",
+  "snoozed_until",
+  "snooze_on_reply",
+  "suggestion_reason",
+  "suggestion_confidence",
+  "nudge",
+  "last_message_at",
+  "message_count",
+  "incoming_count",
+];
 
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
 const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -210,6 +228,75 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // Trigram matches any 3+ character substring, so an exact phrase works without a word index.
     `CREATE VIRTUAL TABLE mail_search USING fts5(subject, sender, body, tokenize = 'trigram remove_diacritics 1')`,
   ],
+  [
+    `CREATE TABLE mail_reset_messages (
+      account_id TEXT NOT NULL, mailbox TEXT NOT NULL, thread_id TEXT NOT NULL, message_id TEXT NOT NULL,
+      PRIMARY KEY (account_id, mailbox, thread_id, message_id)
+    ) WITHOUT ROWID`,
+    `CREATE INDEX mail_reset_messages_message_id ON mail_reset_messages (account_id, message_id)`,
+    `CREATE INDEX mail_reset_messages_thread ON mail_reset_messages (thread_id)`,
+  ],
+  [
+    `ALTER TABLE mail_drafts ADD COLUMN edit_sender TEXT`,
+    `CREATE INDEX mail_drafts_edit_sender ON mail_drafts (account_id, edit_sender, sent_at DESC)
+      WHERE edit_sender IS NOT NULL`,
+    `INSERT INTO mail_kv (key, value) SELECT 'local-sent-uid', COALESCE(MIN(uid), 0)
+      FROM mail_messages WHERE mailbox = '__local' AND uid < 0`,
+  ],
+  [
+    `ALTER TABLE mail_messages ADD COLUMN mirror_origin TEXT`,
+    `ALTER TABLE mail_messages ADD COLUMN moved_uid_validity TEXT`,
+    `CREATE INDEX mail_ops_account_kind ON mail_ops(account_id, kind)`,
+  ],
+  [
+    `ALTER TABLE mail_threads ADD COLUMN workflow_version TEXT`,
+    `ALTER TABLE mail_threads ADD COLUMN pin_version TEXT`,
+    ...(
+      [
+        ["workflow_version", workflowColumns],
+        ["pin_version", ["pinned_at"]],
+      ] as const
+    ).map(([version, fields]) => {
+      return `CREATE TRIGGER bump_${version} AFTER UPDATE OF ${fields.join(", ")} ON mail_threads
+        WHEN ${fields.map((field) => `NEW.${field} IS NOT OLD.${field}`).join(" OR ")}
+        BEGIN UPDATE mail_threads SET ${version} = hex(randomblob(16)) WHERE id = NEW.id; END`;
+    }),
+    `ALTER TABLE mail_messages ADD COLUMN read_action TEXT`,
+    `CREATE INDEX mail_messages_read_action ON mail_messages(read_action) WHERE read_action IS NOT NULL`,
+    `CREATE TRIGGER invalidate_read_action AFTER UPDATE OF seen, removed ON mail_messages
+      WHEN (OLD.seen IS NOT NEW.seen OR OLD.removed IS NOT NEW.removed) AND OLD.read_action = NEW.read_action
+      BEGIN UPDATE mail_messages SET read_action = NULL WHERE id = NEW.id; END`,
+    `CREATE TABLE mail_trust_clock (key TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+      setting INTEGER NOT NULL, reset INTEGER NOT NULL)`,
+    // Original snapshots lack the resulting state. Their history is retained for display.
+    `UPDATE mail_actions SET undo_json = CASE WHEN json_type(undo_json, '$.draftId') = 'text'
+      THEN json_object('draft', json_object('id', json_extract(undo_json, '$.draftId'), 'revision', 0, 'before', NULL))
+      ELSE NULL END WHERE undo_json IS NOT NULL`,
+    `CREATE VIEW mail_action_history AS
+      SELECT a.id, a.at, a.actor, a.actor_label, a.kind, a.thread_id, a.reason, a.undone_at,
+        CASE WHEN
+          (a.thread_id IS NOT NULL AND t.id IS NULL)
+          OR (json_type(a.undo_json, '$.thread') IS NOT NULL AND
+            json_extract(a.undo_json, '$.thread.version') IS NOT CASE
+              WHEN json_type(a.undo_json, '$.thread.after.pinnedAt') IS NOT NULL THEN t.pin_version
+              ELSE t.workflow_version END)
+          OR (json_type(a.undo_json, '$.draft') IS NOT NULL AND
+            (d.status IS NOT 'draft' OR d.revision IS NOT json_extract(a.undo_json, '$.draft.revision')))
+          OR (json_extract(a.undo_json, '$.trust.effect') = 'level' AND
+            c.revision IS NOT json_extract(a.undo_json, '$.trust.entry.clock.revision'))
+          OR (json_type(a.undo_json, '$.read') IS NOT NULL AND
+            json_extract(a.undo_json, '$.read.count') <> (SELECT count(*) FROM mail_messages m
+              WHERE m.read_action = json_extract(a.undo_json, '$.read.token') AND m.removed = 0))
+        THEN NULL ELSE a.undo_json END AS undo_json
+      FROM mail_actions a LEFT JOIN mail_threads t ON t.id = a.thread_id
+      LEFT JOIN mail_drafts d ON d.id = json_extract(a.undo_json, '$.draft.id')
+      LEFT JOIN mail_trust_clock c ON c.key = json_extract(a.undo_json, '$.trust.entry.key')`,
+  ],
+  [
+    // Older file-backed accounts may have a keychain copy from a failed write or migration.
+    `ALTER TABLE mail_accounts ADD COLUMN keychain_possible INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE mail_accounts ADD COLUMN credential_pending INTEGER NOT NULL DEFAULT 0`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -261,6 +348,8 @@ export interface AccountRow {
   readonly smtpTls: boolean;
   readonly username: string;
   readonly credentialStore: "keychain" | "file";
+  readonly keychainPossible: boolean;
+  readonly credentialPending: boolean;
   readonly status: MailAccountStatus;
   readonly statusDetail: string | null;
   readonly lastSyncAt: string | null;
@@ -287,6 +376,8 @@ export interface ThreadVerdict {
 }
 
 export interface ThreadRecord {
+  readonly workflowVersion: string | null;
+  readonly pinVersion: string | null;
   readonly id: MailThreadId;
   readonly accountId: MailAccountId;
   readonly subject: string;
@@ -342,6 +433,24 @@ export type ThreadStatePatch = Partial<
   >
 >;
 
+export const MessageTarget = Schema.Struct({ id: Schema.Int, identity: Schema.String });
+export type MessageTarget = typeof MessageTarget.Type;
+
+export interface MirrorUndo {
+  readonly kind: "archive" | "unarchive";
+  readonly targets: ReadonlyArray<MessageTarget>;
+}
+
+export interface ThreadChange {
+  readonly before: ThreadStatePatch;
+  readonly after: ThreadStatePatch;
+  readonly version: string;
+}
+type DraftContent = Pick<
+  DraftRecord,
+  "body" | "to" | "cc" | "subject" | "status" | "error" | "messageId"
+>;
+
 export interface ActionRecord {
   readonly id: number;
   readonly at: string;
@@ -351,10 +460,20 @@ export interface ActionRecord {
   readonly threadId: MailThreadId | null;
   readonly reason: string | null;
   readonly undo: {
-    readonly threadPatch?: ThreadStatePatch;
+    readonly thread?: ThreadChange;
     readonly trust?: TrustUndo;
-    /** A draft an agent left; undo discards it unless it was sent. */
-    readonly draftId?: MailDraftId;
+    readonly mirror?: MirrorUndo;
+    readonly discardedDraft?: DraftRecord;
+    readonly draft?: {
+      readonly id: MailDraftId;
+      readonly revision: number;
+      readonly before: Partial<DraftContent> | null;
+    };
+    readonly read?: {
+      readonly token: string;
+      readonly count: number;
+      readonly targets: ReadonlyArray<MessageTarget>;
+    };
   } | null;
   readonly undoneAt: string | null;
 }
@@ -394,6 +513,8 @@ const toAccount = (row: Row): AccountRow => ({
   smtpTls: bool(row.smtp_tls),
   username: str(row.username),
   credentialStore: str(row.credential_store) as "keychain" | "file",
+  keychainPossible: bool(row.keychain_possible),
+  credentialPending: bool(row.credential_pending),
   status: str(row.status) as MailAccountStatus,
   statusDetail: strOrNull(row.status_detail),
   lastSyncAt: strOrNull(row.last_sync_at),
@@ -402,6 +523,8 @@ const toAccount = (row: Row): AccountRow => ({
 });
 
 const toThread = (row: Row): ThreadRecord => ({
+  workflowVersion: strOrNull(row.workflow_version),
+  pinVersion: strOrNull(row.pin_version),
   id: MailThreadId.make(str(row.id)),
   accountId: MailAccountId.make(str(row.account_id)),
   subject: str(row.subject),
@@ -624,6 +747,12 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const setKv = (key: string, value: string) =>
     sql`INSERT INTO mail_kv (key, value) VALUES (${key}, ${value})
         ON CONFLICT (key) DO UPDATE SET value = excluded.value`.pipe(Effect.asVoid);
+  const nextLocalSentUid = sql<{
+    uid: number;
+  }>`UPDATE mail_kv SET value = CAST(value AS INTEGER) - 1
+      WHERE key = 'local-sent-uid' RETURNING CAST(value AS INTEGER) AS uid`.pipe(
+    Effect.map((rows) => rows[0]!.uid),
+  );
 
   const listAccounts = sql<Row>`SELECT * FROM mail_accounts ORDER BY created_at`.pipe(
     Effect.map((rows) => rows.map(toAccount)),
@@ -635,12 +764,13 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const insertAccount = (account: AccountRow) =>
     sql`INSERT INTO mail_accounts (id, email, display_name, provider, imap_host, imap_port, imap_tls,
           smtp_host, smtp_port, smtp_tls, username, credential_store, status, status_detail,
-          last_sync_at, backfill_paused_until, created_at)
+          last_sync_at, backfill_paused_until, created_at, keychain_possible, credential_pending)
         VALUES (${account.id}, ${account.email}, ${account.displayName}, ${account.provider},
           ${account.imapHost}, ${account.imapPort}, ${account.imapTls ? 1 : 0}, ${account.smtpHost},
           ${account.smtpPort}, ${account.smtpTls ? 1 : 0}, ${account.username},
           ${account.credentialStore}, ${account.status}, ${account.statusDetail},
-          ${account.lastSyncAt}, ${account.backfillPausedUntil}, ${account.createdAt})`.pipe(
+          ${account.lastSyncAt}, ${account.backfillPausedUntil}, ${account.createdAt},
+          ${account.keychainPossible ? 1 : 0}, ${account.credentialPending ? 1 : 0})`.pipe(
       Effect.asVoid,
     );
   const updateAccount = (
@@ -654,6 +784,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         | "backfillPausedUntil"
         | "displayName"
         | "credentialStore"
+        | "keychainPossible"
+        | "credentialPending"
       >
     >,
   ) => {
@@ -664,6 +796,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       backfillPausedUntil: "backfill_paused_until",
       displayName: "display_name",
       credentialStore: "credential_store",
+      keychainPossible: "keychain_possible",
+      credentialPending: "credential_pending",
     };
     const entries = Object.entries(patch).filter(([, value]) => value !== undefined);
     if (entries.length === 0) return Effect.void;
@@ -681,9 +815,32 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         yield* sql`DELETE FROM mail_search WHERE rowid IN (SELECT id FROM mail_messages WHERE account_id = ${id})`;
         yield* sql`DELETE FROM mail_messages WHERE account_id = ${id}`;
         yield* sql`DELETE FROM mail_drafts WHERE account_id = ${id}`;
-        yield* sql`DELETE FROM mail_actions WHERE thread_id IN (SELECT id FROM mail_threads WHERE account_id = ${id})`;
+        // Thread IDs retain the account prefix even after their last message was expunged.
+        const prefix = `${id}:`;
+        // Trust is shared. Keep a key when another inbox uses it or a global setting names it.
+        const exclusiveKeys = sql`(
+          WITH sources(key, thread_id) AS (
+            SELECT 'sender:' || lower(from_address), id FROM mail_threads
+            UNION ALL SELECT 'category:' || category, id FROM mail_threads WHERE category IS NOT NULL
+            UNION ALL SELECT json_extract(entry.value, '$.key'), action.thread_id
+              FROM mail_actions AS action, json_each(action.undo_json, '$.trust.entries') AS entry
+            UNION ALL SELECT json_extract(undo_json, '$.trust.entry.key'), thread_id FROM mail_actions
+              WHERE json_type(undo_json, '$.trust.entry') = 'object'
+            UNION ALL SELECT actor_label, NULL FROM mail_actions WHERE kind = 'trust' AND thread_id IS NULL
+          )
+          SELECT key FROM sources GROUP BY key HAVING min(coalesce(instr(thread_id, ${prefix}), 0) = 1)
+        )`;
+        yield* sql`DELETE FROM mail_trust_clock WHERE key IN ${exclusiveKeys}`;
+        yield* sql`DELETE FROM mail_trust WHERE key IN ${exclusiveKeys}`;
+        yield* sql`DELETE FROM mail_actions WHERE instr(thread_id, ${prefix}) = 1`;
+        yield* sql`DELETE FROM mail_contacts WHERE account_id = ${id}`;
+        // Legacy reply examples have no ownership information.
+        yield* sql`DELETE FROM mail_kv WHERE key = 'draft-edits' OR key IN (
+          SELECT 'chat-context:' || chat_thread_id FROM mail_threads WHERE account_id = ${id}
+        )`;
         yield* sql`DELETE FROM mail_threads WHERE account_id = ${id}`;
         yield* sql`DELETE FROM mail_mailboxes WHERE account_id = ${id}`;
+        yield* sql`DELETE FROM mail_reset_messages WHERE account_id = ${id}`;
         yield* sql`DELETE FROM mail_ops WHERE account_id = ${id}`;
         yield* sql`DELETE FROM mail_accounts WHERE id = ${id}`;
       }),
@@ -727,21 +884,31 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           highest_modseq = excluded.highest_modseq, backfill_done = excluded.backfill_done`.pipe(
       Effect.asVoid,
     );
-  /** UIDVALIDITY changed: every cached UID of the mailbox is meaningless. */
+  // Message-IDs still identify replies that backfill reaches before their parents in the new UID space.
   const resetMailbox = (accountId: MailAccountId, path: string) =>
     sql.withTransaction(
       Effect.gen(function* () {
+        yield* sql`INSERT OR IGNORE INTO mail_reset_messages (account_id, mailbox, thread_id, message_id)
+          SELECT account_id, mailbox, thread_id, COALESCE(message_id, '') FROM mail_messages
+          WHERE account_id = ${accountId} AND mailbox = ${path} AND removed = 0`;
         yield* sql`DELETE FROM mail_search WHERE rowid IN (SELECT id FROM mail_messages WHERE account_id = ${accountId} AND mailbox = ${path})`;
         yield* sql`DELETE FROM mail_messages WHERE account_id = ${accountId} AND mailbox = ${path}`;
         yield* sql`DELETE FROM mail_mailboxes WHERE account_id = ${accountId} AND path = ${path}`;
       }),
     );
 
-  const findThreadIdByMessageIds = (accountId: MailAccountId, messageIds: ReadonlyArray<string>) =>
+  const findThreadIdByMessageIds = (
+    accountId: MailAccountId,
+    messageIds: ReadonlyArray<string>,
+    ownId: string | null,
+  ) =>
     messageIds.length === 0
       ? Effect.succeed(null)
       : sql<{ thread_id: string }>`SELECT thread_id FROM mail_messages
-          WHERE account_id = ${accountId} AND message_id IN ${sql.in(messageIds)} LIMIT 1`.pipe(
+          WHERE account_id = ${accountId} AND message_id IN ${sql.in(messageIds)}
+          UNION ALL SELECT thread_id FROM mail_reset_messages
+          WHERE account_id = ${accountId} AND message_id IN ${sql.in(ownId ? [ownId, ...messageIds] : messageIds)}
+          LIMIT 1`.pipe(
           Effect.map((rows) => (rows[0] ? MailThreadId.make(rows[0].thread_id) : null)),
         );
 
@@ -751,7 +918,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         WHERE account_id = ${message.accountId} AND mailbox = ${message.mailbox} AND uid = ${message.uid}`;
     if (existing[0]) {
       yield* sql`UPDATE mail_messages SET seen = ${message.seen ? 1 : 0},
-            labels = ${message.labels === null ? null : toJson(message.labels)},
+            labels = ${message.labels === null ? null : toJson([...message.labels].sort())},
             in_inbox = ${message.inInbox ? 1 : 0}, removed = 0
           WHERE id = ${existing[0].id}`;
       return { id: num(existing[0].id), inserted: false };
@@ -767,7 +934,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     if (message.messageId !== null && message.outgoing) {
       const local = yield* sql<{ id: number }>`UPDATE mail_messages
           SET mailbox = ${message.mailbox}, uid = ${message.uid},
-            labels = ${message.labels === null ? null : toJson(message.labels)},
+            labels = ${message.labels === null ? null : toJson([...message.labels].sort())},
             in_inbox = ${message.inInbox ? 1 : 0}
           WHERE account_id = ${message.accountId} AND mailbox = '__local'
             AND message_id = ${message.messageId}
@@ -781,7 +948,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           in_reply_to, references_json, seen, outgoing, size, attachments_json, list_unsubscribe,
           list_id, precedence, auto_submitted, calendar, text_part, body, body_state)
         VALUES (${message.accountId}, ${message.mailbox}, ${message.uid}, ${message.messageId},
-          ${message.threadId}, ${message.labels === null ? null : toJson(message.labels)},
+          ${message.threadId}, ${message.labels === null ? null : toJson([...message.labels].sort())},
           ${message.inInbox ? 1 : 0}, ${message.from.name}, ${message.from.address},
           ${toJson(message.to)}, ${toJson(message.cc)}, ${message.subject},
           ${message.date}, ${message.inReplyTo}, ${toJson(message.references)},
@@ -824,21 +991,42 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const updateFlags = (
     accountId: MailAccountId,
     mailbox: string,
-    uid: number,
-    patch: {
-      readonly seen?: boolean;
-      readonly labels?: ReadonlyArray<string>;
+    changes: ReadonlyArray<{
+      readonly uid: number;
+      readonly seen: boolean;
+      readonly labels: ReadonlyArray<string> | null;
       readonly inInbox?: boolean;
-    },
-  ) =>
-    sql<{ thread_id: string }>`UPDATE mail_messages SET
-        seen = COALESCE(${patch.seen === undefined ? null : patch.seen ? 1 : 0}, seen),
-        labels = COALESCE(${patch.labels === undefined ? null : toJson(patch.labels)}, labels),
-        in_inbox = COALESCE(${patch.inInbox === undefined ? null : patch.inInbox ? 1 : 0}, in_inbox)
-      WHERE account_id = ${accountId} AND mailbox = ${mailbox} AND uid = ${uid}
+    }>,
+  ) => {
+    if (!changes.length) return Effect.succeed([] as ReadonlyArray<MailThreadId>);
+    const flags = changes.map((change) => ({
+      ...change,
+      labels: change.labels === null ? null : [...change.labels].sort(),
+    }));
+    // A server poll may finish before the user's queued read or unread reaches the server.
+    return sql<{ thread_id: string }>`WITH pending AS MATERIALIZED (
+        SELECT json_extract(t.value, '$.id') AS id, json_extract(t.value, '$.identity') AS identity
+        FROM mail_ops o, json_each(o.payload, '$.targets') t
+        WHERE o.account_id = ${accountId} AND o.kind = 'seen'
+      ), desired AS MATERIALIZED (
+        SELECT m.id,
+          CASE WHEN EXISTS (SELECT 1 FROM pending WHERE pending.id = m.id
+            AND pending.identity = COALESCE(m.mirror_origin, json_array(m.mailbox, b.uid_validity, m.uid)))
+            THEN m.seen ELSE json_extract(f.value, '$.seen') END AS seen,
+          COALESCE(json_extract(f.value, '$.labels'), m.labels) AS labels,
+          COALESCE(json_extract(f.value, '$.inInbox'), m.in_inbox) AS in_inbox
+        FROM json_each(${toJson(flags)}) f
+        CROSS JOIN mail_messages m ON m.account_id = ${accountId} AND m.mailbox = ${mailbox}
+          AND m.uid = json_extract(f.value, '$.uid') AND m.removed = 0
+        LEFT JOIN mail_mailboxes b ON b.account_id = m.account_id AND b.path = m.mailbox
+      )
+      UPDATE mail_messages AS m SET seen = d.seen, labels = d.labels, in_inbox = d.in_inbox
+      FROM desired d WHERE m.id = d.id
+        AND (m.seen != d.seen OR m.labels IS NOT d.labels OR m.in_inbox != d.in_inbox)
       RETURNING thread_id`.pipe(
-      Effect.map((rows) => (rows[0] ? MailThreadId.make(rows[0].thread_id) : null)),
+      Effect.map((rows) => [...new Set(rows.map((row) => MailThreadId.make(row.thread_id)))]),
     );
+  };
 
   const markRemoved = (accountId: MailAccountId, mailbox: string, uids: ReadonlyArray<number>) =>
     uids.length === 0
@@ -849,9 +1037,24 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           Effect.map((rows) => [...new Set(rows.map((row) => MailThreadId.make(row.thread_id)))]),
         );
 
-  const moveMessage = (id: number, mailbox: string, uid: number, inInbox: boolean) =>
-    sql`UPDATE mail_messages SET mailbox = ${mailbox}, uid = ${uid}, in_inbox = ${inInbox ? 1 : 0}
-      WHERE id = ${id}`.pipe(Effect.asVoid);
+  const moveMessage = (
+    accountId: MailAccountId,
+    from: MessageTarget & {
+      readonly mailbox: string;
+      readonly uid: number;
+      readonly uidValidity: string;
+    },
+    to: { readonly mailbox: string; readonly uid: number; readonly uidValidity: string },
+    inInbox: boolean,
+  ) =>
+    sql`UPDATE mail_messages SET mailbox = ${to.mailbox}, uid = ${to.uid},
+      mirror_origin = ${from.identity}, moved_uid_validity = ${to.uidValidity},
+      in_inbox = ${Number(inInbox)}
+      WHERE id = ${from.id} AND account_id = ${accountId} AND mailbox = ${from.mailbox} AND uid = ${from.uid}
+        AND COALESCE(moved_uid_validity, (SELECT uid_validity FROM mail_mailboxes
+          WHERE account_id = ${accountId} AND path = ${from.mailbox})) = ${from.uidValidity}`.pipe(
+      Effect.asVoid,
+    );
 
   const knownUids = (accountId: MailAccountId, mailbox: string, minUid: number) =>
     sql<{ uid: number }>`SELECT uid FROM mail_messages WHERE account_id = ${accountId}
@@ -859,9 +1062,15 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       Effect.map((rows) => rows.map((row) => num(row.uid))),
     );
 
-  const threadMessages = (threadId: MailThreadId) =>
-    sql<Row>`SELECT * FROM mail_messages WHERE thread_id = ${threadId} AND removed = 0
-      ORDER BY date ASC, id ASC`.pipe(
+  const knownUidsAmong = (accountId: MailAccountId, mailbox: string, uids: ReadonlyArray<number>) =>
+    sql<{ uid: number }>`SELECT uid FROM mail_messages WHERE account_id = ${accountId}
+      AND mailbox = ${mailbox} AND removed = 0 AND uid IN ${sql.in(uids)}`.pipe(
+      Effect.map((rows) => new Set(rows.map((row) => row.uid))),
+    );
+
+  const threadMessages = (threadId: MailThreadId, limit?: number) =>
+    sql<Row>`SELECT * FROM (SELECT * FROM mail_messages WHERE thread_id = ${threadId} AND removed = 0
+      ORDER BY date DESC, id DESC LIMIT ${limit ?? -1}) ORDER BY date ASC, id ASC`.pipe(
       Effect.map((rows) => {
         // Gmail lists one message under several mailboxes only in rare setups; show it once.
         const seen = new Set<string>();
@@ -874,14 +1083,47 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       }),
     );
 
-  const messageUidsForThread = (threadId: MailThreadId) =>
-    sql<{
-      id: number;
-      mailbox: string;
-      uid: number;
-      in_inbox: number;
-    }>`SELECT id, mailbox, uid, in_inbox
-      FROM mail_messages WHERE thread_id = ${threadId} AND removed = 0 AND mailbox != '__local'`;
+  // COPYUID is the only proof that a destination UID still names the originally selected message.
+  const messageTargets = (threadId: MailThreadId, ids?: ReadonlyArray<number>) =>
+    sql<
+      MessageTarget & {
+        accountId: MailAccountId;
+        mailbox: string;
+        uid: number;
+        uidValidity: string;
+        inInbox: number;
+        role: string | null;
+      }
+    >`SELECT m.id, m.account_id AS accountId, m.mailbox, m.uid, m.in_inbox AS inInbox, b.role,
+      COALESCE(m.moved_uid_validity, b.uid_validity) AS uidValidity,
+      COALESCE(m.mirror_origin, json_array(m.mailbox, b.uid_validity, m.uid)) AS identity
+      FROM mail_messages m LEFT JOIN mail_mailboxes b ON b.account_id = m.account_id AND b.path = m.mailbox
+      WHERE m.thread_id = ${threadId} AND m.removed = 0 AND m.mailbox != '__local'
+        AND COALESCE(m.moved_uid_validity, b.uid_validity) IS NOT NULL
+        ${ids === undefined ? sql`` : sql`AND m.id IN (SELECT value FROM json_each(${toJson(ids)}))`}`;
+
+  const mirrorTargets = Effect.fn("MailStore.mirrorTargets")(function* (
+    accountId: MailAccountId,
+    threadId: MailThreadId,
+    kind: MirrorUndo["kind"],
+  ) {
+    const rows = yield* messageTargets(threadId);
+    // An offline unsettle can precede delivery of the archive it reverses.
+    const pending = yield* sql<{ identity: string; kind: MirrorUndo["kind"] }>`
+      SELECT json_extract(t.value, '$.identity') AS identity, o.kind
+      FROM mail_ops o, json_each(o.payload, '$.targets') t
+      WHERE o.account_id = ${accountId} AND o.kind IN ('archive', 'unarchive')
+        AND json_extract(o.payload, '$.threadId') = ${threadId}
+      ORDER BY o.id`;
+    const projected = new Map(pending.map((op) => [op.identity, op.kind === "unarchive"]));
+    return rows
+      .filter(
+        (row) =>
+          row.role !== "sent" &&
+          (projected.get(row.identity) ?? Boolean(row.inInbox)) === (kind === "archive"),
+      )
+      .map(({ id, identity }) => ({ id, identity }));
+  });
 
   const getThread = (id: MailThreadId) =>
     sql<Row>`SELECT * FROM mail_threads WHERE id = ${id}`.pipe(
@@ -894,7 +1136,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           Effect.map((rows) => rows.map(toThread)),
         );
 
-  const insertThread = (thread: ThreadRecord) =>
+  const insertThread = (thread: Omit<ThreadRecord, "workflowVersion" | "pinVersion">) =>
     sql`INSERT INTO mail_threads (id, account_id, subject, from_name, from_address, line,
         suggested_action, last_message_at, last_incoming_at, last_outgoing_at, message_count,
         incoming_count, unread, in_inbox, state, state_at, pinned_at, working_reason, settled_reason,
@@ -916,26 +1158,25 @@ const makeStore = (sql: SqlClient.SqlClient) => {
 
   /** Recomputes the thread's message-derived columns; state columns are left alone. */
   const refreshThreadAggregate = Effect.fnUntraced(function* (id: MailThreadId) {
-    const messages = yield* threadMessages(id);
-    if (messages.length === 0) return null;
-    const incoming = messages.filter((message) => !message.outgoing);
-    const latestIncoming = incoming.at(-1) ?? messages.at(-1)!;
-    const first = messages[0]!;
-    const last = messages.at(-1)!;
-    const outgoing = messages.filter((message) => message.outgoing);
-    yield* sql`UPDATE mail_threads SET
-          subject = ${first.subject || last.subject},
-          from_name = ${latestIncoming.from.name},
-          from_address = ${latestIncoming.from.address},
-          last_message_at = ${last.date},
-          last_incoming_at = ${incoming.at(-1)?.date ?? null},
-          last_outgoing_at = ${outgoing.at(-1)?.date ?? null},
-          message_count = ${messages.length},
-          incoming_count = ${incoming.length},
-          unread = ${incoming.some((message) => !message.seen) ? 1 : 0},
-          in_inbox = ${messages.some((message) => message.inInbox) ? 1 : 0}
-        WHERE id = ${id}`;
-    return yield* getThread(id);
+    const rows = yield* sql<Row>`WITH ranked AS (
+        SELECT id, date, subject, from_name, from_address, outgoing, seen, in_inbox,
+          row_number() OVER (PARTITION BY COALESCE(message_id, id) ORDER BY date, id) AS copy
+        FROM mail_messages WHERE thread_id = ${id} AND removed = 0
+      ), messages AS (SELECT * FROM ranked WHERE copy = 1),
+      first AS (SELECT subject FROM messages ORDER BY date, id LIMIT 1),
+      last AS (SELECT subject FROM messages ORDER BY date DESC, id DESC LIMIT 1),
+      sender AS (SELECT from_name, from_address FROM messages ORDER BY outgoing, date DESC, id DESC LIMIT 1)
+      UPDATE mail_threads SET
+        (subject, from_name, from_address, last_message_at, last_incoming_at, last_outgoing_at,
+         message_count, incoming_count, unread, in_inbox) = (
+          SELECT COALESCE(NULLIF(first.subject, ''), last.subject), sender.from_name, sender.from_address,
+            max(date), max(date) FILTER (WHERE outgoing = 0), max(date) FILTER (WHERE outgoing = 1),
+            count(*), count(*) FILTER (WHERE outgoing = 0), max(outgoing = 0 AND seen = 0), max(in_inbox)
+          FROM messages, first, last, sender
+        )
+      WHERE id = ${id} AND EXISTS (SELECT 1 FROM messages)
+      RETURNING *`;
+    return rows[0] ? toThread(rows[0]) : null;
   });
 
   const patchThread = (id: MailThreadId, patch: ThreadStatePatch) => {
@@ -951,6 +1192,38 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       ])
       .pipe(Effect.asVoid);
   };
+
+  const patchForAction = Effect.fn("MailStore.patchForAction")(function* (
+    thread: ThreadRecord,
+    patch: ThreadStatePatch,
+  ) {
+    const changed = Object.entries(patch).filter(
+      ([key, value]) => thread[key as keyof ThreadStatePatch] !== value,
+    );
+    if (changed.length === 0) return undefined;
+    const after: ThreadStatePatch = Object.fromEntries(changed);
+    const before: ThreadStatePatch = Object.fromEntries(
+      changed.map(([key]) => [key, thread[key as keyof ThreadStatePatch]]),
+    );
+    yield* patchThread(thread.id, after);
+    const [row] = yield* sql<{
+      version: string;
+    }>`SELECT CASE WHEN ${"pinnedAt" in after ? 1 : 0} THEN pin_version ELSE workflow_version END AS version FROM mail_threads WHERE id = ${thread.id}`;
+    return { before, after, version: row!.version } satisfies ThreadChange;
+  });
+
+  const refreshUnread = (id: MailThreadId) =>
+    sql`UPDATE mail_threads SET unread = EXISTS (SELECT 1 FROM mail_messages
+      WHERE thread_id = ${id} AND removed = 0 AND outgoing = 0 AND seen = 0) WHERE id = ${id}`.pipe(
+      Effect.asVoid,
+    );
+
+  const markMessagesRead = (id: MailThreadId, token: string) =>
+    sql<{ id: number }>`UPDATE mail_messages SET seen = 1, read_action = ${token}
+      WHERE thread_id = ${id} AND removed = 0 AND outgoing = 0 AND seen = 0 RETURNING id`;
+  const undoMessagesRead = (id: MailThreadId, token: string) =>
+    sql<{ id: number }>`UPDATE mail_messages SET seen = 0, read_action = NULL
+      WHERE thread_id = ${id} AND removed = 0 AND read_action = ${token} AND seen = 1 RETURNING id`;
 
   const setTriage = (
     id: MailThreadId,
@@ -1035,17 +1308,22 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const repliedWaiting = (olderThan: string) =>
     sql<Row>`SELECT * FROM mail_threads WHERE nudge IS NULL AND last_outgoing_at IS NOT NULL
       AND last_outgoing_at = last_message_at AND last_outgoing_at <= ${olderThan}
-      AND ((state = 'working' AND working_reason = 'waiting') OR (state = 'settled' AND settled_reason = 'replied'))`.pipe(
+      AND state = 'working' AND working_reason = 'waiting'`.pipe(
       Effect.map((rows) => rows.map(toThread)),
     );
 
-  const relatedThreads = (fromAddress: string, excludeId: MailThreadId, limit: number) =>
-    sql<Row>`SELECT * FROM mail_threads WHERE from_address = ${fromAddress} AND id != ${excludeId}
+  const relatedThreads = (
+    accountId: MailAccountId,
+    fromAddress: string,
+    excludeId: MailThreadId,
+    limit: number,
+  ) =>
+    sql<Row>`SELECT * FROM mail_threads WHERE account_id = ${accountId} AND from_address = ${fromAddress} AND id != ${excludeId}
       ORDER BY last_message_at DESC LIMIT ${limit}`.pipe(Effect.map((rows) => rows.map(toThread)));
 
-  const latestMessage = (threadId: MailThreadId) =>
+  const latestMessage = (threadId: MailThreadId, incomingOnly = false) =>
     sql<Row>`SELECT * FROM mail_messages WHERE thread_id = ${threadId} AND removed = 0
-      ORDER BY date DESC, id DESC LIMIT 1`.pipe(
+      ${incomingOnly ? sql`AND outgoing = 0` : sql``} ORDER BY date DESC, id DESC LIMIT 1`.pipe(
       Effect.map((rows) => (rows[0] ? toMessage(rows[0]) : null)),
     );
 
@@ -1085,6 +1363,17 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       : sql<Row>`SELECT * FROM mail_trust WHERE key IN ${sql.in(keys)}`.pipe(
           Effect.map((rows) => new Map(rows.map((row) => [str(row.key), toTrust(row)]))),
         );
+  const trustClock = (key: string) =>
+    sql<TrustClock>`SELECT revision, setting, reset FROM mail_trust_clock WHERE key = ${key}`.pipe(
+      Effect.map((rows) => rows[0] ?? { revision: 0, setting: 0, reset: 0 }),
+    );
+  const advanceTrustClock = (key: string, change: "feedback" | "level" | "reset") =>
+    sql<TrustClock>`INSERT INTO mail_trust_clock(key, revision, setting, reset)
+      VALUES (${key}, 1, ${change === "feedback" ? 0 : 1}, ${change === "reset" ? 1 : 0})
+      ON CONFLICT(key) DO UPDATE SET revision = revision + 1, setting = setting + excluded.setting,
+        reset = reset + excluded.reset RETURNING revision, setting, reset`.pipe(
+      Effect.map((rows) => rows[0]!),
+    );
   const putTrust = (record: TrustRecord, now: string) =>
     sql`INSERT INTO mail_trust (key, kind, reason, approvals, rejections, streak, trust, explicit, bulk, updated_at)
       VALUES (${record.key}, ${record.kind}, ${record.reason}, ${record.approvals},
@@ -1122,7 +1411,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     readonly threadId: MailThreadId | undefined;
     readonly limit: number;
   }) =>
-    sql<Row>`SELECT * FROM mail_actions WHERE 1 = 1
+    sql<Row>`SELECT * FROM mail_action_history WHERE 1 = 1
         ${input.beforeId === undefined ? sql`` : sql`AND id < ${input.beforeId}`}
         ${input.actor === undefined ? sql`` : sql`AND actor = ${input.actor}`}
         ${input.threadId === undefined ? sql`` : sql`AND thread_id = ${input.threadId}`}
@@ -1164,10 +1453,10 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         origin, original_body, status, error, message_id, revision, updated_at, sent_at)
       VALUES (${draft.id}, ${draft.threadId}, ${draft.accountId}, ${toJson(draft.to)},
         ${toJson(draft.cc)}, ${draft.subject}, ${draft.body}, ${draft.origin},
-        ${draft.originalBody}, 'draft', NULL, NULL, 0, ${draft.updatedAt}, NULL)
+        ${draft.originalBody}, ${draft.status}, ${draft.error}, ${draft.messageId}, ${draft.revision}, ${draft.updatedAt}, NULL)
       ON CONFLICT (id) DO UPDATE SET to_json = excluded.to_json, cc_json = excluded.cc_json,
-        subject = excluded.subject, body = excluded.body, status = 'draft', error = NULL,
-        message_id = NULL, revision = mail_drafts.revision + 1, updated_at = excluded.updated_at
+        subject = excluded.subject, body = excluded.body, status = excluded.status, error = excluded.error,
+        message_id = excluded.message_id, revision = mail_drafts.revision + 1, updated_at = excluded.updated_at
       WHERE mail_drafts.status IN ('draft', 'failed')
       RETURNING *`.pipe(Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)));
   /**
@@ -1185,21 +1474,46 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       readonly status: "sent" | "failed";
       readonly error: string | null;
       readonly at: string;
+      readonly editSender?: string | null;
     },
   ) =>
     sql`UPDATE mail_drafts SET status = ${result.status}, error = ${result.error},
-        updated_at = ${result.at}, sent_at = ${result.status === "sent" ? result.at : null}
+        updated_at = ${result.at}, sent_at = ${result.status === "sent" ? result.at : null},
+        edit_sender = ${result.editSender ?? null}
       WHERE id = ${id} AND status = 'sending'`.pipe(Effect.asVoid);
+  const recentReplyEdits = (accountId: MailAccountId, sender: string) =>
+    sql<{ before: string; after: string }>`SELECT substr(original_body, 1, 600) AS before,
+        substr(body, 1, 600) AS after FROM mail_drafts
+      WHERE account_id = ${accountId} AND edit_sender = ${sender}
+      ORDER BY sent_at DESC, rowid DESC LIMIT 3`;
   /** A send cut off by a crash or restart may or may not have reached the server. */
   const recoverInterruptedSends = (now: string, error: string) =>
     sql`UPDATE mail_drafts SET status = 'failed', error = ${error}, updated_at = ${now}
       WHERE status = 'sending'`.pipe(Effect.asVoid);
-  /** Threads whose last message was expunged or reset away. */
-  const deleteEmptyThreads = (accountId: MailAccountId) =>
-    sql<{ id: string }>`DELETE FROM mail_threads WHERE account_id = ${accountId}
+  const deleteEmptyThreads = (
+    candidates: Statement.Fragment,
+    otherMailboxes: Statement.Fragment = sql``,
+  ) =>
+    sql<{ id: string }>`DELETE FROM mail_threads WHERE id IN ${candidates}
         AND NOT EXISTS (SELECT 1 FROM mail_messages
           WHERE mail_messages.thread_id = mail_threads.id AND mail_messages.removed = 0)
+        AND NOT EXISTS (SELECT 1 FROM mail_reset_messages
+          WHERE thread_id = mail_threads.id ${otherMailboxes})
       RETURNING id`.pipe(Effect.map((rows) => rows.map((row) => MailThreadId.make(row.id))));
+
+  const deleteExpungedThreads = (ids: ReadonlyArray<MailThreadId>) =>
+    ids.length === 0 ? Effect.succeed([]) : deleteEmptyThreads(sql`${sql.in(ids)}`);
+
+  const finishMailboxReset = (accountId: MailAccountId, mailbox: string) =>
+    sql.withTransaction(
+      Effect.gen(function* () {
+        const candidates = sql`(SELECT thread_id FROM mail_reset_messages
+        WHERE account_id = ${accountId} AND mailbox = ${mailbox})`;
+        const removed = yield* deleteEmptyThreads(candidates, sql`AND mailbox <> ${mailbox}`);
+        yield* sql`DELETE FROM mail_reset_messages WHERE account_id = ${accountId} AND mailbox = ${mailbox}`;
+        return removed;
+      }),
+    );
 
   const deleteDraft = (id: MailDraftId) =>
     sql`DELETE FROM mail_drafts WHERE id = ${id} AND status != 'sending'`.pipe(Effect.asVoid);
@@ -1250,6 +1564,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     migrate,
     getKv,
     setKv,
+    nextLocalSentUid,
     listAccounts,
     getAccount,
     insertAccount,
@@ -1269,13 +1584,19 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     markRemoved,
     moveMessage,
     knownUids,
+    knownUidsAmong,
     threadMessages,
-    messageUidsForThread,
+    messageTargets,
+    mirrorTargets,
     getThread,
     getThreads,
     insertThread,
     refreshThreadAggregate,
     patchThread,
+    patchForAction,
+    refreshUnread,
+    markMessagesRead,
+    undoMessagesRead,
     setTriage,
     setChatThread,
     pendingTriage,
@@ -1296,6 +1617,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     putTrust,
     deleteTrust,
     listTrust,
+    trustClock,
+    advanceTrustClock,
     insertAction,
     getAction,
     markActionUndone,
@@ -1305,11 +1628,13 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     draftsForThread,
     threadsWithDrafts,
     getDraft,
-    deleteEmptyThreads,
+    deleteExpungedThreads,
+    finishMailboxReset,
     transaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => sql.withTransaction(effect),
     saveDraftContent,
     claimDraftForSend,
     finishDraftSend,
+    recentReplyEdits,
     recoverInterruptedSends,
     deleteDraft,
     insertUsage,

@@ -1997,6 +1997,7 @@ export const layerWsRpc = (
 
       const mailUser = { actor: "user" } as const;
       const handlers = ServerWsRpcGroup.of({
+        [WS_METHODS.mailArrivals]: () => mail.arrivals,
         [WS_METHODS.mailSubscribe]: () => mail.subscribe,
         [WS_METHODS.mailGetThread]: (input) => mail.getThread(input.threadId),
         [WS_METHODS.mailListSettled]: (input) => mail.listSettled(input),

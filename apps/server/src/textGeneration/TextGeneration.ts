@@ -118,6 +118,13 @@ export const make = Effect.gen(function* () {
           (selected.status === "error" &&
             (!selected.installed || selected.auth.status === "unauthenticated"))));
     if (unusable || exhaustedUsageWindow(selected, now, selection.model)) {
+      // Mail content may only go to the provider instance chosen for this operation.
+      if (operation === "generateMailTriage" || operation === "generateMailNotes") {
+        return yield* new TextGenerationError({
+          operation,
+          detail: "The selected mail model is unavailable or has reached its usage limit.",
+        });
+      }
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(
           (cause) =>

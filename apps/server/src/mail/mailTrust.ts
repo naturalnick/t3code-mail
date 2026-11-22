@@ -112,75 +112,61 @@ export function recordRejection(record: TrustRecord): TrustRecord {
     ...record,
     rejections: record.rejections + 1,
     streak: 0,
-    trust: record.trust === "never" ? "never" : "suggest",
+    trust: "suggest",
     explicit: false,
   };
 }
 
-/** What an action did to one key, so undoing it reverses only that and keeps later changes. */
+export interface TrustClock {
+  readonly revision: number;
+  readonly setting: number;
+  readonly reset: number;
+}
+
 export interface TrustUndoEntry {
   readonly key: string;
   readonly kind: TrustRecord["kind"];
-  readonly before: TrustRecord;
-  /** Null when the action deleted the record. */
-  readonly after: TrustRecord | null;
+  readonly clock: TrustClock;
 }
 
-export type TrustEffect = "approve" | "reject" | "level" | "ai_settle";
+export type TrustFeedback = "approve" | "reject" | "ai_settle";
 
-export interface TrustUndo {
-  readonly effect: TrustEffect;
-  readonly entries: ReadonlyArray<TrustUndoEntry>;
+export type TrustUndo =
+  | { readonly effect: TrustFeedback; readonly entries: ReadonlyArray<TrustUndoEntry> }
+  | {
+      readonly effect: "level";
+      readonly entry: TrustUndoEntry;
+      readonly before: Partial<Omit<TrustRecord, "key" | "kind">> | null;
+    };
+
+export function previousTrustFields(before: TrustRecord | null, after: TrustRecord | null) {
+  if (!before) return null;
+  const { key: _key, kind: _kind, ...fields } = before;
+  if (!after) return fields;
+  return Object.fromEntries(
+    Object.entries(fields).filter(([key, value]) => after[key as keyof typeof fields] !== value),
+  );
 }
 
-/** Null deletes the record. */
+/** Undo is fresh feedback. Only votes from the same reset generation still count. */
 export function reverseTrust(
-  effect: TrustEffect,
-  current: TrustRecord | null,
-  entry: TrustUndoEntry,
-): TrustRecord | null {
-  const record = current ?? emptyRecord(entry.key, entry.kind);
-  switch (effect) {
-    case "ai_settle":
-      // Undoing an AI settle is a correction, like "keep in Active".
-      return recordRejection(record);
-    case "approve": {
-      const graduatedHere = entry.before.trust === "suggest" && entry.after?.trust === "auto";
-      return {
-        ...record,
-        approvals: Math.max(0, record.approvals - 1),
-        streak: Math.max(0, record.streak - 1),
-        trust:
-          graduatedHere && record.trust === "auto" && !record.explicit ? "suggest" : record.trust,
-      };
-    }
-    case "reject": {
-      const untouched = !record.explicit && record.trust === entry.after?.trust;
-      return {
-        ...record,
-        rejections: Math.max(0, record.rejections - 1),
-        streak: record.streak + entry.before.streak,
-        ...(untouched ? { trust: entry.before.trust, explicit: entry.before.explicit } : {}),
-      };
-    }
-    case "level": {
-      const untouched =
-        current === null
-          ? entry.after === null
-          : entry.after !== null &&
-            current.trust === entry.after.trust &&
-            current.explicit === entry.after.explicit;
-      if (!untouched) return current;
-      if (current === null) return entry.before;
-      return {
-        ...current,
-        trust: entry.before.trust,
-        explicit: entry.before.explicit,
-        streak: entry.before.streak,
-        reason: entry.before.reason ?? current.reason,
-      };
-    }
-  }
+  effect: TrustFeedback,
+  current: TrustRecord,
+  previous: TrustClock,
+  latest: TrustClock,
+): TrustRecord {
+  if (previous.reset !== latest.reset) return current;
+  const approvals = Math.max(0, current.approvals - (effect === "approve" ? 1 : 0));
+  const rejections = Math.max(0, current.rejections - (effect === "reject" ? 1 : 0));
+  if (previous.setting !== latest.setting) return { ...current, approvals, rejections };
+  return {
+    ...current,
+    approvals,
+    rejections: rejections + (effect === "ai_settle" ? 1 : 0),
+    streak: 0,
+    trust: "suggest",
+    explicit: false,
+  };
 }
 
 export function setLevel(record: TrustRecord, level: MailTrustLevel | "reset"): TrustRecord {

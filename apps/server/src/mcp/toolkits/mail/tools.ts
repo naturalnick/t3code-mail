@@ -3,6 +3,7 @@ import {
   MailSettleReason,
   MailThreadId,
   MailThreadState,
+  NonNegativeInt,
   OrchestratorMcpFailure,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -69,7 +70,12 @@ const MailReadTool = Tool.make("t3_mail_read", {
       }),
     ),
     drafts: Schema.Array(
-      Schema.Struct({ draftId: MailDraftId, body: Schema.String, status: Schema.String }),
+      Schema.Struct({
+        draftId: MailDraftId,
+        revision: NonNegativeInt,
+        body: Schema.String,
+        status: Schema.String,
+      }),
     ),
     related: Schema.Array(MailRow),
   }),
@@ -80,16 +86,17 @@ const MailReadTool = Tool.make("t3_mail_read", {
 const MailDraftTool = Tool.make("t3_mail_draft", {
   ...shared,
   description:
-    "Leave a reply draft on an email thread for the user to review and send. You cannot send. Pass `draftId` to revise one. Recipients and subject default to a reply.",
+    "Leave a reply draft on an email thread for the user to review and send. You cannot send. To edit, pass its `draftId` and the `expectedRevision` you read with t3_mail_read. Recipients and subject default to a reply.",
   parameters: Schema.Struct({
     threadId: MailThreadId,
     body: Schema.String.check(Schema.isMinLength(1)),
     draftId: Schema.optionalKey(MailDraftId),
+    expectedRevision: Schema.optionalKey(NonNegativeInt),
     to: Schema.optionalKey(Schema.Array(Schema.String)),
     cc: Schema.optionalKey(Schema.Array(Schema.String)),
     subject: Schema.optionalKey(Schema.String),
   }),
-  success: Schema.Struct({ draftId: MailDraftId }),
+  success: Schema.Struct({ draftId: MailDraftId, revision: NonNegativeInt }),
 }).annotate(Tool.Destructive, false);
 
 const MailTriageTool = Tool.make("t3_mail_triage", {

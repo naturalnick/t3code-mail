@@ -328,14 +328,6 @@ export class ImapSession {
     }
   }
 
-  async close(): Promise<void> {
-    try {
-      await this.client.logout();
-    } catch {
-      this.client.close();
-    }
-  }
-
   /** Selects a mailbox for a unit of work, handing QRESYNC our last known state. */
   async withMailbox<A>(
     path: string,
@@ -489,13 +481,12 @@ export class ImapSession {
   }
 
   /** Moves messages and returns their new UIDs when the server reports them (UIDPLUS). */
-  async move(
-    uids: ReadonlyArray<number>,
-    destination: string,
-  ): Promise<ReadonlyMap<number, number>> {
-    if (uids.length === 0) return new Map();
+  async move(uids: ReadonlyArray<number>, destination: string) {
+    if (uids.length === 0) return null;
     const result = await this.client.messageMove(uids.join(","), destination, { uid: true });
-    return result && result.uidMap ? result.uidMap : new Map();
+    return result && result.uidMap && result.uidValidity !== undefined
+      ? { uidMap: result.uidMap, uidValidity: String(result.uidValidity) }
+      : null;
   }
 
   async ensureMailbox(path: string): Promise<void> {

@@ -20,7 +20,6 @@ import {
   type MailTrustRecord,
   MessageId,
   type ModelSelection,
-  type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import type {
@@ -47,6 +46,9 @@ import type {
   MailUpdateAccountInput,
   MailUpdateSettingsInput,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- session receipts need stable ids across server restarts.
+import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
@@ -60,6 +62,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as TxReentrantLock from "effect/TxReentrantLock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -69,7 +72,12 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import { classifyImapError, verifyLogin } from "./imapSession.ts";
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
-import { matchesRule, prefilter, type PrefilterResult } from "./mailPrefilter.ts";
+import {
+  categoryGuardrail,
+  matchesRule,
+  prefilter,
+  type PrefilterResult,
+} from "./mailPrefilter.ts";
 import {
   buildSessionPrompt,
   buildTriagePrompt,
@@ -82,6 +90,7 @@ import {
 import * as MailStore from "./MailStore.ts";
 import * as MailSync from "./MailSync.ts";
 import {
+  asksQuestion,
   cleanForDisplay,
   cleanForModel,
   domainOf,
@@ -95,6 +104,7 @@ import {
   decide,
   emptyRecord,
   LOW_CONFIDENCE,
+  previousTrustFields,
   recordApproval,
   recordRejection,
   reverseTrust,
@@ -115,7 +125,6 @@ const GUARDRAIL_TEXT_CHARS = 200_000;
 const TRIAGE_RETRY_MINUTES = 10;
 const SESSION_MESSAGE_CHARS = 3_000;
 const SEND_DEDUPE_MS = 10 * 60_000;
-const MAX_DRAFT_EDITS = 5;
 const DRAFT_CHANGED = "The draft changed after you reviewed it. Review it again before sending.";
 const MAYBE_SENT = "It may have been sent; check Sent before sending again.";
 
@@ -135,6 +144,8 @@ const MAIL_CATEGORIES = new Set<MailCategory>([
   "other",
 ]);
 const SETTLE_REASONS = new Set<MailSettleReason>(["fyi", "receipt", "noise", "done"]);
+const modelConfidence = (confidence: number) =>
+  Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0;
 
 interface Preset {
   readonly connection: Omit<MailAccountConnection, "username">;
@@ -204,16 +215,7 @@ function presetFor(email: string): MailAccountConnection | null {
 
 const isMailError = Schema.is(MailError);
 
-// Our own JSON (records we wrote) parses or falls back; it never carries user-shaped cycles.
 const toJson = (value: unknown): string => JSON.stringify(value);
-const fromJson = <A>(raw: string | null, fallback: A): A => {
-  if (raw === null) return fallback;
-  try {
-    return JSON.parse(raw) as A;
-  } catch {
-    return fallback;
-  }
-};
 
 const isoMillis = (iso: string): number =>
   DateTime.make(iso).pipe(Option.match({ onNone: () => 0, onSome: DateTime.toEpochMillis }));
@@ -232,6 +234,7 @@ export interface MailActorInfo {
 export class MailService extends Context.Service<
   MailService,
   {
+    readonly arrivals: MailEngine.MailEngine["Service"]["arrivals"];
     readonly subscribe: Stream.Stream<MailStreamEventType, MailError>;
     readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
@@ -298,6 +301,10 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
+  // A send can write messages and learned edits after SMTP returns. Removal must wait for it.
+  const accountLock = yield* TxReentrantLock.make();
+  const changeAccounts = <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+    TxReentrantLock.withWriteLock(accountLock, operation);
   const stateLock = yield* Semaphore.make(1);
   const commit = stateLock.withPermits(1);
   // Model calls run under this one, never under stateLock, so user actions never wait on a model.
@@ -374,26 +381,26 @@ const make = Effect.gen(function* () {
             })
           : recordRejection(before);
       yield* store.putTrust(after, now);
-      entries.push({ key, kind, before, after });
+      entries.push({ key, kind, clock: yield* store.advanceTrustClock(key, "feedback") });
     });
     yield* apply(sender, keys.sender, "sender");
     if (keys.category) yield* apply(category, keys.category, "category");
     return { effect: change.type, entries } satisfies TrustUndo;
   });
 
-  const statePatchOf = (thread: MailStore.ThreadRecord): MailStore.ThreadStatePatch => ({
-    state: thread.state,
-    stateAt: thread.stateAt,
-    pinnedAt: thread.pinnedAt,
-    workingReason: thread.workingReason,
-    settledReason: thread.settledReason,
-    settledBy: thread.settledBy,
-    snoozedUntil: thread.snoozedUntil,
-    snoozeOnReply: thread.snoozeOnReply,
-    suggestionReason: thread.suggestionReason,
-    suggestionConfidence: thread.suggestionConfidence,
-    nudge: thread.nudge,
-    unread: thread.unread,
+  const recordThreadAction = Effect.fn("MailService.recordThreadAction")(function* (
+    thread: MailStore.ThreadRecord,
+    patch: MailStore.ThreadStatePatch,
+    action: Pick<MailStore.ActionRecord, "at" | "actor" | "actorLabel" | "kind" | "reason">,
+    undo: NonNullable<MailStore.ActionRecord["undo"]> = {},
+  ) {
+    const change = yield* store.patchForAction(thread, patch);
+    if (!change && Object.keys(undo).length === 0) return null;
+    return yield* store.insertAction({
+      ...action,
+      threadId: thread.id,
+      undo: { ...undo, ...(change ? { thread: change } : {}) },
+    });
   });
 
   const settledPatch = (
@@ -429,7 +436,13 @@ const make = Effect.gen(function* () {
   ) {
     const settings = yield* engine.settings;
     if (!settings.serverMirroring) return;
-    yield* sync.enqueue(thread.accountId, { kind, threadId: thread.id });
+    const targets = yield* store.mirrorTargets(thread.accountId, thread.id, kind);
+    if (targets.length === 0) return;
+    yield* sync.enqueue(thread.accountId, { kind, threadId: thread.id, targets });
+    return {
+      kind: kind === "archive" ? "unarchive" : "archive",
+      targets,
+    } satisfies MailStore.MirrorUndo;
   });
 
   const actOne = Effect.fn("MailService.actOne")(function* (
@@ -438,12 +451,12 @@ const make = Effect.gen(function* () {
     actor: MailActorInfo,
     now: string,
   ) {
-    const before = statePatchOf(thread);
     let patch: MailStore.ThreadStatePatch | null = null;
     let trust: TrustUndo | null = null;
     let kind: MailActionKind = "settle";
     let reason: string | null = null;
-    let undoable = true;
+    let mirrorUndo: MailStore.MirrorUndo | undefined;
+    let read: NonNullable<MailStore.ActionRecord["undo"]>["read"];
     switch (action.type) {
       case "settle":
       case "approve": {
@@ -460,14 +473,17 @@ const make = Effect.gen(function* () {
         }
         kind = action.type === "approve" ? "approve" : "settle";
         reason = settleReason;
-        yield* mirror(thread, "archive");
+        mirrorUndo = yield* mirror(thread, "archive");
         break;
       }
       case "keep":
       case "unsettle": {
         const wasAi =
           thread.state === "settled" && (thread.settledBy === "ai" || thread.settledBy === "rule");
-        if ((action.type === "keep" && thread.suggestionReason !== null) || wasAi) {
+        if (
+          actor.actor === "user" &&
+          ((action.type === "keep" && thread.suggestionReason !== null) || wasAi)
+        ) {
           trust = yield* updateTrust(thread, { type: "reject" });
         }
         patch = {
@@ -476,10 +492,11 @@ const make = Effect.gen(function* () {
           suggestionConfidence: null,
         };
         kind = action.type === "keep" ? "reject" : "unsettle";
-        if (thread.state === "settled") yield* mirror(thread, "unarchive");
+        if (thread.state === "settled") mirrorUndo = yield* mirror(thread, "unarchive");
         break;
       }
       case "pin":
+        if (thread.pinnedAt !== null) return null;
         patch = { pinnedAt: now };
         kind = "pin";
         break;
@@ -515,21 +532,39 @@ const make = Effect.gen(function* () {
         yield* store.putTrust(next, now);
         trust = {
           effect: "level",
-          entries: [{ key: keys.sender, kind: "sender", before: current, after: next }],
+          entry: {
+            key: keys.sender,
+            kind: "sender",
+            clock: yield* store.advanceTrustClock(keys.sender, "level"),
+          },
+          before: previousTrustFields(sender, next),
         };
         patch = settledPatch(now, "noise", actor.actor);
         kind = "never_show";
         reason = "noise";
-        yield* mirror(thread, "archive");
+        mirrorUndo = yield* mirror(thread, "archive");
         break;
       }
-      case "mark_read":
-        patch = { unread: false };
-        kind = "settle";
-        undoable = false;
-        yield* sync.enqueue(thread.accountId, { kind: "seen", threadId: thread.id, seen: true });
-        yield* store.patchThread(thread.id, patch);
-        return null;
+      case "mark_read": {
+        const token = yield* uuid;
+        const messages = yield* store.markMessagesRead(thread.id, token);
+        if (messages.length === 0) return null;
+        const messageIds = messages.map(({ id }) => id);
+        const targets = (yield* store.messageTargets(thread.id, messageIds)).map(
+          ({ id, identity }) => ({ id, identity }),
+        );
+        yield* store.refreshUnread(thread.id);
+        yield* sync.enqueue(thread.accountId, {
+          kind: "seen",
+          threadId: thread.id,
+          seen: true,
+          targets,
+        });
+        read = { token, count: messages.length, targets };
+        patch = {};
+        kind = "mark_read";
+        break;
+      }
       case "wait_for_reply":
         patch = {
           state: "working",
@@ -540,118 +575,162 @@ const make = Effect.gen(function* () {
           suggestionReason: null,
           suggestionConfidence: null,
         };
-        kind = "unsettle";
+        kind = "wait_for_reply";
         reason = "waiting";
         break;
     }
-    yield* store.patchThread(thread.id, patch);
-    return yield* store.insertAction({
-      at: now,
-      actor: actor.actor,
-      actorLabel: actor.label ?? null,
-      kind,
-      threadId: thread.id,
-      reason,
-      undo: undoable ? { threadPatch: before, ...(trust ? { trust } : {}) } : null,
-    });
+    return yield* recordThreadAction(
+      thread,
+      patch,
+      {
+        at: now,
+        actor: actor.actor,
+        actorLabel: actor.label ?? null,
+        kind,
+        reason,
+      },
+      {
+        ...(trust ? { trust } : {}),
+        ...(mirrorUndo ? { mirror: mirrorUndo } : {}),
+        ...(read ? { read } : {}),
+      },
+    );
   });
 
-  const act: MailService["Service"]["act"] = (input, actor) =>
-    stateLock
-      .withPermits(1)(
-        Effect.gen(function* () {
-          const now = yield* nowIso;
-          const threads = yield* store.getThreads(input.threadIds);
-          if (threads.length === 0) return yield* notFound("email");
-          const actionIds: Array<number> = [];
-          for (const thread of threads) {
-            const id = yield* actOne(thread, input.action, actor, now);
-            if (id !== null) actionIds.push(id);
-          }
-          yield* engine.publishThreads(threads.map((thread) => thread.id));
-          yield* engine.publishStatus;
-          return { actionIds };
-        }),
-      )
-      .pipe(sqlSafe, Effect.withSpan("MailService.act"));
+  const act: MailService["Service"]["act"] = Effect.fn("MailService.act")(
+    function* (input, actor) {
+      const now = yield* nowIso;
+      const threads = yield* store.getThreads(input.threadIds);
+      if (threads.length === 0) return yield* notFound("email");
+      const actionIds: Array<number> = [];
+      for (const thread of threads) {
+        const id = yield* actOne(thread, input.action, actor, now);
+        if (id !== null) actionIds.push(id);
+      }
+      return { actionIds };
+    },
+    store.transaction,
+    commit,
+    (effect, input) =>
+      effect.pipe(
+        Effect.tap(() => engine.publishThreads(input.threadIds)),
+        Effect.tap(() => engine.publishStatus),
+      ),
+    sqlSafe,
+  );
 
-  const undo: MailService["Service"]["undo"] = (actionId) =>
-    stateLock
-      .withPermits(1)(
-        Effect.gen(function* () {
-          const action = yield* store.getAction(actionId);
-          if (action === null) return yield* notFound("action");
-          if (action.undo === null || action.undoneAt !== null) {
-            return yield* invalid("That action cannot be undone.");
-          }
-          const now = yield* nowIso;
-          const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
-          if (action.undo.trust) {
-            const { effect, entries } = action.undo.trust;
-            const current = yield* store.getTrust(entries.map((entry) => entry.key));
-            for (const entry of entries) {
-              const next = reverseTrust(effect, current.get(entry.key) ?? null, entry);
-              if (next === null) yield* store.deleteTrust(entry.key);
-              else yield* store.putTrust(next, now);
-            }
-          }
-          if (action.undo.draftId !== undefined) {
-            const draft = yield* store.getDraft(action.undo.draftId);
-            if (draft !== null && (draft.status === "draft" || draft.status === "failed")) {
-              yield* store.deleteDraft(draft.id);
-            }
-          }
-          if (thread !== null && action.undo.threadPatch) {
-            yield* store.patchThread(thread.id, action.undo.threadPatch);
-            const wasSettle =
-              action.kind === "settle" || action.kind === "approve" || action.kind === "never_show";
-            if (wasSettle) yield* mirror(thread, "unarchive");
-            if (
-              action.kind === "unsettle" &&
-              thread.state === "active" &&
-              action.undo.threadPatch.state === "settled"
-            ) {
-              yield* mirror(thread, "archive");
-            }
-          }
-          yield* store.markActionUndone(actionId, now);
-          if (thread !== null) yield* engine.publishThreads([thread.id]);
-          yield* engine.publishStatus;
-        }),
-      )
-      .pipe(sqlSafe, Effect.withSpan("MailService.undo"));
+  const staleUndo = () => invalid("This item changed after that action.");
 
-  const propose: MailService["Service"]["propose"] = (input, actor) =>
-    stateLock
-      .withPermits(1)(
-        Effect.gen(function* () {
-          const now = yield* nowIso;
-          const actionIds: Array<number> = [];
-          const touched: Array<MailThreadId> = [];
-          for (const thread of yield* store.getThreads(input.threadIds)) {
-            if (thread.state === "settled") continue;
-            yield* store.patchThread(thread.id, {
-              suggestionReason: input.reason,
-              suggestionConfidence: 1,
-            });
-            actionIds.push(
-              yield* store.insertAction({
-                at: now,
-                actor: actor.actor,
-                actorLabel: actor.label ?? null,
-                kind: "propose",
-                threadId: thread.id,
-                reason: input.reason,
-                undo: { threadPatch: statePatchOf(thread) },
-              }),
-            );
-            touched.push(thread.id);
-          }
-          yield* engine.publishThreads(touched);
-          return { actionIds };
-        }),
-      )
-      .pipe(sqlSafe, Effect.withSpan("MailService.propose"));
+  const undo: MailService["Service"]["undo"] = Effect.fn("MailService.undo")(
+    function* (actionId) {
+      const action = yield* store.getAction(actionId);
+      if (action === null) return yield* notFound("action");
+      const history = action.undo;
+      if (!history || action.undoneAt !== null)
+        return yield* invalid("That action cannot be undone.");
+      const now = yield* nowIso;
+      const thread = action.threadId === null ? null : yield* store.getThread(action.threadId);
+      if (action.threadId !== null && thread === null) return yield* staleUndo();
+      if (history.thread && thread) {
+        const { before, after, version } = history.thread;
+        if (
+          version !== ("pinnedAt" in after ? thread.pinVersion : thread.workflowVersion) ||
+          Object.entries(after).some(
+            ([key, value]) => thread[key as keyof MailStore.ThreadStatePatch] !== value,
+          )
+        ) {
+          return yield* staleUndo();
+        }
+        yield* store.patchThread(thread.id, before);
+      }
+      if (history.draft) {
+        const { id, revision, before } = history.draft;
+        const draft = yield* store.getDraft(id);
+        if (draft?.status !== "draft" || draft.revision !== revision) return yield* staleUndo();
+        if (before === null) yield* store.deleteDraft(id);
+        else yield* store.saveDraftContent({ ...draft, ...before, updatedAt: now });
+      }
+      if (history.discardedDraft) {
+        const draft = history.discardedDraft;
+        if (yield* store.getDraft(draft.id)) return yield* staleUndo();
+        yield* store.saveDraftContent({ ...draft, revision: draft.revision + 1, updatedAt: now });
+      }
+      if (history.read && thread) {
+        const changed = yield* store.undoMessagesRead(thread.id, history.read.token);
+        if (changed.length !== history.read.count) return yield* staleUndo();
+        yield* store.refreshUnread(thread.id);
+        yield* sync.enqueue(thread.accountId, {
+          kind: "seen",
+          threadId: thread.id,
+          seen: false,
+          targets: history.read.targets,
+        });
+      }
+      if (history.trust?.effect === "level") {
+        const { entry, before } = history.trust;
+        if ((yield* store.trustClock(entry.key)).revision !== entry.clock.revision)
+          return yield* staleUndo();
+        if (before) {
+          const record =
+            (yield* store.getTrust([entry.key])).get(entry.key) ??
+            emptyRecord(entry.key, entry.kind);
+          yield* store.putTrust({ ...record, ...before }, now);
+        } else yield* store.deleteTrust(entry.key);
+        yield* store.advanceTrustClock(
+          entry.key,
+          action.reason === "reset" || !before ? "reset" : "level",
+        );
+      } else if (history.trust) {
+        const { effect, entries } = history.trust;
+        const records = yield* store.getTrust(entries.map((entry) => entry.key));
+        for (const entry of entries) {
+          const latest = yield* store.trustClock(entry.key);
+          if (entry.clock.reset !== latest.reset) continue;
+          const current = records.get(entry.key) ?? emptyRecord(entry.key, entry.kind);
+          yield* store.putTrust(reverseTrust(effect, current, entry.clock, latest), now);
+          yield* store.advanceTrustClock(entry.key, "feedback");
+        }
+      }
+      if (thread && history.mirror && (yield* engine.settings).serverMirroring) {
+        yield* sync.enqueue(thread.accountId, { ...history.mirror, threadId: thread.id });
+      }
+      yield* store.markActionUndone(actionId, now);
+      return action.threadId;
+    },
+    store.transaction,
+    commit,
+    Effect.tap((id) => (id === null ? Effect.void : engine.publishThreads([id]))),
+    Effect.tap(() => engine.publishStatus),
+    Effect.asVoid,
+    sqlSafe,
+  );
+
+  const propose: MailService["Service"]["propose"] = Effect.fn("MailService.propose")(
+    function* (input, actor) {
+      const at = yield* nowIso;
+      const actionIds: Array<number> = [];
+      for (const thread of yield* store.getThreads(input.threadIds)) {
+        if (thread.state === "settled") continue;
+        const id = yield* recordThreadAction(
+          thread,
+          { suggestionReason: input.reason, suggestionConfidence: 1 },
+          {
+            at,
+            actor: actor.actor,
+            actorLabel: actor.label ?? null,
+            kind: "propose",
+            reason: input.reason,
+          },
+        );
+        if (id !== null) actionIds.push(id);
+      }
+      return { actionIds };
+    },
+    store.transaction,
+    commit,
+    (effect, input) => effect.pipe(Effect.tap(() => engine.publishThreads(input.threadIds))),
+    sqlSafe,
+  );
 
   const listActions: MailService["Service"]["listActions"] = Effect.fn("MailService.listActions")(
     function* (input) {
@@ -685,7 +764,7 @@ const make = Effect.gen(function* () {
       const messages = yield* store.threadMessages(threadId);
       const drafts = yield* store.draftsForThread(threadId);
       const related = thread.fromAddress
-        ? yield* store.relatedThreads(thread.fromAddress, threadId, 5)
+        ? yield* store.relatedThreads(thread.accountId, thread.fromAddress, threadId, 5)
         : [];
       const actions = yield* store.listActions({
         beforeId: undefined,
@@ -805,16 +884,15 @@ const make = Effect.gen(function* () {
       readonly line: string;
       readonly suggestedAction: string | null;
       readonly category: MailCategory;
-      readonly urgent: boolean;
+      readonly guardrail: PrefilterResult["guardrail"];
       readonly injection: boolean;
-      /** Nothing to check guardrails against, so nothing settles on its own. */
-      readonly bodyMissing: boolean;
+      readonly suggestOnly: boolean;
     },
   ) {
     const now = yield* nowIso;
     const thread = yield* store.getThread(seen.id);
     if (thread === null || !isFresh(seen, thread)) return;
-    const guardrail = input.prefiltered.guardrail ?? (input.urgent ? "urgent" : null);
+    const guardrail = input.guardrail;
     yield* store.setTriage(thread.id, {
       line: input.line,
       suggestedAction: input.suggestedAction,
@@ -840,37 +918,48 @@ const make = Effect.gen(function* () {
       rule: input.prefiltered.rule,
     });
     const decision: TrustDecision =
-      decided.type === "auto_settle" && decided.via !== "never_show" && input.bodyMissing
+      decided.type === "auto_settle" && decided.via !== "never_show" && input.suggestOnly
         ? { type: "suggest", reason: decided.reason, confidence: input.verdict.confidence }
         : decided;
     if (decision.type === "auto_settle") {
       const by: MailActor =
         decision.via === "rule" || decision.via === "never_show" ? "rule" : "ai";
-      const entries = [trust.keys.sender, trust.keys.category].flatMap((key) => {
-        if (key === null) return [];
-        const kind = key === trust.keys.sender ? ("sender" as const) : ("category" as const);
-        const record =
-          (kind === "sender" ? trust.sender : trust.category) ?? emptyRecord(key, kind);
-        return [{ key, kind, before: record, after: record }];
-      });
-      yield* store.patchThread(thread.id, settledPatch(now, decision.reason, by));
-      yield* store.insertAction({
-        at: now,
-        actor: by,
-        actorLabel: null,
-        kind: "settle",
-        threadId: thread.id,
-        reason: decision.reason,
-        undo: { threadPatch: statePatchOf(thread), trust: { effect: "ai_settle", entries } },
-      });
-      yield* mirror(thread, "archive");
-    } else if (decision.type === "suggest") {
-      yield* store.patchThread(thread.id, {
-        suggestionReason: decision.reason,
-        suggestionConfidence: decision.confidence,
-      });
+      const entries: Array<TrustUndoEntry> = [];
+      for (const [key, kind] of [
+        [trust.keys.sender, "sender"],
+        [trust.keys.category, "category"],
+      ] as const) {
+        if (key) entries.push({ key, kind, clock: yield* store.trustClock(key) });
+      }
+      const mirrorUndo = yield* mirror(thread, "archive");
+      yield* recordThreadAction(
+        thread,
+        settledPatch(now, decision.reason, by),
+        {
+          at: now,
+          actor: by,
+          actorLabel: null,
+          kind: "settle",
+          reason: decision.reason,
+        },
+        { trust: { effect: "ai_settle", entries }, ...(mirrorUndo ? { mirror: mirrorUndo } : {}) },
+      );
     } else {
-      yield* store.patchThread(thread.id, { suggestionReason: null, suggestionConfidence: null });
+      const suggestion = decision.type === "suggest" ? decision : null;
+      yield* recordThreadAction(
+        thread,
+        {
+          suggestionReason: suggestion?.reason ?? null,
+          suggestionConfidence: suggestion?.confidence ?? null,
+        },
+        {
+          at: now,
+          actor: "ai",
+          actorLabel: null,
+          kind: suggestion ? "propose" : "reject",
+          reason: suggestion?.reason ?? null,
+        },
+      );
     }
   }, store.transaction);
 
@@ -879,6 +968,7 @@ const make = Effect.gen(function* () {
     readonly text: string;
     readonly prefiltered: PrefilterResult;
     readonly repliedTo: boolean;
+    readonly asksQuestion: boolean;
     readonly bodyMissing: boolean;
     readonly item: TriageItem;
   }
@@ -887,10 +977,12 @@ const make = Effect.gen(function* () {
     thread: MailStore.ThreadRecord,
     settings: MailSettings,
   ) {
-    const messages = yield* store.threadMessages(thread.id);
-    const incoming = messages.filter((message) => !message.outgoing);
-    const latest = incoming.at(-1) ?? messages.at(-1);
-    if (latest === undefined) return null;
+    const messages = yield* store.threadMessages(thread.id, 2);
+    const newest = messages.at(-1);
+    if (newest === undefined) return null;
+    const latest = newest.outgoing
+      ? ((yield* store.latestMessage(thread.id, true)) ?? newest)
+      : newest;
     // Sync fetches every pending body (or marks it unavailable) and then wakes triage again.
     if (latest.bodyState === "pending") return "wait" as const;
     const account = yield* store.getAccount(thread.accountId);
@@ -920,7 +1012,7 @@ const make = Effect.gen(function* () {
     );
     const earlier =
       messages.length > 1
-        ? `${messages.length - 1} earlier messages; last from ${messages.at(-2)!.outgoing ? "the user" : messages.at(-2)!.from.name || messages.at(-2)!.from.address}: ${firstLine(messages.at(-2)!.body ?? "", 100)}`
+        ? `${thread.messageCount - 1} earlier messages; last from ${messages.at(-2)!.outgoing ? "the user" : messages.at(-2)!.from.name || messages.at(-2)!.from.address}: ${firstLine(messages.at(-2)!.body ?? "", 100)}`
         : null;
     const flags = [
       prefiltered.bulk ? "bulk or list mail" : null,
@@ -935,6 +1027,7 @@ const make = Effect.gen(function* () {
       text,
       prefiltered,
       repliedTo: replied.size > 0,
+      asksQuestion: asksQuestion(latest.subject) || asksQuestion(full),
       bodyMissing: latest.bodyState !== "loaded" || full.trim().length === 0,
       item: {
         id: "",
@@ -968,7 +1061,12 @@ const make = Effect.gen(function* () {
       .pipe(Effect.timeout("3 minutes"));
     const outputChars = toJson(result).length;
     yield* recordUsage(kind, selection.model, prompt.length + outputChars, batch.length);
-    const byId = new Map(result.verdicts.map((verdict) => [verdict.id, verdict]));
+    const byId = new Map(
+      result.verdicts.map(
+        (verdict) =>
+          [verdict.id, { ...verdict, confidence: modelConfidence(verdict.confidence) }] as const,
+      ),
+    );
     return batch.map((entry, index) => ({ entry, verdict: byId.get(`e${index + 1}`) ?? null }));
   });
 
@@ -976,7 +1074,6 @@ const make = Effect.gen(function* () {
     const ids = yield* store.pendingTriage(L1_BATCH * 4);
     if (ids.length === 0) return false;
     const settings = yield* engine.settings;
-    const usage = yield* engine.usage;
     const threads = yield* store.getThreads(ids);
     const forModel: Array<Prepared> = [];
     let progressed = false;
@@ -992,16 +1089,18 @@ const make = Effect.gen(function* () {
         fromAddress: thread.fromAddress,
         category: prepared.prefiltered.category,
       });
-      const line = firstLine(prepared.text) || thread.subject;
-      const injection = looksLikeInstructionsToAi(prepared.text);
-      const skip =
-        prepared.prefiltered.rule !== null ||
+      const familiarMail =
+        !prepared.asksQuestion &&
+        (trust.category?.approvals ?? 0) > 0 &&
         canSkipModel({
           sender: trust.sender,
           guardrail: prepared.prefiltered.guardrail,
           bulk: prepared.prefiltered.bulk,
-        }) ||
-        prepared.prefiltered.verdict !== null;
+        });
+      const skip =
+        prepared.prefiltered.rule !== null ||
+        trust.sender?.trust === "never" ||
+        (trust.sender?.trust === "auto" ? familiarMail : prepared.prefiltered.verdict !== null);
       if (skip) {
         const fromMemory = trust.sender?.trust === "auto" || trust.sender?.trust === "never";
         const ruleVerdict = prepared.prefiltered.verdict;
@@ -1018,102 +1117,110 @@ const make = Effect.gen(function* () {
               source: fromMemory ? "memory" : "rule",
             },
             prefiltered: prepared.prefiltered,
-            line,
+            line: firstLine(prepared.text) || thread.subject,
             suggestedAction: null,
             category: prepared.prefiltered.category,
-            urgent: false,
-            injection,
-            bodyMissing: prepared.bodyMissing,
+            guardrail: prepared.prefiltered.guardrail,
+            injection: looksLikeInstructionsToAi(prepared.text),
+            suggestOnly: prepared.bodyMissing,
           }),
         );
-        continue;
-      }
-      if (usage.capped || settings.defaultModelSelection === null) {
-        // At the cap, or before a model is picked, only rules and settle-memory run.
-        yield* setTriageIfFresh(thread, {
-          line,
-          category: prepared.prefiltered.category,
-          guardrail: prepared.prefiltered.guardrail,
-          bulk: prepared.prefiltered.bulk,
-          triageState: usage.capped ? "capped" : "waiting_model",
-          injection,
-        });
         continue;
       }
       forModel.push(prepared);
     }
     const selection = settings.defaultModelSelection;
-    if (selection !== null) {
-      for (let start = 0; start < forModel.length; start += L1_BATCH) {
-        const batch = forModel.slice(start, start + L1_BATCH);
-        const results = yield* runModel(batch, selection, "l1").pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Mail L1 batch failed; threads wait for the next try.").pipe(
-              Effect.annotateLogs({ count: batch.length, cause: String(cause).slice(0, 200) }),
-              Effect.andThen(
-                Effect.forEach(batch, (entry) =>
-                  setTriageIfFresh(entry.thread, { triageState: "waiting_model" }),
-                ),
-              ),
-              Effect.as([] as ReadonlyArray<{ entry: Prepared; verdict: null }>),
-            ),
-          ),
-        );
-        const escalate = settings.escalationModelSelection;
-        const needsEscalation = results.filter(
-          (result) =>
-            escalate !== null &&
-            result.verdict !== null &&
-            (result.verdict.confidence < LOW_CONFIDENCE || result.entry.repliedTo),
-        );
-        const escalated =
-          escalate !== null && needsEscalation.length > 0
-            ? yield* runModel(
-                needsEscalation.map((result) => result.entry),
-                escalate,
-                "l1_escalated",
-              ).pipe(Effect.orElseSucceed(() => []))
-            : [];
-        const escalatedBy = new Map(
-          escalated.map((result) => [result.entry.thread.id as string, result.verdict]),
-        );
-        for (const result of results) {
-          const better = escalatedBy.get(result.entry.thread.id);
-          const verdict = better ?? result.verdict;
-          const prepared = result.entry;
-          if (verdict === null) {
-            yield* setTriageIfFresh(prepared.thread, { triageState: "waiting_model" });
-            continue;
-          }
-          const modelCategory = MAIL_CATEGORIES.has(verdict.category as MailCategory)
-            ? (verdict.category as MailCategory)
-            : "other";
-          const category =
-            prepared.prefiltered.category === "person" ||
-            prepared.prefiltered.category === "notification"
-              ? modelCategory
-              : prepared.prefiltered.category;
-          yield* commit(
-            applyDecision(prepared.thread, {
-              verdict: {
-                decision: verdict.decision,
-                reason: verdict.reason,
-                confidence: Math.max(0, Math.min(1, verdict.confidence)),
-                source: better ? "escalated" : "model",
-              },
-              prefiltered: prepared.prefiltered,
-              line:
-                verdict.summary.trim().slice(0, 140) ||
-                firstLine(prepared.text) ||
-                prepared.thread.subject,
-              suggestedAction: verdict.action.trim().slice(0, 40) || null,
-              category,
-              urgent: verdict.urgent,
-              injection: verdict.injection || looksLikeInstructionsToAi(prepared.text),
-              bodyMissing: prepared.bodyMissing,
-            }),
-          );
+    for (let start = 0; start < forModel.length; start += L1_BATCH) {
+      const batch = forModel.slice(start, start + L1_BATCH);
+      const { capped } = yield* engine.usage;
+      if (capped || selection === null) {
+        for (const prepared of batch) {
+          yield* setTriageIfFresh(prepared.thread, {
+            line: firstLine(prepared.text) || prepared.thread.subject,
+            category: prepared.prefiltered.category,
+            guardrail: prepared.prefiltered.guardrail,
+            bulk: prepared.prefiltered.bulk,
+            triageState: capped ? "capped" : "waiting_model",
+            injection: looksLikeInstructionsToAi(prepared.text),
+          });
         }
+        continue;
+      }
+      const results = yield* runModel(batch, selection, "l1").pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Mail L1 batch failed; threads wait for the next try.").pipe(
+            Effect.annotateLogs({ count: batch.length, cause: String(cause).slice(0, 200) }),
+            Effect.andThen(
+              Effect.forEach(batch, (entry) =>
+                setTriageIfFresh(entry.thread, { triageState: "waiting_model" }),
+              ),
+            ),
+            Effect.as([] as ReadonlyArray<{ entry: Prepared; verdict: null }>),
+          ),
+        ),
+      );
+      const escalate = settings.escalationModelSelection;
+      const needsEscalation = results.filter(
+        (result) =>
+          escalate !== null &&
+          result.verdict !== null &&
+          (result.verdict.confidence < LOW_CONFIDENCE || result.entry.repliedTo),
+      );
+      const escalated =
+        escalate !== null && needsEscalation.length > 0 && !(yield* engine.usage).capped
+          ? yield* runModel(
+              needsEscalation.map((result) => result.entry),
+              escalate,
+              "l1_escalated",
+            ).pipe(Effect.orElseSucceed(() => []))
+          : [];
+      const escalatedBy = new Map(
+        escalated.map((result) => [result.entry.thread.id as string, result.verdict]),
+      );
+      for (const result of results) {
+        const prepared = result.entry;
+        const initial = result.verdict;
+        if (initial === null) {
+          yield* setTriageIfFresh(prepared.thread, { triageState: "waiting_model" });
+          continue;
+        }
+        const better = escalatedBy.get(prepared.thread.id);
+        const verdict = better ?? initial;
+        const modelCategory = MAIL_CATEGORIES.has(verdict.category as MailCategory)
+          ? (verdict.category as MailCategory)
+          : "other";
+        const category =
+          prepared.prefiltered.category === "person" ||
+          prepared.prefiltered.category === "notification"
+            ? modelCategory
+            : prepared.prefiltered.category;
+        yield* commit(
+          applyDecision(prepared.thread, {
+            verdict: {
+              decision: verdict.decision,
+              reason: verdict.reason,
+              confidence: verdict.confidence,
+              source: better ? "escalated" : "model",
+            },
+            prefiltered: prepared.prefiltered,
+            line:
+              verdict.summary.trim().slice(0, 140) ||
+              firstLine(prepared.text) ||
+              prepared.thread.subject,
+            suggestedAction: verdict.action.trim().slice(0, 40) || null,
+            category,
+            guardrail:
+              categoryGuardrail(verdict.category) ??
+              categoryGuardrail(initial.category) ??
+              prepared.prefiltered.guardrail ??
+              (verdict.urgent || initial.urgent ? "urgent" : null),
+            injection: verdict.injection || looksLikeInstructionsToAi(prepared.text),
+            suggestOnly:
+              prepared.bodyMissing ||
+              initial.confidence < LOW_CONFIDENCE ||
+              (prepared.repliedTo && !better),
+          }),
+        );
       }
     }
     yield* engine.publishThreads(threads.map((thread) => thread.id));
@@ -1153,27 +1260,40 @@ const make = Effect.gen(function* () {
         const iso = DateTime.formatIso(now);
         const settings = yield* engine.settings;
         const changed: Array<MailThreadId> = [];
-        for (const thread of yield* store.dueSnoozes(iso)) {
-          yield* store.patchThread(thread.id, activePatch(iso));
+        const observe = Effect.fn("MailService.recordTimedAction")(function* (
+          seen: MailStore.ThreadRecord,
+          patch: MailStore.ThreadStatePatch,
+          kind: "returned" | "nudge",
+          reason: string,
+        ) {
+          const current = yield* store.getThread(seen.id);
+          if (
+            !current ||
+            current.workflowVersion !== seen.workflowVersion ||
+            current.chatThreadId !== seen.chatThreadId
+          )
+            return;
+          yield* store.patchThread(seen.id, patch);
+          // The deadline or idle chat still applies on the next tick.
           yield* store.insertAction({
             at: iso,
             actor: "mail",
             actorLabel: null,
-            kind: "returned",
-            threadId: thread.id,
-            reason: "snooze",
+            kind,
+            reason,
+            threadId: seen.id,
             undo: null,
           });
-          changed.push(thread.id);
+          changed.push(seen.id);
+        }, store.transaction);
+        for (const thread of yield* store.dueSnoozes(iso)) {
+          yield* observe(thread, activePatch(iso), "returned", "snooze");
         }
         const waitingCutoff = isoBefore(now, settings.nudgeWaitingDays);
         for (const thread of yield* store.repliedWaiting(waitingCutoff)) {
           // Follow-up nudge: the user wrote last and nobody answered.
-          yield* store.patchThread(thread.id, {
-            ...activePatch(iso),
-            nudge: `waiting:${settings.nudgeWaitingDays}`,
-          });
-          changed.push(thread.id);
+          const nudge = `waiting:${settings.nudgeWaitingDays}`;
+          yield* observe(thread, { ...activePatch(iso), nudge }, "nudge", nudge);
         }
         const replyCutoff = isoBefore(now, settings.nudgeReplyDays);
         for (const thread of yield* store.threadsByState("active")) {
@@ -1184,8 +1304,8 @@ const make = Effect.gen(function* () {
             thread.lastIncomingAt === thread.lastMessageAt &&
             thread.lastIncomingAt <= replyCutoff
           ) {
-            yield* store.patchThread(thread.id, { nudge: `unanswered:${settings.nudgeReplyDays}` });
-            changed.push(thread.id);
+            const nudge = `unanswered:${settings.nudgeReplyDays}`;
+            yield* observe(thread, { nudge }, "nudge", nudge);
           }
         }
         for (const thread of yield* store.threadsByState("working")) {
@@ -1199,11 +1319,16 @@ const make = Effect.gen(function* () {
             shell.value === null ||
             (shell.value.activeRunId === null && (shell.value.activityRunStatus ?? null) === null)
           ) {
-            yield* store.patchThread(thread.id, { ...activePatch(iso), stateAt: thread.stateAt });
-            changed.push(thread.id);
+            yield* observe(
+              thread,
+              { ...activePatch(iso), stateAt: thread.stateAt },
+              "returned",
+              "chat",
+            );
           }
         }
         if (changed.length > 0) yield* engine.publishThreads(changed);
+        yield* engine.refreshChatUsage;
         // Failed or capped triage gets another try; the cap rolls over weekly.
         const minute = Math.floor(DateTime.toEpochMillis(now) / 60_000);
         if (minute % TRIAGE_RETRY_MINUTES === 0 && settings.defaultModelSelection !== null) {
@@ -1234,6 +1359,9 @@ const make = Effect.gen(function* () {
       if (existing !== null && (existing.status === "sending" || existing.status === "sent")) {
         return yield* invalid("That draft was already sent.");
       }
+      if (existing && actor.actor !== "user" && input.expectedRevision === undefined) {
+        return yield* invalid("Read the draft and pass its current expectedRevision to edit it.");
+      }
       if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision) {
         return yield* invalid("The draft changed. Review the current version before editing.");
       }
@@ -1257,25 +1385,32 @@ const make = Effect.gen(function* () {
         revision: 0,
       });
       if (saved === null) return yield* invalid("That draft was already sent.");
-      if (existing === null) {
-        yield* store.insertAction({
+      const before =
+        existing === null
+          ? null
+          : {
+              ...(existing.status !== saved.status ? { status: existing.status } : {}),
+              ...(existing.messageId !== saved.messageId ? { messageId: existing.messageId } : {}),
+              ...(existing.error !== saved.error ? { error: existing.error } : {}),
+              ...(existing.subject !== saved.subject ? { subject: existing.subject } : {}),
+              ...(existing.body !== saved.body ? { body: existing.body } : {}),
+              ...(toJson(existing.to) !== toJson(saved.to) ? { to: existing.to } : {}),
+              ...(toJson(existing.cc) !== toJson(saved.cc) ? { cc: existing.cc } : {}),
+            };
+      const handBack =
+        actor.actor !== "user" && thread.state === "working" && thread.workingReason === "drafting";
+      yield* recordThreadAction(
+        thread,
+        handBack ? { ...activePatch(now), stateAt: thread.stateAt } : {},
+        {
           at: now,
           actor: actor.actor,
           actorLabel: actor.label ?? null,
           kind: "draft",
-          threadId: thread.id,
-          reason: null,
-          undo: actor.actor === "user" ? null : { draftId: id },
-        });
-      }
-      // A draft from an agent means the thread needs the user again.
-      if (
-        actor.actor !== "user" &&
-        thread.state === "working" &&
-        thread.workingReason === "drafting"
-      ) {
-        yield* store.patchThread(thread.id, { ...activePatch(now), stateAt: thread.stateAt });
-      }
+          reason: existing ? "edit" : null,
+        },
+        { draft: { id, revision: saved.revision, before } },
+      );
       return MailStore.draftView(saved);
     },
     store.transaction,
@@ -1295,23 +1430,21 @@ const make = Effect.gen(function* () {
         return yield* invalid("The draft changed. Review the current version before discarding.");
       }
       yield* store.deleteDraft(draftId);
+      yield* store.insertAction({
+        at: yield* nowIso,
+        actor: "user",
+        actorLabel: null,
+        kind: "draft",
+        reason: "discard",
+        threadId: draft.threadId,
+        undo: { discardedDraft: draft },
+      });
       return draft.threadId;
     },
     store.transaction,
     Effect.flatMap((id) => (id === null ? Effect.void : engine.publishThreads([id]))),
     sqlSafe,
   );
-
-  const rememberEdit = Effect.fn("MailService.rememberEdit")(function* (
-    original: string,
-    final: string,
-  ) {
-    if (original.trim() === final.trim()) return;
-    const raw = yield* store.getKv("draft-edits");
-    const edits = fromJson<Array<{ before: string; after: string }>>(raw, []);
-    edits.push({ before: original.slice(0, 600), after: final.slice(0, 600) });
-    yield* store.setKv("draft-edits", toJson(edits.slice(-MAX_DRAFT_EDITS)));
-  });
 
   const sendDraft: MailService["Service"]["sendDraft"] = Effect.fn("MailService.sendDraft")(
     function* (input) {
@@ -1323,6 +1456,8 @@ const make = Effect.gen(function* () {
         return yield* invalid("Add at least one recipient.");
       const account = yield* store.getAccount(draft.accountId);
       if (account === null) return yield* notFound("account");
+      if (account.credentialPending)
+        return yield* invalid(account.statusDetail ?? "Finish updating this account first.");
       const now = yield* nowIso;
       const recent = (yield* store.draftsForThread(draft.threadId)).find(
         (other) =>
@@ -1360,8 +1495,10 @@ const make = Effect.gen(function* () {
         .pipe(Effect.orElseSucceed(() => null));
       if (password === null)
         return yield* fail("Re-enter the app password for this account.", "auth_failed");
-      const messages = yield* store.threadMessages(claimed.threadId);
-      const last = messages.at(-1);
+      const last = yield* store.latestMessage(claimed.threadId);
+      const correspondent = last?.outgoing
+        ? yield* store.latestMessage(claimed.threadId, true)
+        : last;
       const outgoing = {
         from: { name: account.displayName, address: account.email },
         to: claimed.to,
@@ -1405,7 +1542,20 @@ const make = Effect.gen(function* () {
         );
       }
       const sentAt = yield* nowIso;
-      yield* store.finishDraftSend(claimed.id, { status: "sent", error: null, at: sentAt });
+      const sender = correspondent?.from.address.trim().toLowerCase();
+      const editSender =
+        sender &&
+        claimed.originalBody !== null &&
+        claimed.originalBody.trim() !== claimed.body.trim() &&
+        [...claimed.to, ...claimed.cc].every((address) => address.trim().toLowerCase() === sender)
+          ? sender
+          : null;
+      yield* store.finishDraftSend(claimed.id, {
+        status: "sent",
+        error: null,
+        at: sentAt,
+        editSender,
+      });
       const final: MailStore.DraftRecord = {
         ...claimed,
         status: "sent",
@@ -1416,7 +1566,7 @@ const make = Effect.gen(function* () {
       const local = yield* store.upsertMessage({
         accountId: account.id,
         mailbox: "__local",
-        uid: -Math.floor(isoMillis(sentAt) / 1000),
+        uid: yield* store.nextLocalSentUid,
         messageId,
         threadId: claimed.threadId,
         labels: null,
@@ -1462,96 +1612,72 @@ const make = Effect.gen(function* () {
           raw: sent.value.toString("base64"),
         });
       }
-      if (claimed.originalBody !== null) yield* rememberEdit(claimed.originalBody, claimed.body);
       yield* engine.publishThreads([claimed.threadId]);
       return MailStore.draftView(final);
     },
+    (operation) => TxReentrantLock.withReadLock(accountLock, operation),
     sqlSafe,
   );
 
+  const sessionLock = yield* KeyedLock.make<MailThreadId>();
+  const sessionDigest = (...parts: ReadonlyArray<string | null>) =>
+    NodeCrypto.createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  const chatUnavailable = () =>
+    new MailError({ code: "unavailable", message: "Could not reach the mail chat." });
+
   const ensureSessionProject = Effect.gen(function* () {
-    const existing = yield* projects
-      .getById(MAIL_SESSION_PROJECT_ID)
-      .pipe(Effect.orElseSucceed(() => Option.none()));
-    if (Option.isSome(existing)) return existing.value.id as ProjectId;
+    const existing = yield* projects.getById(MAIL_SESSION_PROJECT_ID);
+    if (Option.isSome(existing)) return;
     yield* readEmailMdText;
     const created = yield* projects.bootstrap({
-      commandId: CommandId.make(`mail:project:${yield* uuid}`),
+      commandId: CommandId.make("mail:project:create"),
       projectId: MAIL_SESSION_PROJECT_ID,
       title: "Mail",
       workspaceRoot: store.workspaceDir,
       createWorkspaceRootIfMissing: true,
     });
-    return created.project.id as ProjectId;
+    if (created.project.id !== MAIL_SESSION_PROJECT_ID) return yield* chatUnavailable();
   });
 
   const openSession: MailService["Service"]["openSession"] = Effect.fn("MailService.openSession")(
     function* (input) {
       const thread = yield* store.getThread(input.threadId);
       if (thread === null) return yield* notFound("email");
-      const settings = yield* engine.settings;
-      const projectId = yield* ensureSessionProject.pipe(
+      yield* ensureSessionProject.pipe(
         Effect.mapError(
-          () =>
-            new MailError({ code: "unavailable", message: "Could not create the Mail project." }),
+          () => new MailError({ code: "unavailable", message: "Could not open the Mail project." }),
         ),
       );
-      const now = yield* nowIso;
-      const existingId = thread.chatThreadId === null ? null : ThreadId.make(thread.chatThreadId);
-      const existingShell =
-        existingId === null
+      const projectId = MAIL_SESSION_PROJECT_ID;
+      const linkedId = thread.chatThreadId === null ? null : ThreadId.make(thread.chatThreadId);
+      const shell =
+        linkedId === null
           ? null
-          : yield* threadManagement
-              .getThreadShell(existingId)
-              .pipe(Effect.orElseSucceed(() => null));
-      if (existingId !== null && existingShell !== null) {
-        if (input.prompt) {
-          yield* threadManagement
-            .sendToThread({
-              projectId,
-              commandId: CommandId.make(`mail:send:${yield* uuid}`),
-              threadId: existingId,
-              messageId: MessageId.make(yield* uuid),
-              text: input.prompt,
-              attachments: [],
-              ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
-              mode: "auto",
-              createdBy: "user",
-              creationSource: "server",
-            })
-            .pipe(
-              Effect.mapError(
-                () =>
-                  new MailError({ code: "unavailable", message: "Could not reach the mail chat." }),
-              ),
-            );
-          yield* store.patchThread(thread.id, {
-            state: "working",
-            stateAt: now,
-            workingReason: "drafting",
-          });
-          yield* engine.publishThreads([thread.id]);
-        }
-        return { projectId, threadId: existingId, created: false };
-      }
-      const modelSelection =
-        input.modelSelection ??
-        settings.defaultModelSelection ??
-        (yield* serverSettings.getSettings.pipe(
-          Effect.map((server) => server.defaultModelSelection ?? null),
-          Effect.orElseSucceed(() => null),
-        ));
-      if (modelSelection === null) {
-        return yield* invalid("Pick a mail model in Settings → Mail first.");
-      }
-      const messages = (yield* store.threadMessages(thread.id)).slice(-8);
+          : yield* threadManagement.getThreadShell(linkedId).pipe(Effect.mapError(chatUnavailable));
+      if (shell && shell.projectId !== projectId) return yield* chatUnavailable();
+      // A confirmed deletion starts a new chain. A lost launch result replays the same claim.
+      const threadId =
+        shell?.id ?? ThreadId.make(`mail-chat-${sessionDigest(thread.id, linkedId)}`);
+      const trackingKey = `chat-context:${threadId}`;
+      const previous = yield* store.getKv(trackingKey);
+      const messages = yield* store.threadMessages(thread.id, 8);
       const transcript = messages
         .map(
           (message) =>
             `From: ${message.outgoing ? "the user" : `${message.from.name} <${message.from.address}>`}\nDate: ${message.date}\nSubject: ${message.subject}\n\n${cleanForModel(message.body ?? "(body not downloaded)", SESSION_MESSAGE_CHARS)}`,
         )
         .join("\n\n---\n\n");
-      const related = (yield* store.relatedThreads(thread.fromAddress, thread.id, 5))
+      const revision = sessionDigest(transcript, ...messages.map((message) => String(message.id)));
+      const contextSent = previous?.startsWith(`${revision}:`) === true;
+      if (shell && contextSent && !input.prompt) return { projectId, threadId, created: false };
+      const receipt = sessionDigest(threadId, previous, revision, input.prompt ?? null);
+      const messageId = MessageId.make(`${revision}:${receipt}`);
+      const related = (yield* store.relatedThreads(
+        thread.accountId,
+        thread.fromAddress,
+        thread.id,
+        5,
+      ))
         .map((entry) => `- ${entry.lastMessageAt.slice(0, 10)} ${entry.subject} (${entry.state})`)
         .join("\n");
       const emailMd = relevantEmailMd(yield* readEmailMdText, [
@@ -1559,11 +1685,18 @@ const make = Effect.gen(function* () {
         thread.fromAddress,
         domainOf(thread.fromAddress),
       ]);
-      const editsRaw = yield* store.getKv("draft-edits");
-      const edits = fromJson<Array<{ before: string; after: string }>>(editsRaw, []).slice(-3);
+      const edits =
+        thread.lastIncomingAt === null
+          ? []
+          : yield* store.recentReplyEdits(
+              thread.accountId,
+              thread.fromAddress.trim().toLowerCase(),
+            );
       const request =
         input.prompt ??
-        "Read this email thread. Tell me in two lines what it needs from me, then draft a reply with mail_draft if one is needed.";
+        (shell
+          ? "Update me on what changed in this email thread."
+          : "Read this email thread. Tell me in two lines what it needs from me, then leave a reply draft if one is needed.");
       const text = buildSessionPrompt({
         mailThreadId: thread.id,
         subject: thread.subject,
@@ -1580,35 +1713,77 @@ const make = Effect.gen(function* () {
           .join("\n\n"),
         request,
       });
-      const launched = yield* launcher
-        .launch({
-          commandId: CommandId.make(`mail:session:${yield* uuid}`),
-          projectId,
-          title: thread.subject || "Email",
-          titleRenamed: true,
-          modelSelection,
-          // Mail text can try to steer the agent; commands and edits wait for the user.
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-          workspaceStrategy: { type: "root" },
-          initialMessage: { text, attachments: [] },
-          createdBy: "user",
-          creationSource: "server",
-        })
-        .pipe(
-          Effect.mapError(
-            () => new MailError({ code: "unavailable", message: "Could not start the mail chat." }),
-          ),
-        );
-      yield* store.setChatThread(thread.id, launched.threadId);
-      yield* store.patchThread(thread.id, {
-        state: "working",
-        stateAt: now,
-        workingReason: "drafting",
-      });
+      let created = false;
+      let send = shell !== null;
+      if (shell === null) {
+        const modelSelection =
+          input.modelSelection ??
+          (yield* engine.settings).defaultModelSelection ??
+          (yield* serverSettings.getSettings.pipe(Effect.mapError(chatUnavailable)))
+            .defaultModelSelection;
+        if (!modelSelection) return yield* invalid("Pick a mail model in Settings → Mail first.");
+        const launched = yield* launcher
+          .launch({
+            commandId: CommandId.make(`mail:session:${threadId}`),
+            threadId,
+            projectId,
+            title: thread.subject || "Email",
+            titleRenamed: true,
+            modelSelection,
+            // Mail text can try to steer the agent; commands and edits wait for the user.
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            workspaceStrategy: { type: "root" },
+            initialMessage: { messageId, text, attachments: [] },
+            createdBy: "user",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.mapError(
+              () =>
+                new MailError({ code: "unavailable", message: "Could not start the mail chat." }),
+            ),
+          );
+        created = !launched.resumed;
+        // New mail or a different request may have arrived since the unacknowledged launch.
+        send =
+          launched.resumed &&
+          !launched.projection.messages.some((message) =>
+            input.prompt ? message.id === messageId : message.id.startsWith(`${revision}:`),
+          );
+      }
+      if (send) {
+        yield* threadManagement
+          .sendToThread({
+            commandId: CommandId.make(`mail:send:${receipt}`),
+            messageId,
+            projectId,
+            threadId,
+            text: contextSent && input.prompt ? input.prompt : text,
+            attachments: [],
+            ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+            mode: "auto",
+            createdBy: "user",
+            creationSource: "server",
+          })
+          .pipe(Effect.mapError(chatUnavailable));
+      }
+      yield* store.transaction(
+        Effect.gen(function* () {
+          if (threadId !== linkedId) yield* store.setChatThread(thread.id, threadId);
+          yield* store.setKv(trackingKey, messageId);
+          yield* store.patchThread(thread.id, {
+            state: "working",
+            stateAt: yield* nowIso,
+            workingReason: "drafting",
+          });
+        }),
+      );
       yield* engine.publishThreads([thread.id]);
-      return { projectId, threadId: launched.threadId, created: true };
+      return { projectId, threadId, created };
     },
+    (effect, input) =>
+      sessionLock.withLock(input.threadId, TxReentrantLock.withReadLock(accountLock, effect)),
     sqlSafe,
   );
 
@@ -1642,6 +1817,47 @@ const make = Effect.gen(function* () {
       },
     });
 
+  const retrySave = "The app password update is incomplete. Re-enter it or remove this account.";
+  const retryRemove = "Account removal is incomplete. Retry Remove to finish deleting local data.";
+  const credentialErrorState = (statusDetail: string) => ({
+    credentialPending: true,
+    status: "error" as const,
+    statusDetail,
+  });
+
+  const credentialFailure = (recovery: string) =>
+    Effect.fn("MailService.credentialFailure")(function* (
+      error: MailCredentials.MailCredentialError,
+    ) {
+      const message = `${error.message} ${recovery}`;
+      yield* store.updateAccount(error.accountId, credentialErrorState(message));
+      return yield* new MailError({ code: "unavailable", message });
+    });
+
+  // The row records every possible location before a native or filesystem write can start.
+  const savePassword = Effect.fn("MailService.savePassword")(
+    function* (
+      id: MailAccountId,
+      password: string,
+      preferred: MailCredentials.CredentialStore,
+      keychainPossible: boolean,
+    ) {
+      const credentialStore = yield* credentials.put(id, password, preferred);
+      yield* store.updateAccount(id, { credentialStore });
+      if (credentialStore === "keychain") yield* credentials.remove(id, "file");
+      else if (keychainPossible) yield* credentials.remove(id, "keychain");
+      yield* store.updateAccount(id, {
+        keychainPossible: credentialStore === "keychain",
+        credentialPending: false,
+        status: "connecting",
+        statusDetail: null,
+      });
+    },
+    Effect.uninterruptible,
+    Effect.catchTags({ MailCredentialError: credentialFailure(retrySave) }),
+    Effect.tapError(() => engine.publishStatus),
+  );
+
   const addAccount: MailService["Service"]["addAccount"] = Effect.fn("MailService.addAccount")(
     function* (input) {
       const email = input.email.trim().toLowerCase();
@@ -1656,15 +1872,8 @@ const make = Effect.gen(function* () {
       // Gmail app passwords are shown with spaces; the server wants them without.
       const password = input.appPassword.replace(/\s+/g, "");
       const verified = yield* verify(connection, password);
-      const id = MailAccountId.make(`acct-${(yield* uuid).slice(0, 12)}`);
-      const credentialStore = yield* credentials
-        .put(id, password)
-        .pipe(
-          Effect.mapError(
-            () =>
-              new MailError({ code: "unavailable", message: "Could not save the app password." }),
-          ),
-        );
+      const id = MailAccountId.make(`acct-${yield* uuid}`);
+      const preferred = yield* credentials.preferredStore(id);
       yield* store.insertAccount({
         id,
         email,
@@ -1677,125 +1886,149 @@ const make = Effect.gen(function* () {
         smtpPort: connection.smtpPort,
         smtpTls: connection.smtpTls,
         username: connection.username,
-        credentialStore,
-        status: "connecting",
-        statusDetail: null,
+        credentialStore: preferred,
+        keychainPossible: preferred === "keychain",
+        ...credentialErrorState(retrySave),
         lastSyncAt: null,
         backfillPausedUntil: null,
         createdAt: yield* nowIso,
       });
+      yield* savePassword(id, password, preferred, preferred === "keychain");
       yield* readEmailMdText;
       yield* sync.start(id);
       yield* engine.publishStatus;
       return yield* accountView(id);
     },
+    changeAccounts,
     sqlSafe,
   );
 
   const updateAccount: MailService["Service"]["updateAccount"] = Effect.fn(
     "MailService.updateAccount",
-  )(function* (input) {
-    const account = yield* store.getAccount(input.accountId);
-    if (account === null) return yield* notFound("account");
-    if (input.appPassword !== undefined) {
-      const password = input.appPassword.replace(/\s+/g, "");
-      yield* verify(
-        {
-          imapHost: account.imapHost,
-          imapPort: account.imapPort,
-          imapTls: account.imapTls,
-          smtpHost: account.smtpHost,
-          smtpPort: account.smtpPort,
-          smtpTls: account.smtpTls,
-          username: account.username,
-        },
-        password,
-      );
-      const credentialStore = yield* credentials
-        .put(account.id, password)
-        .pipe(
-          Effect.mapError(
-            () =>
-              new MailError({ code: "unavailable", message: "Could not save the app password." }),
-          ),
+  )(
+    function* (input) {
+      const account = yield* store.getAccount(input.accountId);
+      if (account === null) return yield* notFound("account");
+      if (input.appPassword !== undefined) {
+        const password = input.appPassword.replace(/\s+/g, "");
+        yield* verify(
+          {
+            imapHost: account.imapHost,
+            imapPort: account.imapPort,
+            imapTls: account.imapTls,
+            smtpHost: account.smtpHost,
+            smtpPort: account.smtpPort,
+            smtpTls: account.smtpTls,
+            username: account.username,
+          },
+          password,
         );
-      yield* store.updateAccount(account.id, {
-        credentialStore,
-        status: "connecting",
-        statusDetail: null,
-      });
-    }
-    if (input.displayName !== undefined && input.displayName.trim()) {
-      yield* store.updateAccount(account.id, { displayName: input.displayName.trim() });
-    }
-    if (input.appPassword !== undefined) yield* sync.start(account.id);
-    yield* engine.publishStatus;
-    return yield* accountView(account.id);
-  }, sqlSafe);
+        const preferred = yield* credentials.preferredStore(account.id);
+        const keychainPossible = account.keychainPossible || preferred === "keychain";
+        yield* sync.stop(account.id);
+        yield* store.updateAccount(account.id, {
+          ...credentialErrorState(retrySave),
+          keychainPossible,
+        });
+        yield* savePassword(account.id, password, preferred, keychainPossible);
+      }
+      if (input.displayName !== undefined && input.displayName.trim()) {
+        yield* store.updateAccount(account.id, { displayName: input.displayName.trim() });
+      }
+      if (input.appPassword !== undefined) yield* sync.start(account.id);
+      yield* engine.publishStatus;
+      return yield* accountView(account.id);
+    },
+    changeAccounts,
+    sqlSafe,
+  );
 
   const removeAccount: MailService["Service"]["removeAccount"] = Effect.fn(
     "MailService.removeAccount",
-  )(function* (accountId) {
-    const account = yield* store.getAccount(accountId);
-    if (account === null) return;
-    yield* sync.stop(accountId);
-    yield* credentials.remove(accountId, account.credentialStore).pipe(Effect.ignore);
-    const threads = yield* store.sql<{
-      id: string;
-    }>`SELECT id FROM mail_threads WHERE account_id = ${accountId}`;
-    yield* store.deleteAccount(accountId);
-    yield* engine.publishRemoved(threads.map((row) => row.id as MailThreadId));
-    yield* engine.publishStatus;
-  }, sqlSafe);
+  )(
+    function* (accountId) {
+      const account = yield* store.getAccount(accountId);
+      if (account === null) return;
+      yield* sync.stop(accountId);
+      yield* store.updateAccount(accountId, credentialErrorState(retryRemove));
+      yield* Effect.gen(function* () {
+        yield* credentials.remove(accountId, "file");
+        if (account.keychainPossible) yield* credentials.remove(accountId, "keychain");
+      }).pipe(
+        Effect.uninterruptible,
+        Effect.catchTags({ MailCredentialError: credentialFailure(retryRemove) }),
+      );
+      const threads = yield* store.sql<{
+        id: string;
+      }>`SELECT id FROM mail_threads WHERE account_id = ${accountId}`;
+      yield* commit(store.deleteAccount(accountId));
+      yield* engine.publishRemoved(threads.map((row) => row.id as MailThreadId));
+      yield* engine.publishStatus;
+    },
+    Effect.tapError(() => engine.publishStatus),
+    changeAccounts,
+    sqlSafe,
+  );
 
-  const syncNow: MailService["Service"]["syncNow"] = Effect.fn("MailService.syncNow")(function* (
-    accountId,
-  ) {
-    const accounts = yield* store.listAccounts;
-    for (const account of accounts) {
-      if (accountId !== undefined && account.id !== accountId) continue;
-      // A stopped loop (auth failure, paused) restarts; a live one just wakes.
-      if (
-        account.status === "auth_failed" ||
-        account.status === "paused" ||
-        account.status === "error" ||
-        account.status === "offline"
-      ) {
-        yield* sync.start(account.id);
-      } else {
-        yield* sync.wake(account.id);
+  const syncNow: MailService["Service"]["syncNow"] = Effect.fn("MailService.syncNow")(
+    function* (accountId) {
+      const accounts = yield* store.listAccounts;
+      for (const account of accounts) {
+        if (accountId !== undefined && account.id !== accountId) continue;
+        if (account.credentialPending) {
+          if (accountId !== undefined) return yield* invalid(account.statusDetail ?? retrySave);
+          continue;
+        }
+        // A stopped loop (auth failure, paused) restarts; a live one just wakes.
+        if (
+          account.status === "auth_failed" ||
+          account.status === "paused" ||
+          account.status === "error" ||
+          account.status === "offline"
+        ) {
+          yield* sync.start(account.id);
+        } else {
+          yield* sync.wake(account.id);
+        }
       }
-    }
-  }, sqlSafe);
+    },
+    changeAccounts,
+    sqlSafe,
+  );
 
   const updateSettings: MailService["Service"]["updateSettings"] = Effect.fn(
     "MailService.updateSettings",
-  )(function* (input) {
-    const current = yield* engine.settings;
-    const next: MailSettings = {
-      ...current,
-      ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
-    };
-    yield* engine.putSettings(next);
-    if (current.syncEnabled !== next.syncEnabled) {
-      for (const account of yield* store.listAccounts) {
-        if (next.syncEnabled) yield* sync.start(account.id);
-        else
-          yield* sync
-            .stop(account.id)
-            .pipe(Effect.andThen(store.updateAccount(account.id, { status: "paused" })));
+  )(
+    function* (input) {
+      const current = yield* engine.settings;
+      const next: MailSettings = {
+        ...current,
+        ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
+      };
+      yield* engine.putSettings(next);
+      if (current.syncEnabled !== next.syncEnabled) {
+        for (const account of yield* store.listAccounts) {
+          if (account.credentialPending) continue;
+          if (next.syncEnabled) yield* sync.start(account.id);
+          else
+            yield* sync
+              .stop(account.id)
+              .pipe(Effect.andThen(store.updateAccount(account.id, { status: "paused" })));
+        }
       }
-    }
-    const unblocked =
-      (current.defaultModelSelection === null && next.defaultModelSelection !== null) ||
-      current.weeklyTokenCap !== next.weeklyTokenCap;
-    if (unblocked) {
-      yield* store.requeueWaitingTriage;
-      yield* Queue.offer(engine.triageSignal, undefined);
-    }
-    yield* engine.publishStatus;
-    return next;
-  }, sqlSafe);
+      const unblocked =
+        (current.defaultModelSelection === null && next.defaultModelSelection !== null) ||
+        current.weeklyTokenCap !== next.weeklyTokenCap;
+      if (unblocked) {
+        yield* store.requeueWaitingTriage;
+        yield* Queue.offer(engine.triageSignal, undefined);
+      }
+      yield* engine.publishStatus;
+      return next;
+    },
+    changeAccounts,
+    sqlSafe,
+  );
 
   const listTrust: MailService["Service"]["listTrust"] = store.listTrust.pipe(
     Effect.map((rows) => ({
@@ -1815,42 +2048,46 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
-  const setTrust: MailService["Service"]["setTrust"] = Effect.fn("MailService.setTrust")(function* (
-    input,
-  ) {
-    const kind = input.key.startsWith("category:")
-      ? "category"
-      : input.key.startsWith("sender:")
-        ? "sender"
-        : null;
-    if (kind === null) return yield* invalid("Unknown trust key.");
-    const now = yield* nowIso;
-    const records = yield* store.getTrust([input.key]);
-    const current = records.get(input.key) ?? emptyRecord(input.key, kind);
-    if (input.trust === "reset") yield* store.deleteTrust(input.key);
-    else yield* store.putTrust(setLevel(current, input.trust), now);
-    yield* store.insertAction({
-      at: now,
-      actor: "user",
-      actorLabel: input.key,
-      kind: "trust",
-      threadId: null,
-      reason: input.trust,
-      undo: {
-        trust: {
-          effect: "level",
-          entries: [
-            {
+  const setTrust: MailService["Service"]["setTrust"] = Effect.fn("MailService.setTrust")(
+    function* (input) {
+      const kind = input.key.startsWith("category:")
+        ? "category"
+        : input.key.startsWith("sender:")
+          ? "sender"
+          : null;
+      if (kind === null) return yield* invalid("Unknown trust key.");
+      const now = yield* nowIso;
+      const records = yield* store.getTrust([input.key]);
+      const current = records.get(input.key) ?? emptyRecord(input.key, kind);
+      const next = input.trust === "reset" ? null : setLevel(current, input.trust);
+      if (next === null) yield* store.deleteTrust(input.key);
+      else yield* store.putTrust(next, now);
+      yield* store.insertAction({
+        at: now,
+        actor: "user",
+        actorLabel: input.key,
+        kind: "trust",
+        threadId: null,
+        reason: input.trust,
+        undo: {
+          trust: {
+            effect: "level",
+            entry: {
               key: input.key,
               kind,
-              before: current,
-              after: input.trust === "reset" ? null : setLevel(current, input.trust),
+              clock: yield* store.advanceTrustClock(
+                input.key,
+                input.trust === "reset" ? "reset" : "level",
+              ),
             },
-          ],
+            before: previousTrustFields(records.get(input.key) ?? null, next),
+          },
         },
-      },
-    });
-  }, sqlSafe);
+      });
+    },
+    store.transaction,
+    sqlSafe,
+  );
 
   const readEmailMd: MailService["Service"]["readEmailMd"] = readEmailMdText.pipe(
     Effect.map((content) => ({ path: emailMdPath, content })),
@@ -1905,6 +2142,8 @@ const make = Effect.gen(function* () {
       .map((message) => cleanForModel(message.body ?? "", 800))
       .filter((text) => text.length > 20);
     if (samples.length === 0) return yield* invalid("No sent mail has synced yet.");
+    if ((yield* engine.usage).capped)
+      return yield* invalid("The weekly mail token cap has been reached.");
     const prompt = buildVoicePrompt(samples);
     const result = yield* textGeneration
       .generateMailNotes({
@@ -1929,7 +2168,7 @@ const make = Effect.gen(function* () {
     );
     yield* engine.publishStatus;
     return { notes: result.notes.trim() };
-  }).pipe(sqlSafe);
+  }).pipe(triageLock.withPermits(1), sqlSafe);
 
   const dismissRecap: MailService["Service"]["dismissRecap"] = (date) =>
     store.setKv("recap-dismissed", date).pipe(Effect.andThen(engine.publishStatus), sqlSafe);
@@ -1943,13 +2182,14 @@ const make = Effect.gen(function* () {
   );
   yield* store.requeueWaitingTriage.pipe(Effect.ignore);
   for (const account of yield* store.listAccounts.pipe(Effect.orElseSucceed(() => []))) {
-    yield* sync.start(account.id);
+    if (!account.credentialPending) yield* sync.start(account.id);
   }
   yield* triageWorker.pipe(Effect.forkScoped);
   yield* Queue.offer(engine.triageSignal, undefined);
   yield* tick.pipe(Effect.repeat(Schedule.spaced("1 minute")), Effect.forkScoped);
 
   return MailService.of({
+    arrivals: engine.arrivals,
     subscribe: engine.subscribe.pipe(Stream.mapError(() => storeError())),
     getThread,
     listSettled,

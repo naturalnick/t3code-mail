@@ -1,4 +1,5 @@
-import { type MailAccountId, type MailThreadId } from "@t3tools/contracts";
+import { type MailAccountId, MailThreadId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -9,11 +10,17 @@ import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
+import type { SqlError } from "effect/sql/SqlError";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
+import * as HostPowerMonitor from "../background/HostPowerMonitor.ts";
+import { beginMacMailActivity } from "./macMailActivity.ts";
 import { ImapFailure, ImapSession, classifyImapError, type ParsedMessage } from "./imapSession.ts";
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
 import * as MailStore from "./MailStore.ts";
+import { type EnqueueOp, enqueueOp, replayOp } from "./mailServerOp.ts";
 
 /** Newest messages fetched on a mailbox's first sync; the rest arrives by backfill. */
 const INITIAL_PAGE = 200;
@@ -28,12 +35,6 @@ const BODY_ATTEMPTS = 3;
 const FETCH_FAILED = Symbol("fetch-failed");
 const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000, 5 * 60_000];
 
-export type ServerOp =
-  | { readonly kind: "archive"; readonly threadId: MailThreadId }
-  | { readonly kind: "unarchive"; readonly threadId: MailThreadId }
-  | { readonly kind: "seen"; readonly threadId: MailThreadId; readonly seen: boolean }
-  | { readonly kind: "append_sent"; readonly raw: string };
-
 const parseTextPart = (raw: string): { part: string; html: boolean } | null => {
   try {
     return JSON.parse(raw) as { part: string; html: boolean };
@@ -41,14 +42,6 @@ const parseTextPart = (raw: string): { part: string; html: boolean } | null => {
     return null;
   }
 };
-const parseOp = (raw: string): ServerOp | null => {
-  try {
-    return JSON.parse(raw) as ServerOp;
-  } catch {
-    return null;
-  }
-};
-
 interface LiveSession {
   readonly imap: ImapSession;
   readonly wake: () => void;
@@ -62,7 +55,7 @@ export class MailSync extends Context.Service<
     readonly stop: (accountId: MailAccountId) => Effect.Effect<void>;
     /** Breaks IDLE so queued server ops and a fresh sync run now. */
     readonly wake: (accountId?: MailAccountId) => Effect.Effect<void>;
-    readonly enqueue: (accountId: MailAccountId, op: ServerOp) => Effect.Effect<void>;
+    readonly enqueue: (accountId: MailAccountId, op: EnqueueOp) => Effect.Effect<void, SqlError>;
     /** Gmail X-GM-RAW search; matches not synced yet are fetched so they show up locally. */
     readonly searchGmail: (
       accountId: MailAccountId,
@@ -75,6 +68,20 @@ const make = Effect.gen(function* () {
   const store = yield* MailStore.MailStore;
   const engine = yield* MailEngine.MailEngine;
   const credentials = yield* MailCredentials.MailCredentials;
+  const platform = yield* HostProcess.Platform;
+  const power = yield* HostPowerMonitor.HostPowerMonitor;
+  const suspended = yield* SubscriptionRef.make((yield* power.snapshot).suspended);
+  let lastTick = yield* Clock.currentTimeMillis;
+  yield* power.streamChanges.pipe(
+    Stream.runForEach(({ suspended: next }) =>
+      Effect.gen(function* () {
+        if ((yield* SubscriptionRef.get(suspended)) === next) return;
+        lastTick = yield* Clock.currentTimeMillis;
+        yield* SubscriptionRef.set(suspended, next);
+      }),
+    ),
+    Effect.forkScoped({ startImmediately: true }),
+  );
   const fibers = yield* FiberMap.make<MailAccountId>();
   const live = new Map<MailAccountId, LiveSession>();
 
@@ -96,7 +103,7 @@ const make = Effect.gen(function* () {
     const account = yield* store.getAccount(accountId).pipe(Effect.orDie);
     if (account === null) return;
     let dirty = true;
-    const expunged: Array<{ path: string; uid: number }> = [];
+    const expunged = new Map<string, number[]>();
     const imap = new ImapSession(
       {
         host: account.imapHost,
@@ -114,7 +121,11 @@ const make = Effect.gen(function* () {
           dirty = true;
         },
         onExpunge: (path, uid) => {
-          if (uid !== undefined) expunged.push({ path, uid });
+          if (uid !== undefined) {
+            const pending = expunged.get(path);
+            if (pending) pending.push(uid);
+            else expunged.set(path, [uid]);
+          }
           dirty = true;
         },
         onClose: () => {},
@@ -123,9 +134,11 @@ const make = Effect.gen(function* () {
     const scope = yield* Scope.Scope;
     yield* Scope.addFinalizer(
       scope,
-      Effect.promise(() => imap.close()).pipe(
-        Effect.andThen(Effect.sync(() => live.delete(accountId))),
-      ),
+      Effect.sync(() => {
+        // A sleeping peer cannot acknowledge LOGOUT. Abort any outstanding IMAP command.
+        imap.client.close();
+        if (live.get(accountId)?.imap === imap) live.delete(accountId);
+      }),
     );
     yield* setStatus(accountId, { status: "connecting", statusDetail: null });
     const roles = yield* promise(() => imap.connect());
@@ -149,7 +162,7 @@ const make = Effect.gen(function* () {
     const syncMailboxOnce = Effect.fnUntraced(function* (path: string, role: "primary" | "sent") {
       const known = yield* store.getMailbox(accountId, path).pipe(Effect.orDie);
       const localUids =
-        known === null
+        known === null || imap.qresync
           ? []
           : yield* store
               .knownUids(accountId, path, Math.max(1, known.maxUid - FLAG_WINDOW))
@@ -179,7 +192,10 @@ const make = Effect.gen(function* () {
           }
           const newer = await imap.fetchNewer(known.maxUid, 1_000);
           const windowFrom = Math.max(1, known.maxUid - FLAG_WINDOW);
-          const unchanged = imap.condstore && known.highestModseq === snapshot.highestModseq;
+          const unchanged =
+            imap.condstore &&
+            known.highestModseq !== null &&
+            known.highestModseq === snapshot.highestModseq;
           const flagChanges = unchanged
             ? []
             : await imap.fetchFlagChanges({
@@ -195,38 +211,55 @@ const make = Effect.gen(function* () {
           return { type: "incremental" as const, snapshot, messages: newer, flagChanges, vanished };
         }),
       );
-      if (result.type === "reset") return false;
-      const messages = result.messages;
-      yield* ingest(path, role, messages, { initial: result.type === "initial", backfill: false });
-      const maxUid = Math.max(known?.maxUid ?? 0, ...messages.map((message) => message.uid));
-      const minUid = result.type === "initial" ? result.pageMin : (known?.minUid ?? null);
-      if (result.type === "incremental") {
-        yield* engine
-          .applyFlags({ accountId, gmail: roles.gmail, mailbox: path }, result.flagChanges)
-          .pipe(Effect.orDie);
-        yield* engine.markRemoved({ accountId, mailbox: path }, result.vanished).pipe(Effect.orDie);
+      if (result.type === "reset") {
+        expunged.delete(path);
+        return false;
       }
-      const removed = expunged
-        .splice(0)
-        .filter((entry) => entry.path === path)
-        .map((entry) => entry.uid);
-      if (removed.length > 0) {
-        yield* engine.markRemoved({ accountId, mailbox: path }, removed).pipe(Effect.orDie);
-      }
+      // Messages and the UIDVALIDITY that authorizes their queued actions become visible together.
       yield* store
-        .putMailbox({
-          accountId,
-          path,
-          role,
-          uidValidity: result.snapshot.uidValidity,
-          maxUid: Math.max(maxUid, 0),
-          minUid,
-          highestModseq: result.snapshot.highestModseq,
-          backfillDone:
-            result.type === "initial"
-              ? result.snapshot.exists <= INITIAL_PAGE
-              : (known?.backfillDone ?? false),
-        })
+        .transaction(
+          Effect.gen(function* () {
+            const messages = result.messages;
+            yield* ingest(path, role, messages, {
+              initial: result.type === "initial",
+              backfill: false,
+            });
+            const maxUid = Math.max(known?.maxUid ?? 0, ...messages.map((message) => message.uid));
+            const minUid = result.type === "initial" ? result.pageMin : (known?.minUid ?? null);
+            if (result.type === "incremental") {
+              yield* engine
+                .applyFlags({ accountId, gmail: roles.gmail, mailbox: path }, result.flagChanges)
+                .pipe(Effect.orDie);
+              yield* engine
+                .markRemoved({ accountId, mailbox: path }, result.vanished)
+                .pipe(Effect.orDie);
+            }
+            const removed = expunged.get(path);
+            if (removed) {
+              expunged.delete(path);
+              yield* engine.markRemoved({ accountId, mailbox: path }, removed).pipe(Effect.orDie);
+            }
+            const backfillDone =
+              result.type === "initial"
+                ? result.snapshot.exists <= INITIAL_PAGE
+                : (known?.backfillDone ?? false);
+            if (result.type === "initial" && backfillDone) {
+              yield* engine.finishMailboxReset(accountId, path).pipe(Effect.orDie);
+            }
+            yield* store
+              .putMailbox({
+                accountId,
+                path,
+                role,
+                uidValidity: result.snapshot.uidValidity,
+                maxUid: Math.max(maxUid, 0),
+                minUid,
+                highestModseq: result.snapshot.highestModseq,
+                backfillDone,
+              })
+              .pipe(Effect.orDie);
+          }),
+        )
         .pipe(Effect.orDie);
       return true;
     });
@@ -306,6 +339,8 @@ const make = Effect.gen(function* () {
       }
       const messages = exit.value;
       yield* ingest(path, role, messages, { initial: false, backfill: true });
+      if (messages.length === 0)
+        yield* engine.finishMailboxReset(accountId, path).pipe(Effect.orDie);
       yield* store
         .putMailbox({
           ...known,
@@ -313,69 +348,23 @@ const make = Effect.gen(function* () {
           backfillDone: messages.length === 0,
         })
         .pipe(Effect.orDie);
-      // After a UIDVALIDITY reset, threads whose mail never came back are gone for good.
-      if (messages.length === 0) yield* engine.removeEmptyThreads(accountId).pipe(Effect.orDie);
     });
 
     const runOps = Effect.gen(function* () {
       const ops = yield* store.pendingOps(accountId).pipe(Effect.orDie);
       for (const row of ops) {
-        const op = parseOp(row.payload);
-        const exit = op === null ? Exit.void : yield* runOp(op).pipe(Effect.exit);
+        const exit = yield* replayOp(accountId, row.payload, roles, imap).pipe(
+          Effect.provideService(MailStore.MailStore, store),
+          Effect.exit,
+        );
         if (Exit.isSuccess(exit)) yield* store.finishOp(row.id).pipe(Effect.orDie);
-        else yield* store.failOp(row.id).pipe(Effect.orDie);
+        else {
+          yield* store.failOp(row.id).pipe(Effect.orDie);
+          // A queued inverse must wait for its original operation to finish retrying.
+          break;
+        }
       }
       yield* store.dropFailedOps.pipe(Effect.orDie);
-    });
-
-    const runOp = Effect.fn("MailSync.runOp")(function* (op: ServerOp) {
-      if (op.kind === "append_sent") {
-        if (roles.sent !== null) {
-          const sent = roles.sent;
-          yield* promise(() => imap.append(sent, Buffer.from(op.raw, "base64")));
-        }
-        return;
-      }
-      const located = yield* store.messageUidsForThread(op.threadId).pipe(Effect.orDie);
-      if (op.kind === "seen") {
-        for (const path of new Set(located.map((row) => row.mailbox))) {
-          const uids = located.filter((row) => row.mailbox === path).map((row) => row.uid);
-          yield* promise(() => imap.withMailbox(path, null, () => imap.setSeen(uids, op.seen)));
-        }
-        return;
-      }
-      const toInbox = op.kind === "unarchive";
-      if (roles.gmail) {
-        const uids = located.filter((row) => row.mailbox === roles.primary).map((row) => row.uid);
-        yield* promise(() =>
-          imap.withMailbox(roles.primary, null, () => imap.setInboxLabel(uids, toInbox)),
-        );
-        for (const row of located) {
-          yield* store.moveMessage(row.id, row.mailbox, row.uid, toInbox).pipe(Effect.orDie);
-        }
-        return;
-      }
-      const archive = roles.archive ?? "Archive";
-      if (roles.archive === null) yield* promise(() => imap.ensureMailbox(archive));
-      const from = toInbox ? archive : roles.primary;
-      const to = toInbox ? roles.primary : archive;
-      const rows = located.filter((row) => row.mailbox === from);
-      if (rows.length === 0) return;
-      const moved = yield* promise(() =>
-        imap.withMailbox(from, null, () =>
-          imap.move(
-            rows.map((row) => row.uid),
-            to,
-          ),
-        ),
-      );
-      for (const row of rows) {
-        const newUid = moved.get(row.uid);
-        // Without UIDPLUS the next sync of the destination finds it again.
-        if (newUid !== undefined) {
-          yield* store.moveMessage(row.id, to, newUid, toInbox).pipe(Effect.orDie);
-        }
-      }
     });
 
     // First pass: primary, sent, bodies, ops.
@@ -442,6 +431,15 @@ const make = Effect.gen(function* () {
         });
         return;
       }
+      if (attempt === 0 && platform === "darwin") {
+        yield* Effect.acquireRelease(
+          Effect.try({
+            try: beginMacMailActivity,
+            catch: () => "Could not disable App Nap for mail sync",
+          }),
+          (end) => Effect.sync(end),
+        ).pipe(Effect.catch((warning) => Effect.logWarning(warning)));
+      }
       const exit = yield* syncAccount(accountId, password).pipe(Effect.exit);
       if (Exit.isSuccess(exit)) return;
       const failure = exit.cause.reasons.find(
@@ -467,10 +465,23 @@ const make = Effect.gen(function* () {
       attempt += 1;
       yield* Effect.sleep(Duration.millis(delay));
     }
-  });
+  }, Effect.scoped);
 
   const start: MailSync["Service"]["start"] = (accountId) =>
-    FiberMap.run(fibers, accountId, runAccount(accountId)).pipe(Effect.asVoid);
+    FiberMap.run(
+      fibers,
+      accountId,
+      SubscriptionRef.changes(suspended).pipe(
+        Stream.switchMap((asleep) =>
+          asleep
+            ? Stream.fromEffect(setStatus(accountId, { status: "paused" })).pipe(Stream.drain)
+            : Stream.fromEffect(runAccount(accountId)),
+        ),
+        // A completed account loop (disabled or invalid credentials) stays stopped through wake.
+        Stream.runHead,
+        Effect.asVoid,
+      ),
+    ).pipe(Effect.asVoid);
 
   const stop: MailSync["Service"]["stop"] = (accountId) => FiberMap.remove(fibers, accountId);
 
@@ -482,9 +493,9 @@ const make = Effect.gen(function* () {
 
   const enqueue: MailSync["Service"]["enqueue"] = (accountId, op) =>
     nowIso.pipe(
-      Effect.flatMap((now) => store.enqueueOp(accountId, op.kind, op, now)),
+      Effect.flatMap((now) => enqueueOp(accountId, op, now)),
+      Effect.provideService(MailStore.MailStore, store),
       Effect.andThen(wake(accountId)),
-      Effect.ignore,
     );
 
   const searchGmail: MailSync["Service"]["searchGmail"] = Effect.fn("MailSync.searchGmail")(
@@ -493,55 +504,65 @@ const make = Effect.gen(function* () {
       const account = yield* store.getAccount(accountId).pipe(Effect.orDie);
       if (!session?.imap.roles?.gmail || account === null) return [];
       const primary = session.imap.roles.primary;
-      const known = new Set(yield* store.knownUids(accountId, primary, 1).pipe(Effect.orDie));
-      const fetched = yield* promise(() =>
-        session.imap.withMailbox(primary, null, async () => {
-          const uids = (await session.imap.searchGmailRaw(query)).slice(-200);
-          const missing = uids.filter((uid) => !known.has(uid)).slice(-50);
-          return { uids, messages: await session.imap.fetchUids(missing) };
-        }),
-      ).pipe(
-        Effect.orElseSucceed(() => ({
-          uids: [] as ReadonlyArray<number>,
-          messages: [] as ReadonlyArray<ParsedMessage>,
-        })),
+      const known = yield* store.getMailbox(accountId, primary).pipe(Effect.orDie);
+      if (!known) return [];
+      const found = yield* promise(() =>
+        session.imap.withMailbox(primary, null, async (snapshot) =>
+          snapshot.uidValidity === known.uidValidity
+            ? (await session.imap.searchGmailRaw(query)).slice(-200)
+            : [],
+        ),
       );
-      if (fetched.messages.length > 0) {
-        yield* engine
-          .ingest(
-            {
-              accountId,
-              accountEmail: account.email,
-              gmail: true,
-              mailbox: primary,
-              role: "primary",
-              initial: false,
-              backfill: true,
-            },
-            fetched.messages,
-          )
-          .pipe(Effect.orDie);
-        session.wake();
-      }
-      const threads = yield* store.sql<{
-        thread_id: string;
-      }>`SELECT DISTINCT thread_id FROM mail_messages
-        WHERE account_id = ${accountId} AND mailbox = ${primary} AND uid IN ${store.sql.in(fetched.uids)}`.pipe(
-        Effect.orElseSucceed(() => []),
-      );
-      return threads.map((row) => row.thread_id as MailThreadId);
+      if (!found.length) return [];
+      const cached = yield* store.knownUidsAmong(accountId, primary, found).pipe(Effect.orDie);
+      const missing = found.filter((uid) => !cached.has(uid)).slice(-50);
+      const messages =
+        missing.length === 0
+          ? []
+          : yield* promise(() =>
+              session.imap.withMailbox(primary, null, async (snapshot) =>
+                snapshot.uidValidity === known.uidValidity ? session.imap.fetchUids(missing) : [],
+              ),
+            );
+      return yield* store
+        .transaction(
+          Effect.gen(function* () {
+            const current = yield* store.getMailbox(accountId, primary);
+            if (current?.uidValidity !== known.uidValidity) return [];
+            if (messages.length > 0) {
+              yield* engine.ingest(
+                {
+                  accountId,
+                  accountEmail: account.email,
+                  gmail: true,
+                  mailbox: primary,
+                  role: "primary",
+                  initial: false,
+                  backfill: true,
+                },
+                messages,
+              );
+              session.wake();
+            }
+            const threads = yield* store.sql<{
+              thread_id: string;
+            }>`SELECT DISTINCT thread_id FROM mail_messages
+          WHERE account_id = ${accountId} AND mailbox = ${primary} AND removed = 0 AND uid IN ${store.sql.in(found)}`;
+            return threads.map((row) => MailThreadId.make(row.thread_id));
+          }),
+        )
+        .pipe(Effect.orDie);
     },
     Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<MailThreadId>)),
   );
 
   // A long gap between ticks means the machine slept: reconnect now instead of waiting for TCP to notice.
-  let lastTick = yield* Clock.currentTimeMillis;
   yield* Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const slept = now - lastTick > 90_000;
     lastTick = now;
-    if (!slept) return;
-    for (const accountId of live.keys()) yield* start(accountId);
+    if (!slept || (yield* SubscriptionRef.get(suspended))) return;
+    yield* SubscriptionRef.set(suspended, false);
   }).pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped);
 
   return MailSync.of({ start, stop, wake, enqueue, searchGmail });

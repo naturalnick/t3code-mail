@@ -89,6 +89,8 @@ const QUOTE_HEADER_PATTERNS = [
   /^El .{6,200}escribió:\s*$/m,
 ];
 
+export const asksQuestion = (text: string): boolean => /[?？]\s*$/m.test(text);
+
 /** Drops the quoted chain under a reply. Forwarded content counts as quoted for the model. */
 export function stripQuoted(text: string): string {
   let cut = text.length;

@@ -45,6 +45,7 @@ import {
 } from "./mail.ts";
 
 export const MAIL_WS_METHODS = {
+  mailArrivals: "mail.arrivals",
   mailSubscribe: "mail.subscribe",
   mailGetThread: "mail.getThread",
   mailListSettled: "mail.listSettled",
@@ -73,6 +74,12 @@ export const MAIL_WS_METHODS = {
 const error = Schema.Union([MailError, EnvironmentAuthorizationError]);
 
 export const MailRpcs = [
+  Rpc.make(MAIL_WS_METHODS.mailArrivals, {
+    payload: Schema.Struct({}),
+    success: Schema.Struct({ count: Schema.Int }),
+    error,
+    stream: true,
+  }),
   Rpc.make(MAIL_WS_METHODS.mailSubscribe, {
     payload: Schema.Struct({}),
     success: MailStreamEvent,
@@ -165,6 +172,7 @@ export const MailRpcs = [
 
 /** Reading mail is reading the environment's data. */
 export const MAIL_READ_RPC_SCOPES = {
+  [MAIL_WS_METHODS.mailArrivals]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailSubscribe]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailGetThread]: AuthOrchestrationReadScope,
   [MAIL_WS_METHODS.mailListSettled]: AuthOrchestrationReadScope,

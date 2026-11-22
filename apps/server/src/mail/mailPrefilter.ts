@@ -80,12 +80,18 @@ const SOCIAL_DOMAINS = new Set([
 const NO_REPLY =
   /^(no-?reply|do-?not-?reply|notifications?|alerts?|mailer|bounce|updates?|news)([+.-]|@)/i;
 
+export function categoryGuardrail(category: string): MailGuardrail | null {
+  if (category === "invoice") return "money";
+  if (category === "legal" || category === "security") return category;
+  return null;
+}
+
 function guardrailFor(input: PrefilterInput, category: MailCategory): MailGuardrail | null {
   const text = `${input.subject}\n${input.text}`;
   if (input.repliedTo) return "replied_to";
-  if (category === "legal" || LEGAL.test(text)) return "legal";
-  if (category === "security") return "security";
-  if (category === "invoice") return "money";
+  if (LEGAL.test(text)) return "legal";
+  const guardrail = categoryGuardrail(category);
+  if (guardrail !== null) return guardrail;
   // A sign-in code is routine; an alert about the account is not.
   if (category !== "otp" && SECURITY.test(text)) return "security";
   if (MONEY.test(text)) return "money";

@@ -110,6 +110,11 @@ export function createMailEnvironmentAtoms<R, E>(
 
   return {
     view,
+    arrivals: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:mail:arrivals",
+      tag: WS_METHODS.mailArrivals,
+      idleTtlMs: 0,
+    }),
     thread: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:thread",
       tag: WS_METHODS.mailGetThread,

@@ -8,6 +8,7 @@ import {
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
+import { UsageDay } from "./usage.ts";
 import { ModelSelection } from "./modelSelection.ts";
 
 /** The project that holds mail chat sessions. Fixed, so every client can keep it out of the coding views. */
@@ -171,6 +172,9 @@ export const MailActionKind = Schema.Literals([
   "send",
   "trust",
   "returned",
+  "mark_read",
+  "wait_for_reply",
+  "nudge",
   "propose",
 ]);
 export type MailActionKind = typeof MailActionKind.Type;
@@ -304,12 +308,21 @@ export type MailTrustRecord = typeof MailTrustRecord.Type;
 
 export const MailUsage = Schema.Struct({
   weekStart: IsoDateTime,
+  providerWindow: Schema.optional(
+    Schema.Struct({
+      sinceDay: UsageDay,
+      untilDay: UsageDay,
+      timeZone: TrimmedNonEmptyString,
+    }),
+  ),
   tokens: NonNegativeInt,
+  /** Text-generation estimates included in tokens alongside reported mail chat usage. */
+  estimatedTokens: Schema.optional(NonNegativeInt),
   calls: NonNegativeInt,
   emails: NonNegativeInt,
   cap: Schema.NullOr(NonNegativeInt),
   capped: Schema.Boolean,
-  /** All provider tokens this week from T3's usage summary, when it has them. */
+  /** Older clients require this field. Settings reads provider totals through the diagnostics-scoped usage RPC. */
   providerTokens: Schema.NullOr(NonNegativeInt),
 });
 export type MailUsage = typeof MailUsage.Type;

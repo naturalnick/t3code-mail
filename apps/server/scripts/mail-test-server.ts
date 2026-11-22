@@ -8,6 +8,7 @@
 //
 //   node scripts/mail-test-server.ts start   # start GreenMail and seed the inbox
 //   node scripts/mail-test-server.ts seed    # add another round of fake mail
+//   node scripts/mail-test-server.ts verify  # exercise sync and sending in a fresh container
 //   node scripts/mail-test-server.ts stop    # remove the container
 import * as NodeChildProcess from "node:child_process";
 import * as NodeTimersPromises from "node:timers/promises";
@@ -27,16 +28,12 @@ const docker = (...args: Array<string>) =>
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 
-function start() {
-  const running = docker("ps", "-a", "--filter", `name=^${CONTAINER}$`, "--format", "{{.Status}}");
-  if (running.startsWith("Up")) return;
-  if (running) docker("rm", "-f", CONTAINER);
-  docker(
+function runContainer(isolated: boolean) {
+  return docker(
     "run",
     "-d",
-    "--name",
-    CONTAINER,
-    ...Object.values(PORTS).flatMap((port) => ["-p", `127.0.0.1:${port}:${port}`]),
+    ...(isolated ? ["--rm"] : ["--name", CONTAINER]),
+    ...Object.values(PORTS).flatMap((port) => ["-p", `127.0.0.1:${isolated ? "" : port}:${port}`]),
     "-e",
     [
       "GREENMAIL_OPTS=-Dgreenmail.setup.test.all",
@@ -48,6 +45,13 @@ function start() {
   );
 }
 
+function start() {
+  const running = docker("ps", "-a", "--filter", `name=^${CONTAINER}$`, "--format", "{{.Status}}");
+  if (running.startsWith("Up")) return;
+  if (running) docker("rm", "-f", CONTAINER);
+  runContainer(false);
+}
+
 async function waitForImap() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const client = imap();
@@ -56,6 +60,7 @@ async function waitForImap() {
       await client.logout();
       return;
     } catch {
+      client.close();
       await NodeTimersPromises.setTimeout(500);
     }
   }
@@ -70,8 +75,6 @@ const imap = () =>
     auth: { user: EMAIL, pass: PASSWORD },
     logger: false,
   });
-
-const smtp = Nodemailer.createTransport({ host: "127.0.0.1", port: PORTS.smtp, secure: false });
 
 interface Fake {
   readonly from: string;
@@ -179,6 +182,7 @@ function fakeMail(round: number): Array<Fake> {
 }
 
 async function seed(round: number) {
+  const smtp = Nodemailer.createTransport({ host: "127.0.0.1", port: PORTS.smtp, secure: false });
   for (const mail of fakeMail(round)) {
     const date = new Date(Date.now() - mail.daysAgo * 86_400_000 - Math.random() * 3_600_000);
     await smtp.sendMail({
@@ -216,14 +220,60 @@ async function seed(round: number) {
 }
 
 const command = process.argv[2] ?? "start";
-if (command === "stop") {
+if (command === "verify") {
+  const container = runContainer(true);
+  try {
+    for (const key of ["smtp", "imap", "smtps", "imaps"] as const) {
+      const binding = docker("port", container, String(PORTS[key]));
+      const match = /^127\.0\.0\.1:(\d+)$/.exec(binding);
+      if (!match) throw new Error(`Unexpected GreenMail port binding: ${binding}`);
+      PORTS[key] = Number(match[1]);
+    }
+    await waitForImap();
+    await seed(1);
+    const { verifyGreenMail } = await import("./mail-test-verify.ts");
+    await verifyGreenMail({
+      email: EMAIL,
+      password: PASSWORD,
+      imaps: PORTS.imaps,
+      smtps: PORTS.smtps,
+      seededMessages: fakeMail(1).length + 1,
+      verifyCopies: async (subject) => {
+        const client = imap();
+        await client.connect();
+        try {
+          for (const mailbox of ["INBOX", "Sent"]) {
+            await client.mailboxOpen(mailbox, { readOnly: true });
+            const copies = await client.search({ subject }, { uid: true });
+            if (!copies || copies.length !== 1) {
+              throw new Error(
+                `Expected one copy of the approved reply in ${mailbox}; found ${copies ? copies.length : 0}.`,
+              );
+            }
+          }
+        } finally {
+          await client.logout();
+        }
+      },
+      deliver: async (subject) => {
+        const smtp = Nodemailer.createTransport({
+          host: "127.0.0.1",
+          port: PORTS.smtp,
+          secure: false,
+        });
+        await smtp.sendMail({ from: "probe@t3mail.test", to: EMAIL, subject, text: subject });
+      },
+    });
+  } finally {
+    docker("rm", "-f", container);
+  }
+} else if (command === "stop") {
   docker("rm", "-f", CONTAINER);
   console.log("Removed the GreenMail container.");
 } else if (command === "start" || command === "seed") {
   if (command === "start") start();
   await waitForImap();
   await seed(Math.floor(Date.now() / 1000) % 100);
-  smtp.close();
   console.log(
     [
       "GreenMail is running with fake mail. Add it in Settings > Mail > Add account:",
@@ -233,6 +283,6 @@ if (command === "stop") {
     ].join("\n"),
   );
 } else {
-  console.error("Usage: node scripts/mail-test-server.ts start|seed|stop");
+  console.error("Usage: node scripts/mail-test-server.ts start|seed|verify|stop");
   process.exitCode = 1;
 }

@@ -918,7 +918,12 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerThreadIssueService),
   Layer.provide(layerIssueService),
   // One mail service for WebSocket clients and /mcp agents.
-  Layer.provide(MailService.layerLive.pipe(Layer.provide(layerServerSettings))),
+  Layer.provide(
+    MailService.layerLive.pipe(
+      Layer.provide(layerServerSettings),
+      Layer.provide(layerHostPowerMonitor),
+    ),
+  ),
   // The same activity instance RunExecutionService reports to, by layer memoization.
   Layer.provide(
     ServerBrowser.layer.pipe(

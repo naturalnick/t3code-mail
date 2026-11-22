@@ -1,3 +1,9 @@
+import * as MailCredentials from "../mail/MailCredentials.ts";
+import * as MailEngine from "../mail/MailEngine.ts";
+import * as MailService from "../mail/MailService.ts";
+import * as MailStore from "../mail/MailStore.ts";
+import * as MailSync from "../mail/MailSync.ts";
+import { MailToolkit } from "../mcp/toolkits/mail/tools.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
@@ -20,6 +26,8 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   GitCommandError,
+  MAIL_SESSION_PROJECT_ID,
+  MailAccountId,
   MessageId,
   RunId,
   ProjectId,
@@ -221,9 +229,11 @@ function makeHarness(options: HarnessOptions = {}) {
         Effect.succeed(
           id === projectId
             ? Option.some(project)
-            : id === otherProjectId
-              ? Option.some(otherProject)
-              : Option.none(),
+            : id === MAIL_SESSION_PROJECT_ID
+              ? Option.some({ ...project, id })
+              : id === otherProjectId
+                ? Option.some(otherProject)
+                : Option.none(),
         ),
       getByWorkspaceRoot: () => Effect.succeedSome(project),
       workspaceScanDirectory: () => Effect.die("unused"),
@@ -382,6 +392,141 @@ function launchInput(input: {
     creationSource: "web" as const,
   };
 }
+
+it.effect("recovers a mail chat after a tracking failure and delivers new mail once", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const mailDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mail-chat-" });
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    let lookupFails = false;
+    const layer = MailService.layer.pipe(
+      Layer.provide(
+        Layer.succeed(ThreadManagement.ThreadManagementService, {
+          ...threads,
+          getThreadShell: (threadId) =>
+            lookupFails
+              ? Effect.fail(new Orchestrator.OrchestratorProjectionError({ threadId }))
+              : threads.getThreadShell(threadId),
+        }),
+      ),
+      Layer.provide(Layer.mock(MailSync.MailSync)({})),
+      Layer.provide(MailCredentials.layerMemory),
+      Layer.provideMerge(MailEngine.layer),
+      Layer.provideMerge(MailStore.layerMemory(mailDir)),
+    );
+    yield* Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const engine = yield* MailEngine.MailEngine;
+      const store = yield* MailStore.MailStore;
+      const deliver = Effect.fn("fixture.deliver")(function* (uid: number, body: string) {
+        const result = yield* engine.ingest(
+          {
+            accountId: MailAccountId.make("fixture"),
+            accountEmail: "me@example.org",
+            gmail: true,
+            mailbox: "INBOX",
+            role: "primary",
+            initial: false,
+            backfill: false,
+          },
+          [
+            {
+              uid,
+              messageId: `<msg-${uid}@example.org>`,
+              gmailThreadId: "meeting",
+              labels: null,
+              from: { name: "Ada", address: "ada@example.org" },
+              to: [],
+              cc: [],
+              subject: "Meeting",
+              date: "2026-11-03T12:00:00.000Z",
+              inReplyTo: null,
+              references: [],
+              seen: false,
+              size: body.length,
+              attachments: [],
+              textPart: { part: "1", html: false },
+              listUnsubscribe: false,
+              listId: null,
+              precedence: null,
+              autoSubmitted: null,
+              calendar: false,
+            },
+          ],
+        );
+        yield* store.setMessageBody(result.newMessageIds[0]!.id, body);
+        return result.threads[0]!;
+      });
+      const threadId = yield* deliver(1, "Meet on Thursday.");
+      const open = mail.openSession({ threadId, modelSelection });
+      yield* store.sql.unsafe(
+        "CREATE TRIGGER fail_link BEFORE UPDATE OF chat_thread_id ON mail_threads BEGIN SELECT RAISE(ABORT, 'fixture'); END",
+      );
+      yield* Effect.flip(open);
+      yield* store.sql.unsafe("DROP TRIGGER fail_link");
+      const list = threads.listProjectThreads({
+        projectId: MAIL_SESSION_PROJECT_ID,
+        includeSubagents: false,
+      });
+      const [accepted] = yield* list;
+      assert.isDefined(accepted);
+      const retries = yield* Effect.all([open, open], { concurrency: "unbounded" });
+      assert.deepEqual(
+        retries.map((retry) => retry.threadId),
+        [accepted.id, accepted.id],
+      );
+      assert.lengthOf(yield* list, 1);
+      const projection = threads.getThreadProjection(accepted.id);
+      const first = yield* projection;
+      assert.lengthOf(first.messages, 1);
+      assert.include(first.messages[0]!.text, "Meet on Thursday.");
+      for (const match of first.messages[0]!.text.matchAll(/`([^`]+)`/g)) {
+        assert.property(MailToolkit.tools, match[1]!);
+      }
+
+      lookupFails = true;
+      assert.equal((yield* Effect.flip(open)).code, "unavailable");
+      assert.lengthOf(yield* list, 1);
+      lookupFails = false;
+      yield* deliver(2, "Actually, meet on Friday.");
+      const followUp = mail.openSession({ threadId, prompt: "When is the meeting?" });
+      yield* store.sql.unsafe(
+        "CREATE TRIGGER fail_context BEFORE UPDATE ON mail_kv BEGIN SELECT RAISE(ABORT, 'fixture'); END",
+      );
+      yield* Effect.flip(followUp);
+      yield* store.sql.unsafe("DROP TRIGGER fail_context");
+      yield* followUp;
+      yield* open;
+      const updated = yield* projection;
+      assert.lengthOf(updated.messages, 2);
+      assert.include(updated.messages[1]!.text, "When is the meeting?");
+      assert.include(updated.messages[1]!.text, "Actually, meet on Friday.");
+
+      yield* deliver(3, "Confirmed for Saturday.");
+      yield* Effect.all([open, open], { concurrency: "unbounded" });
+      const refreshed = yield* projection;
+      assert.lengthOf(refreshed.messages, 3);
+      assert.include(refreshed.messages[2]!.text, "Confirmed for Saturday.");
+
+      yield* threads.dispatch({
+        type: "thread.delete",
+        threadId: accepted.id,
+        commandId: CommandId.make("fixture:delete-mail-chat"),
+      });
+      const [replacement, reopened] = yield* Effect.all([open, open], { concurrency: "unbounded" });
+      assert.isTrue(replacement.created || reopened.created);
+      assert.notEqual(replacement.threadId, accepted.id);
+      assert.equal(replacement.threadId, reopened.threadId);
+      assert.lengthOf(yield* list, 1);
+      assert.lengthOf((yield* threads.getThreadProjection(replacement.threadId)).messages, 1);
+    }).pipe(Effect.provide(layer));
+  }).pipe(
+    Effect.provide(
+      harness.layer.pipe(Layer.provideMerge(Layer.merge(NodeCrypto.layer, NodeServices.layer))),
+    ),
+  );
+});
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
