@@ -41,7 +41,11 @@ const DEFAULT_SETTINGS: MailSettings = {
   nudgeWaitingDays: 5,
   syncEnabled: true,
   rules: [],
+  aiExcludedSenders: [],
 };
+
+/** The recap lists this many settled emails and counts the rest. */
+const RECAP_ITEMS = 25;
 
 const SETTLED_IN_SNAPSHOT = 60;
 /** Backfilled mail older than this lands settled without a model call. */
@@ -193,29 +197,27 @@ const make = Effect.gen(function* () {
     const date = localDateKey(now);
     if ((yield* store.getKv("recap-dismissed")) === date) return null;
     const since = DateTime.formatIso(DateTime.subtract(now, { days: 1 }));
-    const actions = yield* store.actionsSince(since);
-    const settles = actions.filter((action) => action.kind === "settle");
-    const byAi = settles.filter((action) => action.actor === "ai" || action.actor === "rule");
-    if (actions.length === 0 && (yield* store.threadsCreatedSince(since)) === 0) return null;
-    const aiThreads = yield* store.getThreads(
-      byAi.flatMap((action) => (action.threadId === null ? [] : [action.threadId])),
-    );
-    const senderCounts = new Map<string, number>();
-    for (const thread of aiThreads) {
-      const name = thread.fromName || thread.fromAddress;
-      senderCounts.set(name, (senderCounts.get(name) ?? 0) + 1);
-    }
-    const active = yield* store.threadsByState("active");
+    const day = yield* store.recapSince(since, RECAP_ITEMS);
+    if (day.actions === 0 && day.arrived === 0) return null;
     return {
       date,
-      arrived: yield* store.threadsCreatedSince(since),
-      settledByAi: byAi.length,
-      settledByYou: settles.length - byAi.length,
-      needsYou: active.length,
-      topAiSenders: [...senderCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([name]) => name),
+      arrived: day.arrived,
+      needsYou: day.needsYou,
+      settledByAi: day.settledByAi,
+      settledByYou: day.settledByYou,
+      topAiSenders: day.topAiSenders,
+      // Only what is still settled: anything back in Active is already in front of the user.
+      settled: day.settled.map(({ actionId, actor, thread }) => ({
+        actionId,
+        threadId: thread.id,
+        from: thread.fromName || thread.fromAddress,
+        subject: thread.subject,
+        reason: thread.settledReason ?? "fyi",
+        actor,
+        why: actor === "ai" ? (thread.verdict?.why ?? null) : null,
+        decidedBy: actor === "ai" ? (thread.verdict?.by ?? null) : null,
+      })),
+      moreSettled: Math.max(0, day.total - day.settled.length),
     } satisfies MailRecap;
   });
 

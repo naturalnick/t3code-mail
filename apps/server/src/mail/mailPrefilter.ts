@@ -26,18 +26,10 @@ export interface PrefilterInput {
   readonly ccOnly: boolean;
 }
 
-export interface PrefilterVerdict {
-  readonly decision: "settle" | "keep";
-  readonly reason: MailSettleReason | null;
-  readonly confidence: number;
-}
-
 export interface PrefilterResult {
   readonly category: MailCategory;
   readonly guardrail: MailGuardrail | null;
   readonly bulk: boolean;
-  /** A verdict the rules are sure of; null sends the thread to L1. */
-  readonly verdict: PrefilterVerdict | null;
   readonly rule: {
     readonly id: string;
     readonly action: MailRuleAction;
@@ -117,15 +109,6 @@ function categorize(input: PrefilterInput, bulk: boolean): MailCategory {
   return "person";
 }
 
-const RULE_VERDICT: Partial<Record<MailCategory, PrefilterVerdict>> = {
-  otp: { decision: "settle", reason: "fyi", confidence: 0.9 },
-  delivery: { decision: "settle", reason: "fyi", confidence: 0.9 },
-  receipt: { decision: "settle", reason: "receipt", confidence: 0.9 },
-  promotion: { decision: "settle", reason: "noise", confidence: 0.9 },
-  newsletter: { decision: "settle", reason: "fyi", confidence: 0.85 },
-  social: { decision: "settle", reason: "noise", confidence: 0.85 },
-};
-
 export function matchesRule(
   rule: MailRule,
   input: Pick<PrefilterInput, "fromAddress" | "subject" | "listId">,
@@ -163,7 +146,6 @@ export function prefilter(input: PrefilterInput, rules: ReadonlyArray<MailRule>)
     category,
     guardrail,
     bulk,
-    verdict: (guardrail === null ? RULE_VERDICT[category] : undefined) ?? null,
     rule,
   };
 }

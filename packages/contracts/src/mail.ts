@@ -79,8 +79,14 @@ export const MailSuggestion = Schema.Struct({
   revision: Schema.String,
   reason: MailSettleReason,
   confidence: Schema.Number,
+  /** The user's rule proposed it, not a model. */
+  byRule: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
 });
 export type MailSuggestion = typeof MailSuggestion.Type;
+
+/** The model that sorted an email, so clients can show its icon. */
+export const MailDecidedBy = Schema.Struct({ instanceId: Schema.String, model: Schema.String });
+export type MailDecidedBy = typeof MailDecidedBy.Type;
 
 export const MailThreadRow = Schema.Struct({
   id: MailThreadId,
@@ -110,6 +116,9 @@ export const MailThreadRow = Schema.Struct({
   /** The latest message reads like instructions to an AI. It is still treated as data. */
   injectionWarning: Schema.Boolean,
   triagePending: Schema.Boolean,
+  /** The model's one-line reason for its decision on the newest mail; null until it has one. */
+  why: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
+  decidedBy: Schema.NullOr(MailDecidedBy).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
 });
 export type MailThreadRow = typeof MailThreadRow.Type;
 
@@ -310,6 +319,10 @@ export const MailSettings = Schema.Struct({
   nudgeWaitingDays: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
   syncEnabled: Schema.Boolean,
   rules: Schema.Array(MailRule),
+  /** Addresses or domains whose mail is never sent to a model. */
+  aiExcludedSenders: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
+  ),
 });
 export type MailSettings = typeof MailSettings.Type;
 
@@ -352,13 +365,30 @@ export const MailUsage = Schema.Struct({
 });
 export type MailUsage = typeof MailUsage.Type;
 
+/** One email settled without the user, so they can check it and take it back. */
+export const MailRecapItem = Schema.Struct({
+  actionId: NonNegativeInt,
+  threadId: MailThreadId,
+  from: Schema.String,
+  subject: Schema.String,
+  reason: MailSettleReason,
+  actor: MailActor,
+  why: Schema.NullOr(Schema.String),
+  decidedBy: Schema.NullOr(MailDecidedBy),
+});
+export type MailRecapItem = typeof MailRecapItem.Type;
+
 export const MailRecap = Schema.Struct({
   date: TrimmedNonEmptyString,
   arrived: NonNegativeInt,
-  settledByAi: NonNegativeInt,
-  settledByYou: NonNegativeInt,
   needsYou: NonNegativeInt,
-  topAiSenders: Schema.Array(Schema.String),
+  /** Kept for clients that predate `settled`. */
+  settledByAi: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  settledByYou: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  topAiSenders: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  /** Newest first; `moreSettled` counts the rest. */
+  settled: Schema.Array(MailRecapItem).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  moreSettled: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
 });
 export type MailRecap = typeof MailRecap.Type;
 
@@ -545,6 +575,7 @@ export const MailUpdateSettingsInput = Schema.Struct({
   nudgeWaitingDays: Schema.optionalKey(MailSettings.fields.nudgeWaitingDays),
   syncEnabled: Schema.optionalKey(Schema.Boolean),
   rules: Schema.optionalKey(Schema.Array(MailRule)),
+  aiExcludedSenders: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
 });
 
 export const MailTrustList = Schema.Struct({ records: Schema.Array(MailTrustRecord) });
@@ -571,6 +602,11 @@ export const MailDryRunRuleResult = Schema.Struct({
 
 export const MailSeedVoiceResult = Schema.Struct({ notes: Schema.String });
 export const MailDismissRecapInput = Schema.Struct({ date: TrimmedNonEmptyString });
+/** An address or a domain; `enabled: false` keeps that sender's mail away from models. */
+export const MailSetSenderAiInput = Schema.Struct({
+  sender: TrimmedNonEmptyString,
+  enabled: Schema.Boolean,
+});
 
 export type MailThreadInput = typeof MailThreadInput.Type;
 export type MailListSettledInput = typeof MailListSettledInput.Type;
@@ -600,3 +636,22 @@ export type MailDryRunRuleInput = typeof MailDryRunRuleInput.Type;
 export type MailDryRunRuleResult = typeof MailDryRunRuleResult.Type;
 export type MailSeedVoiceResult = typeof MailSeedVoiceResult.Type;
 export type MailDismissRecapInput = typeof MailDismissRecapInput.Type;
+export type MailSetSenderAiInput = typeof MailSetSenderAiInput.Type;
+
+/**
+ * The entry in a sender list that covers `address`: an exact address ("news@example.com") or a
+ * domain with its subdomains ("example.com", "@example.com"). Null when none does.
+ */
+export function mailSenderEntry(address: string, entries: ReadonlyArray<string>): string | null {
+  const lower = address.trim().toLowerCase();
+  const domain = lower.slice(lower.lastIndexOf("@") + 1);
+  return (
+    entries.find((raw) => {
+      const entry = raw.trim().toLowerCase();
+      if (entry.length === 0) return false;
+      if (entry.includes("@") && !entry.startsWith("@")) return entry === lower;
+      const wanted = entry.replace(/^@/, "");
+      return domain === wanted || domain.endsWith(`.${wanted}`);
+    }) ?? null
+  );
+}

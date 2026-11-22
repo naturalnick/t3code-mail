@@ -4,7 +4,6 @@ import { T, useGT, useMessages } from "gt-react";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
-  BotIcon,
   CheckIcon,
   PinIcon,
   SquarePenIcon,
@@ -21,6 +20,8 @@ import { SnoozeMenuButton } from "../sidebar/SidebarThreadRow";
 import { MenuItem } from "../ui/menu";
 import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { MailDecider } from "./MailDecider";
+import { mailDecision } from "./mailDecision";
 import { nudgeLabel, senderName, settleReasonLabel } from "./mailPresentation";
 import type { useMailActions } from "./useMailActions";
 
@@ -30,6 +31,8 @@ function MailTime({ timestamp }: { timestamp: string }) {
   const parts = formatRelativeTime(timestamp, Date.parse(`${nowMinute}:00.000Z`), resolve);
   return parts === null ? null : <>{parts.value}</>;
 }
+
+const badgeClassName = "inline-flex shrink-0 items-center gap-1 text-2xs text-muted-foreground";
 
 const rowActionClassName =
   "inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground disabled:pointer-events-none";
@@ -55,12 +58,24 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   const settled = thread.state === "settled";
   const recede = settled && !isActive;
   const unread = thread.unread && !settled;
-  const settledByAi = settled && thread.settledBy === "ai";
+  // Who sorted it, for suggestions and for settles nobody made by hand.
   const suggestion = thread.state === "active" ? thread.suggestion : null;
+  const decision = suggestion !== null || settled ? mailDecision(thread) : null;
+  const decider = decision?.actor ?? null;
   // A settle suggestion already says what to do, so its next-step text would repeat it.
   const metaText =
     nudge ?? (thread.state === "active" && suggestion === null ? thread.suggestedAction : null);
   const metaReason = suggestion?.reason ?? (settled ? thread.settledReason : null);
+  const badgeNote =
+    decider === "rule"
+      ? suggestion
+        ? gt("Suggested by your rule")
+        : gt("Settled by your rule")
+      : decider === "ai"
+        ? (decision?.why ?? (suggestion ? gt("Suggested by AI") : gt("Settled by AI")))
+        : settled && thread.settledBy === "user"
+          ? gt("Settled by you")
+          : null;
 
   const snooze = (until: string | null) =>
     void actions.act([thread.id], { type: "snooze", until, onReply: true }, gt("Snoozed"));
@@ -277,17 +292,26 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
             >
               {metaText}
             </span>
-            {metaReason !== null ? (
-              <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-muted-foreground">
-                {suggestion || settledByAi ? (
-                  <BotIcon
-                    aria-label={suggestion ? gt("Suggested by AI") : gt("Settled by AI")}
-                    className="size-3"
-                  />
-                ) : null}
-                {settleReasonLabel(metaReason, resolve)}
-              </span>
-            ) : null}
+            {metaReason === null ? null : badgeNote === null ? (
+              <span className={badgeClassName}>{settleReasonLabel(metaReason, resolve)}</span>
+            ) : (
+              <Tooltip>
+                <TooltipTrigger
+                  // Above the row link, so hovering the badge shows why.
+                  render={<span className={cn(badgeClassName, "relative z-[2]")} />}
+                >
+                  {decider ? (
+                    <MailDecider
+                      environmentId={environmentId}
+                      actor={decider}
+                      decidedBy={thread.decidedBy}
+                    />
+                  ) : null}
+                  {settleReasonLabel(metaReason, resolve)}
+                </TooltipTrigger>
+                <TooltipPopup side="top">{badgeNote}</TooltipPopup>
+              </Tooltip>
+            )}
           </div>
         ) : null}
       </div>

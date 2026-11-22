@@ -219,5 +219,9 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-command:mail:dismiss-recap",
       tag: WS_METHODS.mailDismissRecap,
     }),
+    setSenderAi: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:set-sender-ai",
+      tag: WS_METHODS.mailSetSenderAi,
+    }),
   };
 }

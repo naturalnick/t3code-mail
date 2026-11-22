@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { MailDraft, MailMessage } from "./mail.ts";
+import { MailDraft, MailMessage, mailSenderEntry } from "./mail.ts";
 
 const decodeMessage = Schema.decodeSync(MailMessage);
 const decodeDraft = Schema.decodeSync(MailDraft);
@@ -38,5 +38,15 @@ describe("mail contracts", () => {
       sentAt: null,
     });
     expect(draft).toMatchObject({ mode: "reply", targetMessageId: null });
+  });
+
+  it.each([
+    { address: "News@Paper.example", entries: ["news@paper.example"], entry: "news@paper.example" },
+    { address: "editor@paper.example", entries: ["news@paper.example"], entry: null },
+    { address: "a@mail.paper.example", entries: ["paper.example"], entry: "paper.example" },
+    { address: "a@paper.example", entries: ["@paper.example"], entry: "@paper.example" },
+    { address: "a@notpaper.example", entries: ["paper.example"], entry: null },
+  ])("finds the sender entry covering $address", ({ address, entries, entry }) => {
+    expect(mailSenderEntry(address, entries)).toBe(entry);
   });
 });

@@ -21,18 +21,18 @@ const base: PrefilterInput = {
 describe("prefilter", () => {
   it.each([
     {
-      name: "a person goes to L1 without a verdict",
+      name: "a person is a person with no guardrail",
       input: {},
-      expected: { category: "person", guardrail: null, verdict: null },
+      expected: { category: "person", guardrail: null },
     },
     {
-      name: "a sign-in code settles as fyi without tripping the security guardrail",
+      name: "a sign-in code is not a security alert",
       input: {
         fromAddress: "no-reply@accounts.example.com",
         subject: "Your verification code",
         text: "Your verification code is 482913.",
       },
-      expected: { category: "otp", guardrail: null, verdict: { reason: "fyi" } },
+      expected: { category: "otp", guardrail: null },
     },
     {
       name: "a security alert is guarded and goes to L1",
@@ -41,7 +41,7 @@ describe("prefilter", () => {
         subject: "Security alert",
         text: "New sign-in on a Mac. If this wasn't you, reset your password.",
       },
-      expected: { category: "security", guardrail: "security", verdict: null },
+      expected: { category: "security", guardrail: "security" },
     },
     {
       name: "an invoice is guarded as money",
@@ -50,7 +50,7 @@ describe("prefilter", () => {
         subject: "Invoice 1042",
         text: "Amount due: $420 by Friday.",
       },
-      expected: { category: "invoice", guardrail: "money", verdict: null },
+      expected: { category: "invoice", guardrail: "money" },
     },
     {
       name: "a bill notice without money words is still guarded as money",
@@ -59,32 +59,32 @@ describe("prefilter", () => {
         subject: "Your November statement",
         text: "Your bill is ready to view online.",
       },
-      expected: { category: "invoice", guardrail: "money", verdict: null },
+      expected: { category: "invoice", guardrail: "money" },
     },
     {
-      name: "list mail with a sale is a noise promotion",
+      name: "list mail with a sale is a promotion",
       input: {
         fromAddress: "deals@shop.example",
         subject: "40% off this weekend",
         text: "Shop now, limited time.",
         listUnsubscribe: true,
       },
-      expected: { category: "promotion", verdict: { reason: "noise" } },
+      expected: { category: "promotion" },
     },
     {
-      name: "a guardrail suppresses the category verdict",
+      name: "urgent wording guards a newsletter",
       input: {
         fromAddress: "news@paper.example",
         subject: "Morning briefing",
         text: "Action required: confirm your subscription today.",
         listId: "<briefing.paper.example>",
       },
-      expected: { category: "newsletter", guardrail: "urgent", verdict: null },
+      expected: { category: "newsletter", guardrail: "urgent" },
     },
     {
       name: "someone the user has written to is always guarded",
       input: { subject: "Order confirmation", text: "Thanks for your order", repliedTo: true },
-      expected: { guardrail: "replied_to", verdict: null },
+      expected: { guardrail: "replied_to" },
     },
   ] as const)("$name", ({ input, expected }) => {
     expect(prefilter({ ...base, ...input }, [])).toMatchObject(expected);

@@ -12,7 +12,8 @@ import { useEnvironmentQuery } from "../../state/query";
 import { useMailCommand } from "../settings/MailSettings.commands";
 import { Button } from "../ui/button";
 import { MailPage } from "./MailPage";
-import { actionLabel, senderName } from "./mailPresentation";
+import { MailDecider } from "./MailDecider";
+import { actionLabel, senderName, settleReasonLabel } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 
 function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
@@ -87,6 +88,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
 
 function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status: MailStatus }) {
   const gt = useGT();
+  const resolve = useMessages();
   const sections = useMailSections(environmentId);
   const actions = useMailActions(environmentId);
   const dismiss = useMailCommand(
@@ -138,12 +140,59 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
             </Button>
           </div>
           <p className="text-sm text-muted-foreground">
-            {gt("{arrived} arrived · {settled} settled by AI · {active} need you", {
+            {gt("{arrived} arrived · {active} need you", {
               arrived: recap.arrived,
-              settled: recap.settledByAi,
               active: recap.needsYou,
             })}
           </p>
+          {recap.settled.length > 0 ? (
+            <ul aria-label={gt("Settled for you")} className="mt-1 grid min-w-0 grid-cols-1">
+              {recap.settled.map((item) => (
+                <li key={item.actionId} className="flex items-center gap-3 border-b py-2 text-sm">
+                  <MailDecider
+                    environmentId={environmentId}
+                    actor={item.actor}
+                    decidedBy={item.decidedBy}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <Link
+                      className="block truncate hover:underline"
+                      to="/mail/$mailThreadId"
+                      params={{ mailThreadId: item.threadId }}
+                    >
+                      <span className="font-medium">{item.from}</span> · {item.subject}
+                    </Link>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {item.actor === "rule"
+                        ? gt("Settled as {reason} by your rule", {
+                            reason: settleReasonLabel(item.reason, resolve),
+                          })
+                        : (item.why ??
+                          gt("Settled as {reason}", {
+                            reason: settleReasonLabel(item.reason, resolve),
+                          }))}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    disabled={actions.disabled}
+                    // Undo also tells Mail the settle was wrong, so it learns from the answer.
+                    onClick={() => void actions.undo([item.actionId])}
+                  >
+                    {gt("I wanted to see this")}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {recap.moreSettled > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {gt("{count, plural, one {and # more in Settled} other {and # more in Settled}}", {
+                count: recap.moreSettled,
+              })}
+            </p>
+          ) : null}
         </section>
       )}
       {proposals.length > 0 && (

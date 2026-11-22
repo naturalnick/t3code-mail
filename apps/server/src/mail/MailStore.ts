@@ -19,6 +19,7 @@ import {
   MailDraftId,
   MailThreadId,
   ThreadId,
+  type MailDecidedBy,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
@@ -402,7 +403,14 @@ export interface ThreadVerdict {
   readonly decision: "settle" | "keep";
   readonly reason: string;
   readonly confidence: number;
-  readonly source: "rule" | "memory" | "model" | "escalated";
+  /**
+   * "user_rule" is the user's own rule or Never show. "rule" (built-in category guesses) and
+   * "memory" only appear on verdicts stored before every email went to the model.
+   */
+  readonly source: "user_rule" | "rule" | "memory" | "model" | "escalated";
+  /** The model's one-line reason; absent on rules and older verdicts. */
+  readonly why?: string | null;
+  readonly by?: MailDecidedBy | null;
 }
 
 export interface ThreadRecord {
@@ -619,6 +627,7 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
             reason: thread.suggestionReason,
             confidence: thread.suggestionConfidence ?? 0,
             revision: thread.workflowVersion ?? "initial",
+            byRule: thread.verdict?.source === "user_rule",
           }
         : null,
     category: thread.category,
@@ -628,6 +637,9 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
     chatThreadId: thread.chatThreadId === null ? null : ThreadId.make(thread.chatThreadId),
     injectionWarning: thread.injection,
     triagePending: thread.triageState === "pending" || thread.triageState === "waiting_model",
+    // A verdict on older mail would explain a decision the newest mail hasn't had yet.
+    why: thread.triageState === "done" ? (thread.verdict?.why ?? null) : null,
+    decidedBy: thread.triageState === "done" ? (thread.verdict?.by ?? null) : null,
   };
 }
 
@@ -1552,16 +1564,49 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         hasMore: rows.length > input.limit,
       })),
     );
-  const actionsSince = (since: string) =>
-    sql<Row>`SELECT * FROM mail_actions WHERE at >= ${since} AND undone_at IS NULL ORDER BY id`.pipe(
-      Effect.map((rows) => rows.map(toAction)),
-    );
-  const threadsCreatedSince = (since: string) =>
-    sql<{
-      count: number;
-    }>`SELECT COUNT(*) AS count FROM mail_threads WHERE created_at >= ${since}`.pipe(
-      Effect.map((rows) => num(rows[0]?.count)),
-    );
+  /** The day's counts and the newest automatic settles that still stand, one per thread. */
+  const recapSince = Effect.fn("MailStore.recapSince")(function* (since: string, limit: number) {
+    const [counts] = yield* sql<Row>`SELECT
+        (SELECT COUNT(*) FROM mail_actions WHERE at >= ${since} AND undone_at IS NULL) AS actions,
+        (SELECT COUNT(*) FROM mail_actions WHERE at >= ${since} AND undone_at IS NULL
+          AND kind = 'settle' AND actor IN ('ai', 'rule')) AS settled_by_ai,
+        (SELECT COUNT(*) FROM mail_actions WHERE at >= ${since} AND undone_at IS NULL
+          AND kind = 'settle' AND actor NOT IN ('ai', 'rule')) AS settled_by_you,
+        (SELECT COUNT(*) FROM mail_threads WHERE last_incoming_at >= ${since}) AS arrived,
+        (SELECT COUNT(*) FROM mail_threads WHERE state = 'active') AS needs_you`;
+    const rows = yield* sql<Row>`WITH latest AS (
+        SELECT MAX(id) AS id FROM mail_actions
+        WHERE at >= ${since} AND undone_at IS NULL AND kind = 'settle'
+          AND actor IN ('ai', 'rule') AND thread_id IS NOT NULL
+        GROUP BY thread_id
+      )
+      SELECT action.id AS action_id, action.actor AS action_actor, COUNT(*) OVER () AS total, thread.*
+      FROM latest
+      JOIN mail_actions AS action ON action.id = latest.id
+      JOIN mail_threads AS thread ON thread.id = action.thread_id
+      WHERE thread.state = 'settled' AND thread.settled_by = action.actor
+      ORDER BY action.id DESC LIMIT ${limit}`;
+    const senders = yield* sql<{ name: string }>`SELECT
+        COALESCE(NULLIF(thread.from_name, ''), thread.from_address) AS name
+      FROM mail_actions AS action JOIN mail_threads AS thread ON thread.id = action.thread_id
+      WHERE action.at >= ${since} AND action.undone_at IS NULL AND action.kind = 'settle'
+        AND action.actor IN ('ai', 'rule')
+      GROUP BY name ORDER BY COUNT(*) DESC LIMIT 3`;
+    return {
+      actions: num(counts?.actions),
+      settledByAi: num(counts?.settled_by_ai),
+      settledByYou: num(counts?.settled_by_you),
+      arrived: num(counts?.arrived),
+      needsYou: num(counts?.needs_you),
+      topAiSenders: senders.map((row) => row.name),
+      total: num(rows[0]?.total),
+      settled: rows.map((row) => ({
+        actionId: num(row.action_id),
+        actor: str(row.action_actor) as MailActor,
+        thread: toThread(row),
+      })),
+    };
+  });
 
   const draftsForThread = (threadId: MailThreadId) =>
     sql<Row>`SELECT * FROM mail_drafts WHERE thread_id = ${threadId} ORDER BY updated_at`.pipe(
@@ -1781,8 +1826,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     getAction,
     markActionUndone,
     listActions,
-    actionsSince,
-    threadsCreatedSince,
+    recapSince,
     draftsForThread,
     threadsWithDrafts,
     getDraft,

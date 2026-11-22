@@ -1,9 +1,11 @@
-import type { ThreadId } from "@t3tools/contracts";
+import { MailSettings, mailSenderEntry, type ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import { buildSessionPrompt, relevantEmailMd } from "./mailPrompts.ts";
 import * as MailStore from "./MailStore.ts";
@@ -19,6 +21,12 @@ export class MailChatContext extends Context.Service<
   }
 >()("t3/mail/MailChatContext") {}
 
+const decodeExcluded = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({ aiExcludedSenders: MailSettings.fields.aiExcludedSenders }),
+  ),
+);
+
 export const layer = Layer.effect(
   MailChatContext,
   Effect.gen(function* () {
@@ -31,6 +39,16 @@ export const layer = Layer.effect(
     ) {
       const thread = yield* store.getChatMail(chatId);
       if (!thread) return "";
+      const raw = yield* store.getKv("settings");
+      const excluded =
+        raw === null
+          ? []
+          : decodeExcluded(raw).pipe(
+              Option.match({ onNone: () => [], onSome: (value) => value.aiExcludedSenders }),
+            );
+      const isExcluded = (address: string) => mailSenderEntry(address, excluded) !== null;
+      if (isExcluded(thread.fromAddress))
+        return `Mail thread id: ${thread.id}. The user turned AI off for this sender, so its mail is not available to you. Say so if asked about it.`;
       const note = yield* store.latestTriageNote(thread.id);
       // A continuing provider session already has the excerpts; its read tool sees later replies.
       if (!full)
@@ -39,7 +57,11 @@ export const layer = Layer.effect(
       const transcript = messages
         .map(
           (message) =>
-            `From: ${message.outgoing ? "the user" : `${message.from.name} <${message.from.address}>`}\nDate: ${message.date}\nSubject: ${message.subject}\n\n${cleanForModel(message.body ?? "(body not downloaded)", 3_000)}`,
+            `From: ${message.outgoing ? "the user" : `${message.from.name} <${message.from.address}>`}\nDate: ${message.date}\nSubject: ${message.subject}\n\n${
+              !message.outgoing && isExcluded(message.from.address)
+                ? "(AI is off for this sender)"
+                : cleanForModel(message.body ?? "(body not downloaded)", 3_000)
+            }`,
         )
         .join("\n\n---\n\n");
       const related = (yield* store.relatedThreads(

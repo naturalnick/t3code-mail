@@ -29,12 +29,12 @@ export function triageOutcome(decision: TrustDecision, guardrail: MailGuardrail 
   if (decision.type === "suggest")
     return `Suggested settling as ${reason}. ${guardrail ? reviewReason[guardrail] + " " : ""}Left in Active for your review.`;
   const via = {
-    sender: "your sender preference",
-    category: "your category preference",
-    rule: "your mail rule",
-    never_show: "your Never Show preference",
+    sender: "because you approved settling this sender's mail",
+    category: "because you approved settling this kind of mail",
+    rule: "by your mail rule",
+    never_show: "by your Never Show preference",
   }[decision.via];
-  return `Settled as ${reason} using ${via}.`;
+  return `Settled as ${reason} ${via}.`;
 }
 
 export function triageText(
@@ -43,7 +43,7 @@ export function triageText(
   outcome: string,
 ) {
   const author =
-    source === "rule"
+    source === "user_rule" || source === "rule"
       ? "Mail rule"
       : source === "memory"
         ? "Sender preference"

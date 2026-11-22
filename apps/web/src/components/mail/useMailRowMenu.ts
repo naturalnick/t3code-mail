@@ -11,6 +11,7 @@ import { requestCustomSnooze } from "../CustomSnoozeDialog";
 import { pickSnoozePreset, resolveSnoozePresets } from "../Sidebar.snooze";
 import { settleReasonLabel } from "./mailPresentation";
 import type { useMailActions } from "./useMailActions";
+import { useSenderAi } from "./useSenderAi";
 
 /** The right-click menu for an email row: everything the email's own toolbar offers. */
 export function useMailRowMenu(
@@ -25,6 +26,7 @@ export function useMailRowMenu(
     select: (params) => ("mailThreadId" in params ? String(params.mailThreadId) : null),
   });
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  const senderAi = useSenderAi(environmentId);
 
   return useStableCallback(async (thread: MailThreadRow, event: MouseEvent) => {
     event.preventDefault();
@@ -72,7 +74,20 @@ export function useMailRowMenu(
       ...(settled || thread.workingReason === "waiting"
         ? []
         : [{ id: "wait_for_reply", label: gt("Wait for reply") }]),
-      { id: "never_show", label: gt("Never show this sender"), separatorBefore: true },
+      ...(senderAi.disabled
+        ? []
+        : [
+            {
+              id: "toggle_ai",
+              label: senderAi.toggleLabel(thread.from.address),
+              separatorBefore: true,
+            },
+          ]),
+      {
+        id: "never_show",
+        label: gt("Never show this sender"),
+        separatorBefore: senderAi.disabled,
+      },
       { id: "delete", label: gt("Delete"), destructive: true },
     ];
     const clicked = await api.contextMenu
@@ -117,6 +132,9 @@ export function useMailRowMenu(
         return;
       case "wait_for_reply":
         void actions.act(ids, { type: "wait_for_reply" }, gt("Waiting for reply"));
+        return;
+      case "toggle_ai":
+        void senderAi.toggle(thread.from.address);
         return;
       case "never_show":
         void actions.act(ids, { type: "never_show" }, gt("Sender muted"));

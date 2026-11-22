@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  canSkipModel,
   decide,
   emptyRecord,
   recordApproval,
@@ -155,12 +154,5 @@ describe("trust ramp", () => {
       streak: 0,
       rejections: 1,
     });
-  });
-
-  it("skips the model only for mail shaped like what the sender graduated on", () => {
-    const graduated = approve(sender(), 3);
-    expect(canSkipModel({ sender: graduated, guardrail: null, bulk: true })).toBe(true);
-    expect(canSkipModel({ sender: graduated, guardrail: null, bulk: false })).toBe(false);
-    expect(canSkipModel({ sender: graduated, guardrail: "urgent", bulk: true })).toBe(false);
   });
 });

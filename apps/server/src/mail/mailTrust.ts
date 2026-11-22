@@ -179,18 +179,3 @@ export function setLevel(record: TrustRecord, level: MailTrustLevel | "reset"): 
     streak: level === "suggest" ? 0 : record.streak,
   };
 }
-
-/**
- * A graduated sender can skip the model only for mail shaped like what it graduated on.
- * Anything unusual goes back through L1 and its confidence check.
- */
-export function canSkipModel(input: {
-  readonly sender: TrustRecord | null;
-  readonly guardrail: MailGuardrail | null;
-  readonly bulk: boolean;
-}): boolean {
-  const { sender, guardrail, bulk } = input;
-  if (sender === null || guardrail !== null) return false;
-  if (sender.trust === "never") return true;
-  return sender.trust === "auto" && sender.bulk === bulk;
-}

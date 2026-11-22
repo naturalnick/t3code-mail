@@ -2024,6 +2024,7 @@ export const layerWsRpc = (
         [WS_METHODS.mailDryRunRule]: (input) => mail.dryRunRule(input.rule),
         [WS_METHODS.mailSeedVoice]: () => mail.seedVoice,
         [WS_METHODS.mailDismissRecap]: (input) => mail.dismissRecap(input.date),
+        [WS_METHODS.mailSetSenderAi]: (input) => Effect.asVoid(mail.setSenderAi(input)),
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
         [WS_METHODS.issuesComments]: (input) => issues.comments(input),

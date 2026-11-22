@@ -10,6 +10,8 @@ import {
   MailDraftId,
   MailError,
   type MailRule,
+  mailSenderEntry,
+  type MailSetSenderAiInput,
   type MailSettings,
   type MailSettleReason,
   type MailStreamEvent,
@@ -101,7 +103,6 @@ import {
   looksLikeInstructionsToAi,
 } from "./mailText.ts";
 import {
-  canSkipModel,
   categoryKey,
   decide,
   emptyRecord,
@@ -127,6 +128,27 @@ const L1_TEXT_CHARS = 1_200;
 const GUARDRAIL_TEXT_CHARS = 200_000;
 const TRIAGE_RETRY_MINUTES = 10;
 const SEND_DEDUPE_MS = 10 * 60_000;
+/** The model's reason travels with every sidebar row, so it stays one short line. */
+const WHY_CHARS = 140;
+/** An address, or a domain with an optional leading @. */
+const SENDER_ENTRY = /^(?:[^\s@]+@|@)?[a-z\d-]+(?:\.[a-z\d-]+)+$/;
+
+/** How the user handled this sender and category before, so the model can follow it. */
+function trustFacts(trust: {
+  readonly sender: TrustRecord | null;
+  readonly category: TrustRecord | null;
+}): ReadonlyArray<string> {
+  const fact = (record: TrustRecord | null, what: string) => {
+    if (record === null || record.approvals + record.rejections === 0) return null;
+    const settled = `the user approved settling ${record.approvals} earlier email(s) ${what}${record.reason ? ` as ${record.reason}` : ""}`;
+    return record.rejections > 0
+      ? `${settled}, and ${record.rejections} time(s) wanted one kept instead`
+      : settled;
+  };
+  return [fact(trust.sender, "from this sender"), fact(trust.category, "of this kind")].filter(
+    (entry): entry is string => entry !== null,
+  );
+}
 
 const sameRecipients = (
   a: { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> },
@@ -302,6 +324,10 @@ export class MailService extends Context.Service<
     readonly dryRunRule: (rule: MailRule) => Effect.Effect<MailDryRunRuleResult, MailError>;
     readonly seedVoice: Effect.Effect<MailSeedVoiceResult, MailError>;
     readonly dismissRecap: (date: string) => Effect.Effect<void, MailError>;
+    /** Tells whether the user turned AI off for a sender, so agents must not read its mail. */
+    readonly aiExcluded: Effect.Effect<(address: string) => boolean, MailError>;
+    /** Adds or removes an address or domain from the senders whose mail never reaches a model. */
+    readonly setSenderAi: (input: MailSetSenderAiInput) => Effect.Effect<MailSettings, MailError>;
     /** Triages until no pending thread can progress. The worker runs it after a debounce. */
     readonly drainTriage: Effect.Effect<void>;
   }
@@ -881,7 +907,16 @@ const make = Effect.gen(function* () {
           state: entry.state,
         })),
         actions: actions.actions.map((action) => MailStore.actionEntry(action, thread)),
-        verdict: thread.verdict,
+        verdict:
+          thread.verdict === null
+            ? null
+            : {
+                decision: thread.verdict.decision,
+                reason: thread.verdict.reason,
+                confidence: thread.verdict.confidence,
+                // The wire keeps the older set so existing clients still decode it.
+                source: thread.verdict.source === "user_rule" ? "rule" : thread.verdict.source,
+              },
       } satisfies MailThreadDetail;
     },
     sqlSafe,
@@ -1006,7 +1041,15 @@ const make = Effect.gen(function* () {
       });
       // The user may have moved it while L1 ran; their choice wins.
       const saveNote = (outcome: string) =>
-        store.addTriageNote(thread.id, now, triageText(input.verdict.source, input.model, outcome));
+        store.addTriageNote(
+          thread.id,
+          now,
+          triageText(
+            input.verdict.source,
+            input.model,
+            input.verdict.why ? `${input.verdict.why} ${outcome}` : outcome,
+          ),
+        );
       if (thread.state !== "active" || thread.pinnedAt !== null) {
         yield* saveNote("Reviewed. Kept your existing thread state.");
         return thread.chatThreadId;
@@ -1093,7 +1136,9 @@ const make = Effect.gen(function* () {
     thread: MailStore.ThreadRecord,
     settings: MailSettings,
   ) {
-    const messages = yield* store.threadMessages(thread.id, 2);
+    // Mail that arrived together is judged together, so a "delivered" isn't decided without "shipped".
+    const unreviewed = Math.min(Math.max(thread.incomingCount - thread.triagedCount - 1, 0), 3);
+    const messages = yield* store.threadMessages(thread.id, 2 + unreviewed);
     const newest = messages.at(-1);
     if (newest === undefined) return null;
     const latest = newest.outgoing
@@ -1126,10 +1171,27 @@ const make = Effect.gen(function* () {
       },
       settings.rules,
     );
+    const who = (message: MailStore.StoredMessage) =>
+      message.outgoing ? "the user" : message.from.name || message.from.address;
+    const said = (message: MailStore.StoredMessage, chars: number) =>
+      !message.outgoing &&
+      mailSenderEntry(message.from.address, settings.aiExcludedSenders) !== null
+        ? "(AI is off for this sender)"
+        : chars <= 100
+          ? firstLine(message.body ?? "", chars)
+          : cleanForModel(message.body ?? "", chars);
+    const prior = messages.filter(
+      (message) => message.id !== latest.id && message.date <= latest.date,
+    );
+    const unseen =
+      unreviewed > 0 ? prior.filter((message) => !message.outgoing).slice(-unreviewed) : [];
+    const lastPrior = prior.at(-1);
     const earlier =
-      messages.length > 1
-        ? `${thread.messageCount - 1} earlier messages; last from ${messages.at(-2)!.outgoing ? "the user" : messages.at(-2)!.from.name || messages.at(-2)!.from.address}: ${firstLine(messages.at(-2)!.body ?? "", 100)}`
-        : null;
+      unseen.length > 0
+        ? `Also new since the last review: ${unseen.map((message) => `${who(message)}: ${said(message, 400)}`).join(" | ")}`
+        : lastPrior
+          ? `${thread.messageCount - 1} earlier messages; last from ${who(lastPrior)}: ${said(lastPrior, 100)}`
+          : null;
     const flags = [
       prefiltered.bulk ? "bulk or list mail" : null,
       replied.size > 0 ? "the user has written to this sender before" : null,
@@ -1205,32 +1267,17 @@ const make = Effect.gen(function* () {
         fromAddress: thread.fromAddress,
         category: prepared.prefiltered.category,
       });
-      const familiarMail =
-        !prepared.asksQuestion &&
-        (trust.category?.approvals ?? 0) > 0 &&
-        canSkipModel({
-          sender: trust.sender,
-          guardrail: prepared.prefiltered.guardrail,
-          bulk: prepared.prefiltered.bulk,
-        });
-      const skip =
-        prepared.prefiltered.rule !== null ||
-        trust.sender?.trust === "never" ||
-        (trust.sender?.trust === "auto" ? familiarMail : prepared.prefiltered.verdict !== null);
-      if (skip) {
-        const fromMemory = trust.sender?.trust === "auto" || trust.sender?.trust === "never";
-        const ruleVerdict = prepared.prefiltered.verdict;
+      // Only what the user set up exactly skips the model: their rules and Never show.
+      if (prepared.prefiltered.rule !== null || trust.sender?.trust === "never") {
         yield* commit(
           applyDecision(thread, {
             verdict: {
               decision: prepared.prefiltered.rule?.action === "keep" ? "keep" : "settle",
-              reason:
-                ruleVerdict?.reason ??
-                trust.sender?.reason ??
-                prepared.prefiltered.rule?.reason ??
-                "fyi",
-              confidence: ruleVerdict?.confidence ?? 0.9,
-              source: fromMemory && !prepared.prefiltered.rule ? "memory" : "rule",
+              reason: prepared.prefiltered.rule?.reason ?? "noise",
+              confidence: 1,
+              source: "user_rule",
+              why: null,
+              by: null,
             },
             prefiltered: prepared.prefiltered,
             suggestedAction: null,
@@ -1242,11 +1289,41 @@ const make = Effect.gen(function* () {
         );
         continue;
       }
-      forModel.push(prepared);
+      if (mailSenderEntry(thread.fromAddress, settings.aiExcludedSenders) !== null) {
+        yield* setTriageIfFresh(thread, {
+          category: prepared.prefiltered.category,
+          guardrail: prepared.prefiltered.guardrail,
+          bulk: prepared.prefiltered.bulk,
+          verdict: null,
+          triageState: "done",
+        });
+        continue;
+      }
+      forModel.push({
+        ...prepared,
+        item: { ...prepared.item, flags: [...prepared.item.flags, ...trustFacts(trust)] },
+      });
+      continue;
     }
+    // The AI-off list can change while a batch waits on a model, so it is read again right before each call.
+    const stillAllowed = Effect.fn("MailService.stillAllowed")(function* (
+      entries: ReadonlyArray<Prepared>,
+    ) {
+      const { aiExcludedSenders } = yield* engine.settings;
+      const allowed: Array<Prepared> = [];
+      for (const entry of entries) {
+        if (mailSenderEntry(entry.thread.fromAddress, aiExcludedSenders) === null) {
+          allowed.push(entry);
+          continue;
+        }
+        yield* setTriageIfFresh(entry.thread, { verdict: null, triageState: "done" });
+      }
+      return allowed;
+    });
     const selection = settings.defaultModelSelection;
     for (let start = 0; start < forModel.length; start += L1_BATCH) {
-      const batch = forModel.slice(start, start + L1_BATCH);
+      const batch = yield* stillAllowed(forModel.slice(start, start + L1_BATCH));
+      if (batch.length === 0) continue;
       const { capped } = yield* engine.usage;
       if (capped || selection === null) {
         for (const prepared of batch) {
@@ -1282,14 +1359,22 @@ const make = Effect.gen(function* () {
       );
       const escalated =
         escalate !== null && needsEscalation.length > 0 && !(yield* engine.usage).capped
-          ? yield* runModel(
-              needsEscalation.map((result) => result.entry),
-              escalate,
-              "l1_escalated",
-            ).pipe(Effect.orElseSucceed(() => []))
+          ? yield* stillAllowed(needsEscalation.map((result) => result.entry)).pipe(
+              Effect.flatMap((entries) =>
+                entries.length === 0
+                  ? Effect.succeed([])
+                  : runModel(entries, escalate, "l1_escalated"),
+              ),
+              Effect.orElseSucceed(() => []),
+            )
           : [];
       const escalatedBy = new Map(
         escalated.map((result) => [result.entry.thread.id as string, result.verdict]),
+      );
+      const deciding = new Set(
+        (yield* stillAllowed(
+          results.filter((result) => result.verdict !== null).map((result) => result.entry),
+        )).map((entry) => entry.thread.id),
       );
       for (const result of results) {
         const prepared = result.entry;
@@ -1298,6 +1383,7 @@ const make = Effect.gen(function* () {
           yield* setTriageIfFresh(prepared.thread, { triageState: "waiting_model" });
           continue;
         }
+        if (!deciding.has(prepared.thread.id)) continue;
         const better = escalatedBy.get(prepared.thread.id);
         const verdict = better ?? initial;
         const modelCategory = MAIL_CATEGORIES.has(verdict.category as MailCategory)
@@ -1316,6 +1402,11 @@ const make = Effect.gen(function* () {
               reason: verdict.reason,
               confidence: verdict.confidence,
               source: better ? "escalated" : "model",
+              why: verdict.why.trim().replace(/\s+/g, " ").slice(0, WHY_CHARS) || null,
+              by: {
+                instanceId: (better && escalate ? escalate : selection).instanceId,
+                model: (better && escalate ? escalate : selection).model,
+              },
             },
             prefiltered: prepared.prefiltered,
             suggestedAction: verdict.action.trim().slice(0, 40) || null,
@@ -1326,8 +1417,10 @@ const make = Effect.gen(function* () {
               prepared.prefiltered.guardrail ??
               (verdict.urgent || initial.urgent ? "urgent" : null),
             injection: verdict.injection || looksLikeInstructionsToAi(prepared.text),
+            // A settle the user can't see a reason for stays a suggestion.
             suggestOnly:
               prepared.bodyMissing ||
+              verdict.why.trim().length === 0 ||
               initial.confidence < LOW_CONFIDENCE ||
               (prepared.repliedTo && !better),
           }),
@@ -1869,6 +1962,10 @@ const make = Effect.gen(function* () {
         shell?.id ?? ThreadId.make(`mail-chat-${sessionDigest(thread.id, linkedId)}`);
       let created = false;
       if (shell === null) {
+        if (
+          mailSenderEntry(thread.fromAddress, (yield* engine.settings).aiExcludedSenders) !== null
+        )
+          return yield* invalid("AI is off for this sender. Turn it on to chat about this email.");
         const modelSelection =
           input.modelSelection ??
           (yield* engine.settings).defaultModelSelection ??
@@ -2310,7 +2407,15 @@ const make = Effect.gen(function* () {
   const seedVoice: MailService["Service"]["seedVoice"] = Effect.gen(function* () {
     const settings = yield* engine.settings;
     if (settings.defaultModelSelection === null) return yield* invalid("Pick a mail model first.");
-    const samples = (yield* store.sentSamples(15))
+    // A reply often quotes what it answers, so mail to an AI-off sender is left out.
+    const samples = (yield* store.sentSamples(30))
+      .filter(
+        (message) =>
+          ![...message.to, ...message.cc].some(
+            (entry) => mailSenderEntry(entry.address, settings.aiExcludedSenders) !== null,
+          ),
+      )
+      .slice(0, 15)
       .map((message) => cleanForModel(message.body ?? "", 800))
       .filter((text) => text.length > 20);
     if (samples.length === 0) return yield* invalid("No sent mail has synced yet.");
@@ -2341,6 +2446,34 @@ const make = Effect.gen(function* () {
     yield* engine.publishStatus;
     return { notes: result.notes.trim() };
   }).pipe(triageLock.withPermits(1), sqlSafe);
+
+  const aiExcluded: MailService["Service"]["aiExcluded"] = engine.settings.pipe(
+    Effect.map(
+      (settings) => (address: string) =>
+        mailSenderEntry(address, settings.aiExcludedSenders) !== null,
+    ),
+    sqlSafe,
+  );
+
+  const setSenderAi: MailService["Service"]["setSenderAi"] = Effect.fn("MailService.setSenderAi")(
+    function* (input) {
+      const sender = input.sender.trim().toLowerCase();
+      if (!SENDER_ENTRY.test(sender))
+        return yield* invalid("Enter an email address or a domain like example.com.");
+      const current = yield* engine.settings;
+      // Each call adds or removes exactly this entry, so its Undo restores the same list.
+      const others = current.aiExcludedSenders.filter((entry) => entry.toLowerCase() !== sender);
+      const next: MailSettings = {
+        ...current,
+        aiExcludedSenders: input.enabled ? others : [...others, sender],
+      };
+      yield* engine.putSettings(next);
+      yield* engine.publishStatus;
+      return next;
+    },
+    changeAccounts,
+    sqlSafe,
+  );
 
   const dismissRecap: MailService["Service"]["dismissRecap"] = (date) =>
     store.setKv("recap-dismissed", date).pipe(Effect.andThen(engine.publishStatus), sqlSafe);
@@ -2388,6 +2521,8 @@ const make = Effect.gen(function* () {
     dryRunRule,
     seedVoice,
     dismissRecap,
+    aiExcluded,
+    setSenderAi,
     drainTriage,
   });
 });

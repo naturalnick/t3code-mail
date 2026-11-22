@@ -26,6 +26,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposeMode } from "./mailCompose.logic";
 import { settleReasonLabel } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
+import { useSenderAi } from "./useSenderAi";
 
 function SnoozeMenu({
   environmentId,
@@ -132,6 +133,7 @@ export function MailThreadToolbar({
   const gt = useGT();
   const resolve = useMessages();
   const { act, disabled } = useMailActions(environmentId);
+  const senderAi = useSenderAi(environmentId);
   const navigate = useNavigate();
   const markRead = useEffectEvent(() => void act([thread.id], { type: "mark_read" }));
   const readAt = useRef<string | null>(null);
@@ -274,6 +276,11 @@ export function MailThreadToolbar({
           >
             {gt("Mark as unread")}
           </MenuItem>
+          {senderAi.disabled ? null : (
+            <MenuItem onClick={() => void senderAi.toggle(thread.from.address)}>
+              {senderAi.toggleLabel(thread.from.address)}
+            </MenuItem>
+          )}
           <MenuItem
             onClick={() => void act([thread.id], { type: "never_show" }, gt("Sender muted"))}
           >

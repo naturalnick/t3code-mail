@@ -531,7 +531,7 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
       )?.item;
       assert.equal(live?.type, "assistant_message");
       if (live?.type !== "assistant_message") assert.fail("Missing saved triage");
-      assert.include(live.text, "Sender preference");
+      assert.include(live.text, "Never Show preference");
       assert.include(live.text, "Settled as noise");
       yield* Effect.all([open, open], { concurrency: "unbounded" });
       const refreshed = yield* projection;

@@ -10,7 +10,7 @@ import type {
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { Link } from "@tanstack/react-router";
 import { useGT, useMessages } from "gt-react";
-import { BotIcon, TriangleAlertIcon } from "lucide-react";
+import { TriangleAlertIcon } from "lucide-react";
 import * as Schema from "effect/Schema";
 import { useState, type ReactNode } from "react";
 
@@ -26,6 +26,8 @@ import { Button } from "../ui/button";
 import { MailChatPanel } from "./MailChatPanel";
 import { type ComposeTask, MailComposer } from "./MailComposer";
 import { MailConversation } from "./MailConversation";
+import { MailDecider } from "./MailDecider";
+import { mailDecision } from "./mailDecision";
 import {
   type ComposeMode,
   defaultReplyTarget,
@@ -44,6 +46,7 @@ import {
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
 import { useMailActions } from "./useMailActions";
+import { useSenderAi } from "./useSenderAi";
 
 const DETAILS_PANEL_KEY = "t3code:mail-details-panel";
 
@@ -126,6 +129,10 @@ function MailThreadDetails({
   const gt = useGT();
   const resolve = useMessages();
   const { act, disabled } = useMailActions(environmentId);
+  const senderAi = useSenderAi(environmentId);
+  const aiEntry = senderAi.entryFor(thread.from.address);
+  const aiOff = aiEntry !== null;
+  const decision = mailDecision(thread);
   const nudge = nudgeLabel(thread.nudge, resolve);
   const status =
     thread.state === "settled" && thread.settledReason
@@ -143,6 +150,8 @@ function MailThreadDetails({
           : null;
   const hasStatus =
     status !== null ||
+    aiOff ||
+    decision !== null ||
     nudge !== null ||
     thread.injectionWarning ||
     thread.suggestion !== null ||
@@ -154,13 +163,41 @@ function MailThreadDetails({
       {hasStatus ? (
         <DetailsSection>
           <div className="space-y-2 text-sm wrap-anywhere">
-            {status ? (
-              <p className="flex items-center gap-1.5">
-                {thread.state === "settled" && thread.settledBy === "ai" ? (
-                  <BotIcon aria-label={gt("Settled by AI")} className="size-3.5 shrink-0" />
-                ) : null}
-                {status}
+            {status ? <p>{status}</p> : null}
+            {decision ? (
+              <p className="flex items-start gap-1.5 text-muted-foreground">
+                <span className="flex h-5 shrink-0 items-center">
+                  <MailDecider
+                    environmentId={environmentId}
+                    actor={decision.actor}
+                    decidedBy={thread.decidedBy}
+                  />
+                </span>
+                {decision.actor === "rule"
+                  ? thread.state === "settled"
+                    ? gt("Settled by your rule")
+                    : gt("Suggested by your rule")
+                  : (decision.why ??
+                    (thread.state === "settled" ? gt("Settled by AI") : gt("Suggested by AI")))}
               </p>
+            ) : null}
+            {aiOff ? (
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-muted-foreground">
+                  {aiEntry?.toLowerCase() === thread.from.address.toLowerCase()
+                    ? gt("AI is off for this sender.")
+                    : gt("AI is off for {sender}.", { sender: aiEntry ?? "" })}
+                </p>
+                {senderAi.disabled ? null : (
+                  <Button
+                    size="compact"
+                    variant="outline"
+                    onClick={() => void senderAi.toggle(thread.from.address)}
+                  >
+                    {gt("Turn on")}
+                  </Button>
+                )}
+              </div>
             ) : null}
             {nudge ? <p className="text-warning-foreground">{nudge}</p> : null}
             {thread.injectionWarning ? (
@@ -171,8 +208,7 @@ function MailThreadDetails({
             ) : null}
             {thread.suggestion ? (
               <div className="flex items-center justify-between gap-2">
-                <p className="flex min-w-0 items-center gap-1.5">
-                  <BotIcon aria-hidden className="size-3.5 shrink-0" />
+                <p className="min-w-0">
                   {gt("Suggests settling as {reason}", {
                     reason: settleReasonLabel(thread.suggestion.reason, resolve),
                   })}
@@ -247,9 +283,12 @@ function hasDetails(
   thread: MailThreadRow,
   detail: MailThreadDetail | null,
   account: string | null,
+  aiOff: boolean,
 ) {
   return (
     thread.state !== "active" ||
+    aiOff ||
+    mailDecision(thread) !== null ||
     thread.nudge !== null ||
     thread.injectionWarning ||
     thread.suggestion !== null ||
@@ -324,6 +363,7 @@ export function MailThreadView({
     gt("Could not open mail chat"),
   );
   const canSaveDraft = useAtomValue(mailEnvironment.saveDraft.permissionAtom(environmentId));
+  const senderAi = useSenderAi(environmentId);
   // The sidebar row is already in memory, so the header paints before the thread arrives.
   const thread = detail?.thread ?? view?.threads.get(threadId) ?? null;
   if (thread === null) {
@@ -351,7 +391,8 @@ export function MailThreadView({
     setOpenedChatId(result.value.threadId);
     onChatOpenChange(true);
   };
-  const showDetails = hasDetails(thread, detail, account);
+  const aiOff = senderAi.entryFor(thread.from.address) !== null;
+  const showDetails = hasDetails(thread, detail, account, aiOff);
   const detailsOpen = showDetails && !showChat && (wide ? widePanel : narrowPanel);
   const toggleDetails = () => {
     if (showChat) {
@@ -395,7 +436,8 @@ export function MailThreadView({
           detailsOpen={detailsOpen}
           onToggleDetails={showDetails ? toggleDetails : null}
           chatOpen={showChat}
-          chatDisabled={chatThreadId === null && openSession.disabled}
+          // An open chat can still be closed after AI is turned off for the sender.
+          chatDisabled={(chatThreadId === null && openSession.disabled) || (aiOff && !showChat)}
           onChatOpenChange={(open) => void setChatOpen(open)}
         />
       }

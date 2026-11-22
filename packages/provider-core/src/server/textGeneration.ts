@@ -125,6 +125,7 @@ export interface MailTriageVerdict {
   id: string;
   decision: "settle" | "keep";
   reason: string;
+  why: string;
   category: string;
   action: string;
   confidence: number;

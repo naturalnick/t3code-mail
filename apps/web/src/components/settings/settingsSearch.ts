@@ -279,6 +279,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("filters domain subject list dry run")],
   },
   {
+    id: "mail-ai-off",
+    title: msg("AI off"),
+    to: "/settings/mail",
+    searchTerms: [msg("privacy sender domain exclude not read by AI")],
+  },
+  {
     id: "mail-usage",
     title: msg("Usage"),
     to: "/settings/mail",

@@ -78,7 +78,7 @@ const message = (input: MessageInput): ParsedMessage => {
   };
 };
 
-type ModelReply = (model: string) => Partial<MailTriageVerdict>;
+type ModelReply = (model: string, prompt: string) => Partial<MailTriageVerdict>;
 
 const textGeneration = (reply: ModelReply) =>
   Layer.mock(TextGeneration.TextGeneration)({
@@ -89,12 +89,13 @@ const textGeneration = (reply: ModelReply) =>
           id: match[1]!,
           decision: "settle" as const,
           reason: "fyi",
+          why: "A routine update; nothing to do.",
           category: "notification",
           action: "Settle",
           confidence: 0.92,
           urgent: false,
           injection: false,
-          ...reply(input.modelSelection.model),
+          ...reply(input.modelSelection.model, input.prompt),
         })),
       })),
   });
@@ -294,8 +295,9 @@ it.effect("prefetches formatted bodies only for mail a reader is likely to open"
 );
 
 describe("MailService trust ramp", () => {
-  it.effect("suggests until approved three times, then settles on its own and undo demotes", () =>
-    withMail(
+  it.effect("suggests until approved three times, then settles on its own and undo demotes", () => {
+    const prompts: Array<string> = [];
+    return withMail(
       Effect.gen(function* () {
         const mail = yield* MailService.MailService;
         yield* mail.updateSettings({
@@ -340,11 +342,31 @@ describe("MailService trust ramp", () => {
           body: "Build 4 passed in 4m.",
           at: "2026-11-04T06:00:00.000Z",
         });
+        // Trust lets the model's settle apply on its own; the model still read the email.
         expect(yield* rowOf(fourth)).toMatchObject({
           state: "settled",
           settledBy: "ai",
           settledReason: "fyi",
+          why: "A routine update; nothing to do.",
+          decidedBy: { instanceId: "codex", model: "luna" },
         });
+        expect(prompts.at(-1)).toContain(
+          "the user approved settling 3 earlier email(s) from this sender as fyi",
+        );
+        const recap = (yield* (yield* MailEngine.MailEngine).recap)!;
+        expect(recap.settled).toEqual([
+          expect.objectContaining({ threadId: fourth, actor: "ai", why: expect.any(String) }),
+        ]);
+        // Clients that predate the list still read the counts.
+        expect(recap).toMatchObject({ settledByAi: 1, topAiSenders: ["Acme Builds"] });
+
+        // A trusted sender's email the model would keep is kept.
+        const failed = yield* deliver({
+          subject: "Nightly build #5",
+          body: "Build 5 FAILED: 3 tests broke.",
+          at: "2026-11-04T07:00:00.000Z",
+        });
+        expect(yield* rowOf(failed)).toMatchObject({ state: "active", suggestion: null });
 
         const engine = yield* MailEngine.MailEngine;
         const callsBefore = (yield* engine.usage).calls;
@@ -378,6 +400,11 @@ describe("MailService trust ramp", () => {
           trust.records.find((record) => record.key === "sender:updates@acme.dev"),
         ).toMatchObject({ trust: "suggest", streak: 0 });
 
+        // Back in Active, it leaves the recap.
+        expect(
+          (yield* (yield* MailEngine.MailEngine).recap)!.settled.map((item) => item.threadId),
+        ).not.toContain(fourth);
+
         const sixth = yield* deliver({
           subject: "Nightly build #6",
           body: "Build 6 passed in 4m.",
@@ -387,9 +414,97 @@ describe("MailService trust ramp", () => {
           state: "active",
           suggestion: { reason: "fyi" },
         });
+
+        // With AI off for the sender, its mail never reaches a model and waits for the user.
+        yield* mail.setSenderAi({ sender: "acme.dev", enabled: false });
+        const callsBeforeOff = (yield* engine.usage).calls;
+        const unread = yield* deliver({
+          subject: "Nightly build #7",
+          body: "Build 7 passed in 4m.",
+          at: "2026-11-07T06:00:00.000Z",
+        });
+        expect((yield* engine.usage).calls).toBe(callsBeforeOff);
+        expect(yield* rowOf(unread)).toMatchObject({
+          state: "active",
+          suggestion: null,
+          why: null,
+          triagePending: false,
+        });
+        const chatId = ThreadId.make("fixture-chat-ai-off");
+        yield* (yield* MailStore.MailStore).setChatThread(unread, chatId);
+        const context = yield* (yield* MailChatContext.MailChatContext).forTurn(chatId, true);
+        expect(context).not.toContain("Build 7");
+        expect(context).toContain("turned AI off");
+
+        // Turning AI on acts on the exact entry, so an address can't silently lift its domain.
+        yield* mail.setSenderAi({ sender: "updates@acme.dev", enabled: true });
+        expect((yield* engine.settings).aiExcludedSenders).toEqual(["acme.dev"]);
+        yield* mail.setSenderAi({ sender: "acme.dev", enabled: true });
+        expect((yield* engine.settings).aiExcludedSenders).toEqual([]);
+        const rejected = yield* Effect.flip(
+          mail.setSenderAi({ sender: "not a sender", enabled: false }),
+        );
+        expect(rejected.code).toBe("invalid");
       }),
-    ),
-  );
+      (_model, prompt) => {
+        prompts.push(prompt);
+        return prompt.includes("FAILED") ? { decision: "keep", reason: "Build failed" } : {};
+      },
+    );
+  });
+
+  it.effect("reads every message that arrived since the last review", () => {
+    const prompts: Array<string> = [];
+    return withMail(
+      Effect.gen(function* () {
+        const engine = yield* MailEngine.MailEngine;
+        const store = yield* MailStore.MailStore;
+        const mail = yield* MailService.MailService;
+        yield* mail.updateSettings({
+          defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
+        });
+        const shipped = message({ subject: "Your order", at: "2026-11-01T06:00:00.000Z" });
+        const reply = (at: string) => ({
+          ...message({ subject: "Re: Your order", at }),
+          inReplyTo: shipped.messageId,
+          references: [shipped.messageId!],
+        });
+        const outForDelivery = reply("2026-11-01T08:00:00.000Z");
+        const delivered = reply("2026-11-01T09:00:00.000Z");
+        const result = yield* engine.ingest(
+          {
+            accountId,
+            accountEmail: me,
+            gmail: false,
+            mailbox: "INBOX",
+            role: "primary",
+            initial: false,
+            backfill: false,
+          },
+          [shipped, outForDelivery, delivered],
+        );
+        expect(result.threads).toHaveLength(1);
+        for (const entry of result.newMessageIds)
+          yield* store.setMessageBody(
+            entry.id,
+            entry.uid === shipped.uid
+              ? "Your order has shipped."
+              : entry.uid === outForDelivery.uid
+                ? "Your order is out for delivery."
+                : "Your order was delivered.",
+          );
+        yield* engine.afterBodies(result.threads);
+        yield* mail.drainTriage;
+        expect(prompts).toHaveLength(1);
+        expect(prompts[0]).toContain("Your order was delivered.");
+        expect(prompts[0]).toContain("Your order has shipped.");
+      }),
+      (_model, prompt) => {
+        prompts.push(prompt);
+        return {};
+      },
+    );
+  });
 
   it.effect.each([
     { category: "invoice", guardrail: "money", subject: "Statement enclosed", list: false },

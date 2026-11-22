@@ -26,6 +26,7 @@ import { Textarea } from "../ui/textarea";
 import { MailAccounts } from "./MailSettings.accounts";
 import { useMailCommand } from "./MailSettings.commands";
 import { insertToneNotes, mailUsageShare } from "./MailSettings.logic";
+import { MailAiOff } from "./MailSettings.aiOff";
 import { MailRules } from "./MailSettings.rules";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
@@ -555,6 +556,7 @@ const MailSections = memo(function MailSections({
       <MailModels environmentId={environmentId} settings={settings} />
       <MailTrust environmentId={environmentId} settings={settings} />
       <MailRules environmentId={environmentId} rules={settings.rules} />
+      <MailAiOff environmentId={environmentId} senders={settings.aiExcludedSenders} />
       <Usage environmentId={environmentId} usage={status.usage} />
       <Behavior environmentId={environmentId} settings={settings} />
       <Memory environmentId={environmentId} path={status.emailMdPath} />

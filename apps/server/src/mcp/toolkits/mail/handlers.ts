@@ -15,10 +15,12 @@ import { MailToolkit } from "./tools.ts";
 const address = (entry: MailAddress) =>
   entry.name ? `${entry.name} <${entry.address}>` : entry.address;
 
-const row = (thread: MailThreadRow) => ({
+const HIDDEN = "(hidden: the user turned AI off for this sender)";
+
+const row = (thread: MailThreadRow, excluded: (address: string) => boolean) => ({
   threadId: thread.id,
   from: address(thread.from),
-  subject: thread.subject,
+  subject: excluded(thread.from.address) ? HIDDEN : thread.subject,
   state: thread.state,
   lastMessageAt: thread.lastMessageAt,
   unread: thread.unread,
@@ -56,18 +58,25 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
   t3_mail_list: McpToolAccess.reads(({ state, query, limit }) =>
     Effect.gen(function* () {
       const mail = yield* MailService.MailService;
+      const excluded = yield* failure(mail.aiExcluded);
       const max = limit ?? 30;
       const threads =
         query !== undefined && query.trim().length > 0
           ? (yield* failure(mail.search({ query, limit: max }))).threads
           : yield* failure(mail.listThreads(state ?? "active", max));
-      return { threads: threads.map(row) };
+      return { threads: threads.map((thread) => row(thread, excluded)) };
     }),
   ),
   t3_mail_read: McpToolAccess.reads(({ threadId }) =>
     Effect.gen(function* () {
       const mail = yield* MailService.MailService;
+      const excluded = yield* failure(mail.aiExcluded);
       const detail = yield* failure(mail.getThread(threadId));
+      if (excluded(detail.thread.from.address))
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The user turned AI off for this sender, so this thread can't be read.",
+        });
       const related = yield* failure(
         Effect.forEach(detail.related, (entry) => mail.getThread(entry.id)),
       );
@@ -81,7 +90,10 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
           cc: message.cc.map(address),
           date: message.date,
           fromUser: message.outgoing,
-          text: message.text ?? "(not downloaded yet)",
+          text:
+            !message.outgoing && excluded(message.from.address)
+              ? HIDDEN
+              : (message.text ?? "(not downloaded yet)"),
           attachments: message.attachments.map((attachment) => attachment.filename),
         })),
         drafts: detail.drafts
@@ -95,7 +107,7 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
             body: draft.body,
             status: draft.status,
           })),
-        related: related.map((entry) => row(entry.thread)),
+        related: related.map((entry) => row(entry.thread, excluded)),
       };
     }),
   ),
