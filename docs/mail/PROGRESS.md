@@ -15,13 +15,16 @@ Build log for the v1 described in [SPEC.md](SPEC.md). Choices made without a hum
   - Wired into `ws.ts` and `server.ts`.
 - Tests: trust ramp, prefilter, text cleaning, and an end-to-end ramp through `MailService` (`vp test run src/mail` in `apps/server`).
 
+- Outside agents can list, search, read, draft, propose settles and reopen mail over MCP and the CLI. Neither interface sends mail.
+- Web settings, shared client state, permission-aware RPC commands and Mail capability discovery are implemented.
+- Verified 32 server Mail tests, two settings logic tests and the client-runtime typecheck at takeover.
+
 ## Next
 
 1. Verify IMAP/SMTP against GreenMail in Docker.
-2. MCP toolkit for outside agents (read, draft, propose settles, no send).
-3. client-runtime atoms; web Mail tab, thread view, settings section.
-4. Desktop: keep sync running in the background (App Nap / throttling).
-5. i18n for all locales, user docs, Astra review.
+2. Finish web navigation, inbox, thread detail, draft approval and integrated verification.
+3. Desktop: keep sync running in the background (App Nap / throttling).
+4. i18n for all locales, user docs, Astra review.
 
 ## Known issues
 

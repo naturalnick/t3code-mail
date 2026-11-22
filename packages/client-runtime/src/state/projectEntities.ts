@@ -6,6 +6,7 @@ import type {
   ScopedProjectRef,
   ServerConfig,
 } from "@t3tools/contracts";
+import { MAIL_SESSION_PROJECT_ID } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentProject } from "./models.ts";
@@ -106,7 +107,8 @@ export function createEnvironmentProjectAtoms(input: {
   const projectsAtom = Atom.make((get) => {
     const next = get(projectRefsAtom).flatMap((ref) => {
       const project = get(projectAtomFamily(projectKey(ref)));
-      return project === null ? [] : [project];
+      // The Mail project holds mail chat sessions; point reads still resolve it.
+      return project === null || project.id === MAIL_SESSION_PROJECT_ID ? [] : [project];
     });
     if (arrayElementsEqual(previousProjects, next)) {
       return previousProjects;

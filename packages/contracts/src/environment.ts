@@ -98,6 +98,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   pullRequests: Schema.optionalKey(Schema.Boolean),
   pullRequestChecks: Schema.optionalKey(Schema.Boolean),
   issues: Schema.optionalKey(Schema.Boolean),
+  /** T3 Mail: the `mail.*` RPCs. Servers without it have no Mail tab. */
+  mail: Schema.optionalKey(Schema.Boolean),
   /** Side chats: hidden `lineage.sideChat` forks. Older servers ignore the fork flag. */
   sideChats: Schema.optionalKey(Schema.Boolean),
   vcsBranchStatus: Schema.optionalKey(Schema.Boolean),

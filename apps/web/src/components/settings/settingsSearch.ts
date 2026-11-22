@@ -29,6 +29,7 @@ export type SettingsPath =
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/threads"
+  | "/settings/mail"
   | "/settings/browser"
   | "/settings/devices"
   | "/settings/scheduled-tasks"
@@ -105,6 +106,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/snap-shot": msg("SnapShots"),
   "/settings/providers": msg("Providers"),
   "/settings/threads": msg("Threads"),
+  "/settings/mail": msg("Mail"),
   "/settings/browser": msg("Browser"),
   "/settings/devices": msg("Devices"),
   "/settings/scheduled-tasks": msg("Scheduled tasks"),
@@ -155,6 +157,7 @@ const ALL_SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     paths: [
       "/settings/providers",
       "/settings/threads",
+      "/settings/mail",
       "/settings/browser",
       "/settings/devices",
       "/settings/scheduled-tasks",
@@ -251,6 +254,48 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
   .join(" ");
 
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "mail-accounts",
+    title: msg("Accounts"),
+    to: "/settings/mail",
+    searchTerms: [msg("email Gmail IMAP SMTP app password reauthenticate sync")],
+  },
+  {
+    id: "mail-models",
+    title: msg("Models"),
+    to: "/settings/mail",
+    searchTerms: [msg("default escalation model provider")],
+  },
+  {
+    id: "mail-trust",
+    title: msg("Trust"),
+    to: "/settings/mail",
+    searchTerms: [msg("sender category approvals threshold promotion guardrails")],
+  },
+  {
+    id: "mail-rules",
+    title: msg("Rules"),
+    to: "/settings/mail",
+    searchTerms: [msg("filters domain subject list dry run")],
+  },
+  {
+    id: "mail-usage",
+    title: msg("Usage"),
+    to: "/settings/mail",
+    searchTerms: [msg("weekly token cap budget")],
+  },
+  {
+    id: "mail-behavior",
+    title: msg("Behavior"),
+    to: "/settings/mail",
+    searchTerms: [msg("sync server mirroring archive notifications daily recap nudge days")],
+  },
+  {
+    id: "mail-memory",
+    title: msg("Memory"),
+    to: "/settings/mail",
+    searchTerms: [msg("EMAIL.md tone voice notes sent mail")],
+  },
   {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
@@ -1508,6 +1553,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/threads": null,
+  "/settings/mail": null,
   "/settings/browser": null,
   "/settings/devices": null,
   "/settings/source-control": "environment-defaults",

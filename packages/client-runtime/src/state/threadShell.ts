@@ -11,6 +11,7 @@ import type {
 import {
   isListedThreadLineage,
   isProviderNativeSubagentThread,
+  MAIL_SESSION_PROJECT_ID,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -702,10 +703,11 @@ export function createEnvironmentThreadShellAtoms(input: {
   const visibleThreadShellsAtom = Atom.make((get) => {
     const threads = get(threadShellsAtom);
     const hidden = get(hiddenThreadKeysAtom);
-    if (hidden.size === 0) return threads;
     const next = threads.filter(
       (thread) =>
-        !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
+        thread.projectId !== MAIL_SESSION_PROJECT_ID &&
+        (hidden.size === 0 ||
+          !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id }))),
     );
     if (arrayElementsEqual(previousVisibleThreadShells, next)) return previousVisibleThreadShells;
     previousVisibleThreadShells = next;
@@ -721,7 +723,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const ref of get(threadRefsAtom)) {
       if (hidden.has(threadKey(ref))) continue;
       const shell = get(quietThreadShellAtomFamily(threadKey(ref)));
-      if (shell !== null) next.push(shell);
+      // Mail chat sessions live in the Mail tab, not the coding lists.
+      if (shell !== null && shell.projectId !== MAIL_SESSION_PROJECT_ID) next.push(shell);
     }
     if (arrayElementsEqual(previousQuietThreadShells, next)) return previousQuietThreadShells;
     previousQuietThreadShells = next;

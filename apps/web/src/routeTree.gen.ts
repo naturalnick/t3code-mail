@@ -36,6 +36,7 @@ import { Route as ChatSettingsProvidersRouteImport } from './routes/_chat.settin
 import { Route as ChatSettingsProjectsRouteImport } from './routes/_chat.settings.projects'
 import { Route as ChatSettingsOpenSourceLicensesRouteImport } from './routes/_chat.settings.open-source-licenses'
 import { Route as ChatSettingsMaintenanceRouteImport } from './routes/_chat.settings.maintenance'
+import { Route as ChatSettingsMailRouteImport } from './routes/_chat.settings.mail'
 import { Route as ChatSettingsLabsRouteImport } from './routes/_chat.settings.labs'
 import { Route as ChatSettingsKeybindingsRouteImport } from './routes/_chat.settings.keybindings'
 import { Route as ChatSettingsIntegrationsRouteImport } from './routes/_chat.settings.integrations'
@@ -193,6 +194,11 @@ const ChatSettingsMaintenanceRoute = ChatSettingsMaintenanceRouteImport.update({
   path: '/maintenance',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
+const ChatSettingsMailRoute = ChatSettingsMailRouteImport.update({
+  id: '/mail',
+  path: '/mail',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
 const ChatSettingsLabsRoute = ChatSettingsLabsRouteImport.update({
   id: '/labs',
   path: '/labs',
@@ -320,6 +326,7 @@ export interface FileRoutesByFullPath {
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
+  '/settings/mail': typeof ChatSettingsMailRoute
   '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
@@ -366,6 +373,7 @@ export interface FileRoutesByTo {
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
+  '/settings/mail': typeof ChatSettingsMailRoute
   '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
@@ -414,6 +422,7 @@ export interface FileRoutesById {
   '/_chat/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/_chat/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/_chat/settings/labs': typeof ChatSettingsLabsRoute
+  '/_chat/settings/mail': typeof ChatSettingsMailRoute
   '/_chat/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/_chat/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/_chat/settings/projects': typeof ChatSettingsProjectsRoute
@@ -462,6 +471,7 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
+    | '/settings/mail'
     | '/settings/maintenance'
     | '/settings/open-source-licenses'
     | '/settings/projects'
@@ -508,6 +518,7 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
+    | '/settings/mail'
     | '/settings/maintenance'
     | '/settings/open-source-licenses'
     | '/settings/projects'
@@ -555,6 +566,7 @@ export interface FileRouteTypes {
     | '/_chat/settings/integrations'
     | '/_chat/settings/keybindings'
     | '/_chat/settings/labs'
+    | '/_chat/settings/mail'
     | '/_chat/settings/maintenance'
     | '/_chat/settings/open-source-licenses'
     | '/_chat/settings/projects'
@@ -774,6 +786,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsMaintenanceRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/settings/mail': {
+      id: '/_chat/settings/mail'
+      path: '/mail'
+      fullPath: '/settings/mail'
+      preLoaderRoute: typeof ChatSettingsMailRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
     '/_chat/settings/labs': {
       id: '/_chat/settings/labs'
       path: '/labs'
@@ -919,6 +938,7 @@ interface ChatSettingsRouteChildren {
   ChatSettingsIntegrationsRoute: typeof ChatSettingsIntegrationsRoute
   ChatSettingsKeybindingsRoute: typeof ChatSettingsKeybindingsRoute
   ChatSettingsLabsRoute: typeof ChatSettingsLabsRoute
+  ChatSettingsMailRoute: typeof ChatSettingsMailRoute
   ChatSettingsMaintenanceRoute: typeof ChatSettingsMaintenanceRoute
   ChatSettingsOpenSourceLicensesRoute: typeof ChatSettingsOpenSourceLicensesRoute
   ChatSettingsProjectsRoute: typeof ChatSettingsProjectsRoute
@@ -949,6 +969,7 @@ const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsIntegrationsRoute: ChatSettingsIntegrationsRoute,
   ChatSettingsKeybindingsRoute: ChatSettingsKeybindingsRoute,
   ChatSettingsLabsRoute: ChatSettingsLabsRoute,
+  ChatSettingsMailRoute: ChatSettingsMailRoute,
   ChatSettingsMaintenanceRoute: ChatSettingsMaintenanceRoute,
   ChatSettingsOpenSourceLicensesRoute: ChatSettingsOpenSourceLicensesRoute,
   ChatSettingsProjectsRoute: ChatSettingsProjectsRoute,

@@ -359,6 +359,10 @@
       "types": "./src/state/usageProgress.ts",
       "default": "./src/state/usageProgress.ts"
     },
+    "./state/mail": {
+      "types": "./src/state/mail.ts",
+      "default": "./src/state/mail.ts"
+    },
     "./state/server": {
       "types": "./src/state/server.ts",
       "default": "./src/state/server.ts"
