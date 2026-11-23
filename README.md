@@ -23,4 +23,4 @@ Open the pairing URL printed in the terminal. This starts the fork with its own 
 - **Settle** clears a thread from the active list. Archiving it in your provider’s inbox is a separate setting. In an email’s details, **Auto-settle** shows which rules apply to future mail and lets you edit or remove them.
 - An agent can leave a draft. You review it and choose **Send** in Mail.
 
-[Mail setup and features](./docs/user/mail.md) · [T3 Code documentation](./docs/README.md) · [Development](./docs/operations/development.md) · [MIT license](./LICENSE)
+[Mail setup and features](./docs/user/mail.md) · [T3 Code documentation](./docs/README.md) · [Development](./docs/operations/00_development.md) · [MIT license](./LICENSE)
