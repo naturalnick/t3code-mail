@@ -30,6 +30,7 @@ export async function verifyGreenMail(input: {
   readonly smtps: number;
   readonly seededMessages: number;
   readonly deliver: (subject: string) => Promise<void>;
+  readonly folderFlags: (removeAccounting?: boolean) => Promise<string[]>;
   readonly verifyCopies: (subject: string) => Promise<void>;
 }) {
   const check = Effect.gen(function* () {
@@ -135,6 +136,44 @@ export async function verifyGreenMail(input: {
     yield* Effect.promise(() => input.verifyCopies(draft.subject));
     yield* Effect.log(
       "Wake rebuilt a stale UIDVALIDITY cursor, preserved the pin, and confirmed the approved reply in INBOX and Sent.",
+    );
+    yield* waitFor((value) => value.folders?.includes("Receipts") === true);
+    const folder = yield* mail.listLabeled({
+      scope: { accountId: account.id, name: "Receipts", kind: "folder" },
+    });
+    const receipt = folder.threads[0];
+    NodeAssert.equal(receipt?.subject, "Receipt for notebooks");
+    NodeAssert.equal(receipt.state, "settled");
+    NodeAssert.deepEqual((yield* mail.getThread(receipt.id)).labels, ["accounting"]);
+    const changeLabel = (apply: boolean) =>
+      mail.act(
+        {
+          threadIds: [receipt.id],
+          action: { type: "label", name: "accounting", apply },
+        },
+        { actor: "user" },
+      );
+    yield* changeLabel(false);
+    NodeAssert.ok(!(yield* Effect.promise(() => input.folderFlags())).includes("accounting"));
+    yield* changeLabel(true);
+    NodeAssert.ok((yield* Effect.promise(() => input.folderFlags())).includes("accounting"));
+    NodeAssert.equal(
+      (yield* mail.listLabeled({
+        scope: { accountId: account.id, name: "accounting", kind: "label" },
+      })).threads[0]?.id,
+      receipt.id,
+    );
+    yield* Effect.promise(() => input.folderFlags(true));
+    yield* mail.syncNow(account.id);
+    yield* mail.subscribe.pipe(
+      Stream.filterEffect(() =>
+        mail.getThread(receipt.id).pipe(Effect.map((detail) => detail.labels?.length === 0)),
+      ),
+      Stream.runHead,
+      Effect.timeout("30 seconds"),
+    );
+    yield* Effect.log(
+      "Browsed Receipts outside Inbox and verified tag updates in both directions through a second IMAP connection.",
     );
     yield* mail.updateSettings({ syncEnabled: false });
     yield* reportSuspend(true);

@@ -47,3 +47,40 @@ it("reads the HTML alternative and its referenced inline image, leaving attachme
   expect(structure).toHaveBeenCalledTimes(2);
   expect(download.mock.calls.map((call) => call[1])).toEqual(["2.2", "3"]);
 });
+
+it("uses Gmail label operations for a custom mailbox name and preserves provider flags on readback", async () => {
+  const session = new ImapSession(
+    { host: "localhost", port: 1, secure: false, user: "fixture", password: "fixture" },
+    { onExists: () => {}, onFlags: () => {}, onExpunge: () => {}, onClose: () => {} },
+  );
+  const label = "Trips/東京 2026";
+  session.client.capabilities.set("X-GM-EXT-1", true);
+  session.customPaths = [label];
+  session.client.mailbox = {
+    path: "All Mail",
+    delimiter: "/",
+    flags: new Set(),
+    permanentFlags: new Set(["\\Seen"]),
+    uidValidity: 1n,
+    uidNext: 3,
+    exists: 2,
+  };
+  using add = vi.spyOn(session.client, "messageFlagsAdd").mockResolvedValue(true);
+  using remove = vi.spyOn(session.client, "messageFlagsRemove").mockResolvedValue(false);
+  using _fetch = vi.spyOn(session.client, "fetch").mockImplementation(async function* () {
+    yield {
+      uid: 2,
+      seq: 2,
+      flags: new Set(["\\Seen"]),
+      labels: new Set(["\\Inbox", "Family", label]),
+    };
+  });
+  expect(await session.setLabel([2], label, true)).toEqual([
+    { uid: 2, seen: true, labels: ["\\Inbox", "Family", label] },
+  ]);
+  expect(add).toHaveBeenCalledWith("2", [label], { uid: true, useLabels: true });
+  await expect(session.setLabel([2], label, false)).rejects.toThrow("declined");
+  expect(remove).toHaveBeenCalledWith("2", [label], { uid: true, useLabels: true });
+  await expect(session.setLabel([2], "\\Inbox", false)).rejects.toThrow("no longer available");
+  expect(remove).toHaveBeenCalledTimes(1);
+});

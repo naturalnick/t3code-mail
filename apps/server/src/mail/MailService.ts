@@ -40,6 +40,7 @@ import type {
   MailEmailMd,
   MailListActionsInput,
   MailListSentInput,
+  MailListLabeledInput,
   MailListSettledInput,
   MailListTrashInput,
   MailOpenSessionInput,
@@ -287,6 +288,7 @@ export class MailService extends Context.Service<
     ) => Effect.Effect<MailFormattedBody | null, MailError>;
     readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
+    readonly listLabeled: (input: MailListLabeledInput) => Effect.Effect<MailThreadPage, MailError>;
     readonly listSent: (input: MailListSentInput) => Effect.Effect<MailThreadPage, MailError>;
     readonly listTrash: (input: MailListTrashInput) => Effect.Effect<MailActionPage, MailError>;
     /** Sidebar order: oldest entry first, except Settled, newest first. */
@@ -512,7 +514,7 @@ const make = Effect.gen(function* () {
 
   const actOne = Effect.fn("MailService.actOne")(function* (
     thread: MailStore.ThreadRecord,
-    action: MailThreadAction,
+    action: Exclude<MailThreadAction, { type: "label" }>,
     actor: MailActorInfo,
     now: string,
   ) {
@@ -722,8 +724,14 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const act: MailService["Service"]["act"] = Effect.fn("MailService.act")(
-    function* (input, actor) {
+  const changeState = Effect.fn("MailService.act")(
+    function* (
+      input: {
+        threadIds: MailActInput["threadIds"];
+        action: Exclude<MailThreadAction, { type: "label" }>;
+      },
+      actor: MailActorInfo,
+    ) {
       const now = yield* nowIso;
       const threads = yield* store.getThreads(input.threadIds);
       if (threads.length === 0) return yield* notFound("email");
@@ -761,6 +769,14 @@ const make = Effect.gen(function* () {
       ),
     sqlSafe,
   );
+
+  const act: MailService["Service"]["act"] = (input, actor) => {
+    const { action, threadIds } = input;
+    if (action.type !== "label") return changeState({ action, threadIds }, actor);
+    return Effect.forEach(threadIds, (id) => sync.setLabel(id, action.name, action.apply), {
+      discard: true,
+    }).pipe(Effect.as({ actionIds: [] }), sqlSafe);
+  };
 
   const staleUndo = () => invalid("This item changed after that action.");
 
@@ -958,6 +974,7 @@ const make = Effect.gen(function* () {
       const open = drafts.some((draft) => draft.status === "draft" || draft.status === "failed");
       return {
         thread: MailStore.threadRow(thread, open),
+        labels: yield* store.threadLabels(threadId),
         messages: messages.map((message) => MailStore.messageView(message, cleanForDisplay)),
         drafts: drafts.filter((draft) => draft.status !== "sent").map(MailStore.draftView),
         related: related.map((entry) => ({
@@ -983,12 +1000,15 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
-  const rowsWithDrafts = Effect.fn("MailService.rowsWithDrafts")(function* (
-    threads: ReadonlyArray<MailStore.ThreadRecord>,
-  ) {
-    const drafts = yield* store.threadsWithDrafts(threads.map((thread) => thread.id));
-    return threads.map((thread) => MailStore.threadRow(thread, drafts.has(thread.id)));
-  });
+  const listLabeled: MailService["Service"]["listLabeled"] = Effect.fn("MailService.listLabeled")(
+    function* (input) {
+      if (input.scope.kind === "folder")
+        yield* sync.openFolder(input.scope.accountId, input.scope.name);
+      const page = yield* store.labeledPage(input);
+      return { threads: yield* store.rowsWithDrafts(page.threads), hasMore: page.hasMore };
+    },
+    sqlSafe,
+  );
 
   const listSettled: MailService["Service"]["listSettled"] = Effect.fn("MailService.listSettled")(
     function* (input) {
@@ -998,7 +1018,7 @@ const make = Effect.gen(function* () {
         limit: input.limit ?? 50,
       });
       return {
-        threads: yield* rowsWithDrafts(page.threads),
+        threads: yield* store.rowsWithDrafts(page.threads),
         hasMore: page.hasMore,
       };
     },
@@ -1009,7 +1029,7 @@ const make = Effect.gen(function* () {
     input,
   ) {
     const page = yield* store.sentPage({ before: input.before, limit: input.limit ?? 50 });
-    return { threads: yield* rowsWithDrafts(page.threads), hasMore: page.hasMore };
+    return { threads: yield* store.rowsWithDrafts(page.threads), hasMore: page.hasMore };
   }, sqlSafe);
 
   const listTrash: MailService["Service"]["listTrash"] = Effect.fn("MailService.listTrash")(
@@ -1030,7 +1050,7 @@ const make = Effect.gen(function* () {
   );
 
   const listThreads: MailService["Service"]["listThreads"] = Effect.fn("MailService.listThreads")(
-    (state, limit) => store.threadsByState(state, limit).pipe(Effect.flatMap(rowsWithDrafts)),
+    (state, limit) => store.threadsByState(state, limit).pipe(Effect.flatMap(store.rowsWithDrafts)),
     sqlSafe,
   );
 
@@ -2515,7 +2535,7 @@ const make = Effect.gen(function* () {
         ) {
           yield* sync.start(account.id);
         } else {
-          yield* sync.wake(account.id);
+          yield* sync.wake(account.id, true);
         }
       }
     },
@@ -2768,6 +2788,7 @@ const make = Effect.gen(function* () {
     getThread,
     listSettled,
     listSent,
+    listLabeled,
     listTrash,
     listThreads,
     search,

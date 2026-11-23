@@ -270,6 +270,7 @@ const RPC_AGGREGATES = {
   [MAIL_WS_METHODS.mailGetMessageBody]: "mail",
   [MAIL_WS_METHODS.mailGetThread]: "mail",
   [MAIL_WS_METHODS.mailListSettled]: "mail",
+  [MAIL_WS_METHODS.mailListLabeled]: "mail",
   [MAIL_WS_METHODS.mailListSent]: "mail",
   [MAIL_WS_METHODS.mailListTrash]: "mail",
   [MAIL_WS_METHODS.mailSearch]: "mail",

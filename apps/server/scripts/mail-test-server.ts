@@ -231,6 +231,18 @@ if (command === "verify") {
     }
     await waitForImap();
     await seed(1);
+    const folder = imap();
+    await folder.connect();
+    try {
+      await folder.mailboxCreate("Receipts");
+      await folder.append(
+        "Receipts",
+        "From: Shop <shop@t3mail.test>\r\nSubject: Receipt for notebooks\r\nMessage-ID: <filed@t3mail.test>\r\n\r\nTwo notebooks.",
+        ["accounting"],
+      );
+    } finally {
+      await folder.logout();
+    }
     const { verifyGreenMail } = await import("./mail-test-verify.ts");
     await verifyGreenMail({
       email: EMAIL,
@@ -238,6 +250,18 @@ if (command === "verify") {
       imaps: PORTS.imaps,
       smtps: PORTS.smtps,
       seededMessages: fakeMail(1).length + 1,
+      folderFlags: async (removeAccounting = false) => {
+        const client = imap();
+        await client.connect();
+        try {
+          await client.mailboxOpen("Receipts", { readOnly: !removeAccounting });
+          if (removeAccounting) await client.messageFlagsRemove("1", ["accounting"]);
+          const one = await client.fetchOne("1", { flags: true });
+          return [...((one && one.flags) || [])].map((flag) => flag.toLowerCase());
+        } finally {
+          await client.logout();
+        }
+      },
       verifyCopies: async (subject) => {
         const client = imap();
         await client.connect();

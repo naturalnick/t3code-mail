@@ -2007,6 +2007,7 @@ export const layerWsRpc = (
         [WS_METHODS.mailGetMessageBody]: (input) => mail.getMessageBody(input),
         [WS_METHODS.mailGetThread]: (input) => mail.getThread(input.threadId),
         [WS_METHODS.mailListSettled]: (input) => mail.listSettled(input),
+        [WS_METHODS.mailListLabeled]: (input) => mail.listLabeled(input),
         [WS_METHODS.mailListSent]: (input) => mail.listSent(input),
         [WS_METHODS.mailListTrash]: (input) => mail.listTrash(input),
         [WS_METHODS.mailSearch]: (input) => mail.search(input),

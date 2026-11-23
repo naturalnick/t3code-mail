@@ -236,6 +236,7 @@ export const MailActionEntry = Schema.Struct({
 export type MailActionEntry = typeof MailActionEntry.Type;
 
 export const MailThreadDetail = Schema.Struct({
+  labels: Schema.optionalKey(Schema.Array(Schema.String)),
   thread: MailThreadRow,
   messages: Schema.Array(MailMessage),
   drafts: Schema.Array(MailDraft),
@@ -277,6 +278,8 @@ export const MailAccountStatus = Schema.Literals([
 export type MailAccountStatus = typeof MailAccountStatus.Type;
 
 export const MailAccount = Schema.Struct({
+  labels: Schema.optionalKey(Schema.Array(Schema.String)),
+  folders: Schema.optionalKey(Schema.Array(Schema.String)),
   id: MailAccountId,
   email: Schema.String,
   displayName: Schema.String,
@@ -447,6 +450,23 @@ export const MailThreadPage = Schema.Struct({
   hasMore: Schema.Boolean,
 });
 
+export const MailLabelScope = Schema.Struct({
+  accountId: MailAccountId,
+  name: TrimmedNonEmptyString,
+  kind: Schema.Literals(["label", "folder"]),
+});
+export type MailLabelScope = typeof MailLabelScope.Type;
+export const MailListLabeledInput = Schema.Struct({
+  scope: MailLabelScope,
+  mailbox: Schema.optionalKey(
+    Schema.Literals(["inbox", "working", "drafts", "snoozed", "settled", "sent"]),
+  ),
+  query: Schema.optionalKey(TrimmedNonEmptyString),
+  before: Schema.optionalKey(Schema.Struct({ at: IsoDateTime, id: MailThreadId })),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+export type MailListLabeledInput = typeof MailListLabeledInput.Type;
+
 export const MailSearchInput = Schema.Struct({
   query: TrimmedNonEmptyString,
   /** Also ask Gmail (X-GM-RAW) for matches not synced yet. */
@@ -459,6 +479,11 @@ export const MailSearchResult = Schema.Struct({
 });
 
 export const MailThreadAction = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("label"),
+    name: TrimmedNonEmptyString,
+    apply: Schema.Boolean,
+  }),
   Schema.Struct({ type: Schema.Literal("settle"), reason: Schema.optionalKey(MailSettleReason) }),
   Schema.Struct({ type: Schema.Literal("unsettle") }),
   Schema.Struct({ type: Schema.Literal("pin") }),

@@ -2,6 +2,8 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
   MailActionEntry,
+  MailLabelScope,
+  MailListLabeledInput,
   MailThreadId,
   MailThreadRow,
 } from "@t3tools/contracts";
@@ -46,6 +48,7 @@ import {
 import { SidebarContent, SidebarGroup, SidebarInput } from "../ui/sidebar";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
+import { MailLabelFilter } from "./MailLabels";
 import { MailSidebarRow } from "./MailSidebarRow";
 import { useMailActions } from "./useMailActions";
 import { useMailIntentPrefetch } from "./useMailIntentPrefetch";
@@ -55,7 +58,7 @@ const mailboxes = ["inbox", "working", "snoozed", "drafts", "settled", "sent", "
 type Mailbox = (typeof mailboxes)[number];
 type SettledFilter = "all" | "rule" | "user";
 const SETTLED_PAGE = 30;
-const SENT_PAGE = 30;
+const THREAD_PAGE = 30;
 const TRASH_PAGE = 30;
 
 export default function MailSidebar() {
@@ -96,8 +99,10 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   const [serverSearch, setServerSearch] = useState(false);
   const debouncedQuery = useDebouncedValue(query.trim(), 200);
   const [mailbox, setMailbox] = useState<Mailbox>("inbox");
+  const [filteredMailbox, setFilteredMailbox] = useState<Exclude<Mailbox, "trash"> | "all">("all");
+  const [labelScope, setLabelScope] = useState<MailLabelScope | null>(null);
   const searching = query.trim() !== "" && debouncedQuery !== "";
-  const view = searching ? "search" : mailbox;
+  const view = labelScope ? "label" : searching ? "search" : mailbox;
   const content = useRef<HTMLDivElement>(null);
   const inboxScroll = useRef(0);
   const status = useMailStatus(environmentId);
@@ -121,7 +126,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   useLayoutEffect(() => {
     const viewport = content.current?.closest<HTMLElement>("[data-slot=scroll-area-viewport]");
     if (!viewport) return;
-    if (view !== "inbox") {
+    if (labelScope || view !== "inbox") {
       viewport.scrollTop = 0;
       return;
     }
@@ -143,7 +148,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       stopObserving?.();
       viewport.removeEventListener("scroll", remember);
     };
-  }, [view]);
+  }, [view, labelScope]);
 
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const newEmailShortcut = shortcutLabelForCommand(keybindings, "chat.new");
@@ -160,7 +165,9 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       readerOpen={thread.id === routeMailThreadId}
       actions={actions}
       timestamp={
-        view === "sent" && thread.lastOutgoingAt ? thread.lastOutgoingAt : thread.lastMessageAt
+        (view === "sent" || (labelScope && filteredMailbox === "sent")) && thread.lastOutgoingAt
+          ? thread.lastOutgoingAt
+          : thread.lastMessageAt
       }
       onIntent={prefetch}
       onContextMenu={openRowMenu}
@@ -185,7 +192,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                   setServerSearch(false);
                 }}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") setServerSearch(true);
+                  if (!labelScope && event.key === "Enter") setServerSearch(true);
                   if (event.key === "Escape") setQuery("");
                 }}
                 placeholder={gt("Search mail")}
@@ -205,6 +212,16 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                 </Button>
               ) : null}
             </div>
+            <MailLabelFilter
+              accounts={status?.accounts ?? []}
+              scope={labelScope}
+              onPick={(scope) => {
+                setLabelScope(scope);
+                if (scope?.kind === "folder") setFilteredMailbox("all");
+                else if (scope && !labelScope)
+                  setFilteredMailbox(mailbox === "trash" ? "all" : mailbox);
+              }}
+            />
             <SidebarHeaderIconButton
               label={gt("New email")}
               tooltip={
@@ -226,18 +243,37 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
           <div className="mt-1 flex items-center">
             <Menu>
               <MenuTrigger render={<Button variant="ghost" size="sm" />}>
-                {searching ? gt("Search results") : mailboxLabels[mailbox]}
+                {labelScope
+                  ? filteredMailbox === "all"
+                    ? gt("All mail")
+                    : mailboxLabels[filteredMailbox]
+                  : searching
+                    ? gt("Search results")
+                    : mailboxLabels[mailbox]}
                 <ChevronDownIcon className="size-3.5 text-muted-foreground" />
               </MenuTrigger>
               <MenuPopup align="start">
                 <MenuRadioGroup
-                  value={view}
-                  onValueChange={(next: Mailbox) => {
+                  value={labelScope ? filteredMailbox : view}
+                  onValueChange={(next: Mailbox | "all") => {
+                    if (labelScope && next !== "trash") {
+                      setFilteredMailbox(next);
+                      if (next !== "all") setMailbox(next);
+                      return;
+                    }
+                    if (next === "all") return;
                     setQuery("");
                     setServerSearch(false);
+                    setLabelScope(null);
                     setMailbox(next);
                   }}
                 >
+                  {labelScope && (
+                    <MenuRadioItem value="all" closeOnClick>
+                      <MenuRadioItemIndicator />
+                      {gt("All mail")}
+                    </MenuRadioItem>
+                  )}
                   {mailboxes.map((item) => (
                     <MenuRadioItem key={item} value={item} closeOnClick>
                       <span className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-x-2">
@@ -245,7 +281,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                           <MenuRadioItemIndicator />
                         </span>
                         <span>{mailboxLabels[item]}</span>
-                        {counts[item] ? (
+                        {!labelScope && counts[item] ? (
                           <span className="text-end text-xs tabular-nums text-muted-foreground">
                             {counts[item]}
                           </span>
@@ -261,7 +297,21 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       }
     >
       <SidebarGroup className="flex-1" role="presentation">
-        {searching ? (
+        {labelScope ? (
+          <ul role="presentation" className="flex flex-col gap-px">
+            <PagedThreads
+              key={JSON.stringify([labelScope, filteredMailbox, debouncedQuery])}
+              active
+              environmentId={environmentId}
+              renderRow={row}
+              filter={{
+                scope: labelScope,
+                ...(filteredMailbox === "all" ? {} : { mailbox: filteredMailbox }),
+                ...(debouncedQuery ? { query: debouncedQuery } : {}),
+              }}
+            />
+          </ul>
+        ) : searching ? (
           <MailSearchResults
             environmentId={environmentId}
             query={debouncedQuery}
@@ -275,7 +325,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
         ) : null}
         {sections && (
           <ul
-            hidden={searching}
+            hidden={searching || labelScope !== null}
             role="presentation"
             className="flex min-h-full flex-1 flex-col gap-px [&[hidden]]:hidden"
           >
@@ -298,7 +348,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
               recent={sections.settled}
               renderRow={row}
             />
-            <SentList active={view === "sent"} environmentId={environmentId} renderRow={row} />
+            <PagedThreads active={view === "sent"} environmentId={environmentId} renderRow={row} />
             <TrashList active={view === "trash"} environmentId={environmentId} />
           </ul>
         )}
@@ -437,20 +487,24 @@ function PageButtons(props: {
   );
 }
 
-function SentList(props: {
+function PagedThreads(props: {
   active: boolean;
+  filter?: MailListLabeledInput;
   environmentId: EnvironmentId;
   renderRow: (thread: MailThreadRow) => ReactNode;
 }) {
   const [cursors, setCursors] = useState<Array<{ at: string; id: MailThreadId }>>([]);
   const before = cursors.at(-1);
+  const pageInput = { limit: THREAD_PAGE, ...(before ? { before } : {}) };
   const page = useEnvironmentQuery(
-    props.active
-      ? mailEnvironment.sent({
-          environmentId: props.environmentId,
-          input: { limit: SENT_PAGE, ...(before ? { before } : {}) },
-        })
-      : null,
+    !props.active
+      ? null
+      : props.filter
+        ? mailEnvironment.labeled({
+            environmentId: props.environmentId,
+            input: { ...props.filter, ...pageInput },
+          })
+        : mailEnvironment.sent({ environmentId: props.environmentId, input: pageInput }),
   );
   if (!props.active) return null;
   const threads = page.data?.threads ?? [];
@@ -458,9 +512,7 @@ function SentList(props: {
     <>
       {threads.map(props.renderRow)}
       {page.data && threads.length === 0 ? (
-        <EmptyMailbox>
-          <T>No sent mail.</T>
-        </EmptyMailbox>
+        <EmptyMailbox>{props.filter ? <T>No mail matches.</T> : <T>No sent mail.</T>}</EmptyMailbox>
       ) : null}
       {!page.data && !page.error && (
         <li className="flex justify-center py-4">
@@ -478,8 +530,11 @@ function SentList(props: {
         onPrevious={() => setCursors(cursors.slice(0, -1))}
         onNext={() => {
           const last = threads.at(-1);
-          if (last?.lastOutgoingAt)
-            setCursors([...cursors, { at: last.lastOutgoingAt, id: last.id }]);
+          const at =
+            props.filter && props.filter.mailbox !== "sent"
+              ? last?.lastMessageAt
+              : last?.lastOutgoingAt;
+          if (last && at) setCursors([...cursors, { at, id: last.id }]);
         }}
       />
     </>

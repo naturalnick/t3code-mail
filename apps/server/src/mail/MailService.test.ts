@@ -239,6 +239,62 @@ const rowOf = (threadId: MailThreadId) =>
     Effect.map((detail) => detail.thread),
   );
 
+it.effect(
+  "filters conversations by account and label before paging and follows provider removals",
+  () =>
+    withMail(
+      Effect.gen(function* () {
+        const engine = yield* MailEngine.MailEngine;
+        const mail = yield* MailService.MailService;
+        const ctx = {
+          accountId,
+          accountEmail: me,
+          gmail: true,
+          mailbox: "All Mail",
+          role: "primary" as const,
+          initial: true,
+          backfill: false,
+        };
+        const older = {
+          ...message({ subject: "receipt one", at }),
+          labels: ["\\Inbox", "Finance/旅行"],
+          gmailThreadId: "1",
+        };
+        const newer = {
+          ...message({ subject: "receipt two", at: "2026-11-03T09:00:00.000Z" }),
+          labels: ["Finance/旅行"],
+          gmailThreadId: "2",
+        };
+        const scope = { accountId, name: "Finance/旅行", kind: "label" as const };
+        yield* engine.ingest(ctx, [older, newer]);
+        const first = yield* mail.listLabeled({ scope, limit: 1 });
+        expect(first.hasMore).toBe(true);
+        const top = first.threads[0]!;
+        expect([top.subject, (yield* mail.getThread(top.id)).labels]).toEqual([
+          "receipt two",
+          ["Finance/旅行"],
+        ]);
+        const next = yield* mail.listLabeled({
+          scope,
+          limit: 1,
+          before: { at: top.lastMessageAt, id: top.id },
+        });
+        expect(next.threads[0]?.subject).toBe("receipt one");
+        expect(
+          (yield* mail.listLabeled({ scope, mailbox: "inbox", query: "receipt" })).threads,
+        ).toEqual(next.threads);
+        expect(
+          (yield* mail.listLabeled({
+            scope: { ...scope, accountId: MailAccountId.make("elsewhere") },
+          })).threads,
+        ).toEqual([]);
+        yield* engine.applyFlags(ctx, [{ uid: newer.uid, seen: false, labels: [] }]);
+        expect((yield* mail.listLabeled({ scope })).threads).toEqual(next.threads);
+        expect((yield* mail.getThread(top.id)).labels).toEqual([]);
+      }),
+    ),
+);
+
 it.effect("lists newest messages first and pages settled mail by message date", () =>
   withMail(
     Effect.gen(function* () {
@@ -336,6 +392,12 @@ describe("MailService rules and feedback", () => {
         yield* store.sql`ALTER TABLE mail_trust ADD COLUMN trust TEXT NOT NULL DEFAULT 'suggest'`;
         yield* store.sql`INSERT INTO mail_trust(key, kind, approvals, rejections, updated_at, trust)
           VALUES ('sender:alerts@acme.dev', 'sender', 0, 0, ${at}, 'never')`;
+        yield* store.sql`DROP TRIGGER mail_labels_insert`;
+        yield* store.sql`DROP TRIGGER mail_labels_update`;
+        yield* store.sql`DROP TRIGGER mail_labels_delete`;
+        yield* store.sql`DROP TABLE mail_message_labels`;
+        yield* store.sql`ALTER TABLE mail_accounts DROP COLUMN labels`;
+        yield* store.sql`ALTER TABLE mail_accounts DROP COLUMN folders`;
         yield* store.sql`PRAGMA user_version = 15`;
         yield* store.migrate;
         expect(yield* engine.settings).toEqual({

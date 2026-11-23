@@ -9,6 +9,7 @@ import {
   type MailDraft,
   type MailGuardrail,
   type MailMessage,
+  type MailListLabeledInput,
   type MailProviderKind,
   type MailSettleReason,
   type MailSettings,
@@ -73,6 +74,10 @@ export const DEFAULT_SETTINGS: MailSettings = {
   rules: [],
   aiExcludedSenders: [],
 };
+
+const indexMessageLabels = `INSERT OR IGNORE INTO mail_message_labels(message_id, thread_id, label)
+  SELECT NEW.id, NEW.thread_id, value FROM json_each(NEW.labels)
+  WHERE NEW.removed = 0 AND value != '' AND substr(value, 1, 1) != char(92)`;
 
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
 const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -388,6 +393,24 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `DELETE FROM mail_actions WHERE kind = 'trust'`,
     `ALTER TABLE mail_trust DROP COLUMN trust`,
   ],
+  [
+    `ALTER TABLE mail_accounts ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE mail_accounts ADD COLUMN folders TEXT NOT NULL DEFAULT '[]'`,
+    `CREATE TABLE mail_message_labels(message_id INTEGER NOT NULL, thread_id TEXT NOT NULL, label TEXT NOT NULL,
+       PRIMARY KEY(message_id, label)) WITHOUT ROWID`,
+    `CREATE INDEX mail_label_threads ON mail_message_labels(label,thread_id)`,
+    `CREATE INDEX mail_thread_labels ON mail_message_labels(thread_id,label)`,
+    `INSERT OR IGNORE INTO mail_message_labels SELECT m.id,m.thread_id,j.value
+      FROM mail_messages m, json_each(m.labels) j WHERE m.removed = 0 AND j.value != '' AND substr(j.value,1,1) != char(92)`,
+    `CREATE TRIGGER mail_labels_insert AFTER INSERT ON mail_messages BEGIN ${indexMessageLabels}; END`,
+    `CREATE TRIGGER mail_labels_update AFTER UPDATE OF labels, thread_id, removed ON mail_messages
+      WHEN OLD.labels IS NOT NEW.labels OR OLD.thread_id != NEW.thread_id OR OLD.removed != NEW.removed
+      BEGIN DELETE FROM mail_message_labels WHERE message_id = OLD.id; ${indexMessageLabels}; END`,
+    `CREATE TRIGGER mail_labels_delete AFTER DELETE ON mail_messages BEGIN
+       DELETE FROM mail_message_labels WHERE message_id = OLD.id; END`,
+    `UPDATE mail_mailboxes SET highest_modseq = NULL WHERE account_id IN
+       (SELECT id FROM mail_accounts WHERE provider != 'gmail')`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -429,6 +452,8 @@ export interface StoredMessage extends MessageInsert {
 }
 
 export interface AccountRow {
+  readonly labels?: ReadonlyArray<string>;
+  readonly folders?: ReadonlyArray<string>;
   readonly id: MailAccountId;
   readonly email: string;
   readonly displayName: string;
@@ -617,6 +642,8 @@ const json = <A>(value: unknown, fallback: A): A => {
 };
 
 const toAccount = (row: Row): AccountRow => ({
+  labels: json<string[]>(row.labels, []),
+  folders: json<string[]>(row.folders, []),
   id: MailAccountId.make(str(row.id)),
   email: str(row.email),
   displayName: str(row.display_name),
@@ -901,6 +928,16 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           ${account.keychainPossible ? 1 : 0}, ${account.credentialPending ? 1 : 0})`.pipe(
       Effect.asVoid,
     );
+  const setLabelCatalog = (
+    id: MailAccountId,
+    labels: ReadonlyArray<string>,
+    folders: ReadonlyArray<string>,
+  ) => {
+    const names = toJson(labels);
+    const paths = toJson(folders);
+    return sql`UPDATE mail_accounts SET labels = ${names}, folders = ${paths}
+      WHERE id = ${id} AND (labels != ${names} OR folders != ${paths})`.pipe(Effect.asVoid);
+  };
   const updateAccount = (
     id: MailAccountId,
     patch: Partial<
@@ -998,9 +1035,13 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       ),
     );
   const listMailboxes = (accountId: MailAccountId) =>
-    sql<Row>`SELECT path, backfill_done FROM mail_mailboxes WHERE account_id = ${accountId}`.pipe(
+    sql<Row>`SELECT path, role, backfill_done FROM mail_mailboxes WHERE account_id = ${accountId}`.pipe(
       Effect.map((rows) =>
-        rows.map((row) => ({ path: str(row.path), backfillDone: bool(row.backfill_done) })),
+        rows.map((row) => ({
+          path: str(row.path),
+          role: str(row.role),
+          backfillDone: bool(row.backfill_done),
+        })),
       ),
     );
   const putMailbox = (state: MailboxState) =>
@@ -1265,6 +1306,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       .filter(
         (row) =>
           row.role !== "sent" &&
+          row.role !== "folder" &&
           (projected.get(row.identity) ?? Boolean(row.inInbox)) === (kind === "archive"),
       )
       .map(({ id, identity }) => ({ id, identity }));
@@ -1486,6 +1528,40 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         ORDER BY last_message_at DESC, id DESC LIMIT ${settledLimit})`.pipe(
       Effect.map((rows) => rows.map(toThread)),
     );
+
+  const labeledPage = (input: MailListLabeledInput) => {
+    const date = input.mailbox === "sent" ? sql`last_outgoing_at` : sql`last_message_at`;
+    const filters = {
+      inbox: sql`AND (state = 'active' OR (pinned_at IS NOT NULL AND state != 'settled'))`,
+      working: sql`AND state = 'working' AND pinned_at IS NULL`,
+      snoozed: sql`AND state = 'snoozed' AND pinned_at IS NULL`,
+      settled: sql`AND state = 'settled'`,
+      sent: sql`AND last_outgoing_at IS NOT NULL`,
+      drafts: sql`AND id IN (SELECT thread_id FROM mail_drafts WHERE status IN ('draft','failed'))`,
+    };
+    return sql<Row>`SELECT * FROM mail_threads WHERE account_id = ${input.scope.accountId}
+      ${input.mailbox ? filters[input.mailbox] : sql``}
+      ${
+        input.query
+          ? sql`AND EXISTS (SELECT 1 FROM mail_messages WHERE thread_id = mail_threads.id
+        AND removed = 0 AND (instr(lower(subject), lower(${input.query})) OR instr(lower(from_name), lower(${input.query}))
+          OR instr(lower(from_address), lower(${input.query})) OR instr(lower(body), lower(${input.query}))))`
+          : sql``
+      }
+      AND id IN (${
+        input.scope.kind === "label"
+          ? sql`SELECT thread_id FROM mail_message_labels WHERE label = ${input.scope.name}`
+          : sql`SELECT thread_id FROM mail_messages WHERE account_id = ${input.scope.accountId}
+            AND mailbox = ${input.scope.name} AND removed = 0`
+      })
+      ${input.before ? sql`AND (${date},id) < (${input.before.at},${input.before.id})` : sql``}
+      ORDER BY ${date} DESC,id DESC LIMIT ${(input.limit ?? 50) + 1}`.pipe(
+      Effect.map((rows) => ({
+        threads: rows.slice(0, input.limit ?? 50).map(toThread),
+        hasMore: rows.length > (input.limit ?? 50),
+      })),
+    );
+  };
 
   const settledPage = (input: {
     readonly before: { readonly at: string; readonly id: string } | undefined;
@@ -1774,6 +1850,18 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           WHERE status IN ('draft', 'failed') AND thread_id IN ${sql.in(ids)}`.pipe(
           Effect.map((rows) => new Set(rows.map((row) => row.thread_id))),
         );
+  const rowsWithDrafts = Effect.fn("MailStore.rowsWithDrafts")(function* (
+    threads: ReadonlyArray<ThreadRecord>,
+  ) {
+    const drafts = yield* threadsWithDrafts(threads.map((thread) => thread.id));
+    return threads.map((thread) => threadRow(thread, drafts.has(thread.id)));
+  });
+  const threadLabels = (threadId: MailThreadId) =>
+    sql<{
+      label: string;
+    }>`SELECT DISTINCT label FROM mail_message_labels WHERE thread_id = ${threadId} ORDER BY label`.pipe(
+      Effect.map((rows) => rows.map((row) => row.label)),
+    );
   const getDraft = (id: MailDraftId) =>
     sql<Row>`SELECT * FROM mail_drafts WHERE id = ${id}`.pipe(
       Effect.map((rows) => (rows[0] ? toDraft(rows[0]) : null)),
@@ -1915,6 +2003,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     getAccount,
     insertAccount,
     updateAccount,
+    setLabelCatalog,
     deleteAccount,
     accountMessageCount,
     getMailbox,
@@ -1960,6 +2049,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     pendingTriage,
     requeueWaitingTriage,
     openThreads,
+    labeledPage,
     settledPage,
     sentPage,
     trashPage,
@@ -1988,7 +2078,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     setReview,
     reviewCounts,
     draftsForThread,
-    threadsWithDrafts,
+    rowsWithDrafts,
+    threadLabels,
     getDraft,
     deleteExpungedThreads,
     finishMailboxReset,

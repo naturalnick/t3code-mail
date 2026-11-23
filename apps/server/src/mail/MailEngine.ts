@@ -43,7 +43,7 @@ export interface IngestContext {
   readonly accountEmail: string;
   readonly gmail: boolean;
   readonly mailbox: string;
-  readonly role: "primary" | "sent";
+  readonly role: "primary" | "sent" | "folder";
   /** The first page of a fresh mailbox: old mail is the backlog, not news. */
   readonly initial: boolean;
   readonly backfill: boolean;
@@ -219,6 +219,8 @@ const make = Effect.gen(function* () {
         return {
           id: account.id,
           email: account.email,
+          labels: account.labels ?? [],
+          folders: account.folders ?? [],
           displayName: account.displayName,
           provider: account.provider,
           imapHost: account.imapHost,
@@ -249,8 +251,7 @@ const make = Effect.gen(function* () {
 
   const rows = Effect.fn("MailEngine.rows")(function* (ids: ReadonlyArray<MailThreadId>) {
     const threads = yield* store.getThreads(ids);
-    const drafts = yield* store.threadsWithDrafts(threads.map((thread) => thread.id));
-    return threads.map((thread) => MailStore.threadRow(thread, drafts.has(thread.id)));
+    return yield* store.rowsWithDrafts(threads);
   });
 
   const publishThreads = (ids: ReadonlyArray<MailThreadId>) =>
@@ -288,11 +289,10 @@ const make = Effect.gen(function* () {
 
   const snapshot = Effect.gen(function* () {
     const threads = yield* store.openThreads(SETTLED_IN_SNAPSHOT);
-    const drafts = yield* store.threadsWithDrafts(threads.map((thread) => thread.id));
     return {
       type: "snapshot" as const,
       status: yield* status,
-      threads: threads.map((thread) => MailStore.threadRow(thread, drafts.has(thread.id))),
+      threads: yield* store.rowsWithDrafts(threads),
     };
   });
 

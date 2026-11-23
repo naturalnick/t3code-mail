@@ -145,6 +145,11 @@ export function createMailEnvironmentAtoms<R, E>(
       refreshTrigger: ({ environmentId }) =>
         Atom.make((get) => get(view(environmentId))?.status.settledCount ?? 0),
     }),
+    labeled: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:mail:labeled",
+      tag: WS_METHODS.mailListLabeled,
+      refreshTrigger: ({ environmentId }) => view(environmentId),
+    }),
     sent: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:mail:sent",
       tag: WS_METHODS.mailListSent,

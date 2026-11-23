@@ -43,6 +43,7 @@ import { actionLabel, actorLabel, nudgeLabel, senderName } from "./mailPresentat
 import { MailNewEmail } from "./MailNewEmail";
 import { MailPage } from "./MailPage";
 import { MailThreadToolbar } from "./MailThreadControls";
+import { MailThreadLabels } from "./MailLabels";
 import { useMailActions } from "./useMailActions";
 import { useSenderAi } from "./useSenderAi";
 
@@ -115,6 +116,7 @@ function MailThreadDetails({
   detail,
   account,
   autoSettle,
+  labels,
   timestampFormat,
   refresh,
 }: {
@@ -123,6 +125,7 @@ function MailThreadDetails({
   detail: MailThreadDetail | null;
   account: string | null;
   autoSettle: ReactNode;
+  labels: ReactNode;
   timestampFormat: TimestampFormat;
   refresh: () => void;
 }) {
@@ -223,6 +226,7 @@ function MailThreadDetails({
         </DetailsSection>
       ) : null}
       {autoSettle}
+      {labels}
       {detail && detail.related.length > 0 ? (
         <DetailsSection title={gt("Related mail")}>
           <ul>
@@ -493,7 +497,8 @@ export function MailThreadView({
       />
     );
   }
-  const from = accounts?.find((account) => account.id === thread.accountId)?.email ?? "";
+  const mailAccount = accounts?.find((account) => account.id === thread.accountId);
+  const from = mailAccount?.email ?? "";
   const account = from && (accounts?.length ?? 0) > 1 ? from : null;
   const chatThreadId = thread.chatThreadId ?? openedChatId;
   const showChat = chatOpen && chatThreadId !== null;
@@ -523,6 +528,19 @@ export function MailThreadView({
       environmentId={environmentId}
       thread={thread}
       detail={detail}
+      labels={
+        mailAccount &&
+        detail?.labels && (
+          <MailThreadLabels
+            key={thread.id}
+            environmentId={environmentId}
+            threadId={thread.id}
+            labels={detail.labels}
+            account={mailAccount}
+            refresh={query.refresh}
+          />
+        )
+      }
       autoSettle={
         <AutoSettleSection
           environmentId={environmentId}

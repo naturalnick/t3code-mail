@@ -207,7 +207,24 @@ function describeStructure(structure: MessageStructureObject | undefined) {
   return { attachments, textPart, calendar };
 }
 
-function parseFetched(message: FetchMessageObject): ParsedMessage {
+function isKeyword(flag: string) {
+  return (
+    /^[\x21-\x7e]+$/.test(flag) &&
+    !/[(){}%*"\\\]]/.test(flag) &&
+    !/^(?:junk|nonjunk|\$(?:junk|notjunk|forwarded|mdnsent|phishing|mailflagbit\d+|hasattachment|hasnoattachment))$/i.test(
+      flag,
+    )
+  );
+}
+
+function messageLabels(message: FetchMessageObject, gmail: boolean) {
+  if (gmail) return message.labels ? [...message.labels] : null;
+  return message.flags
+    ? [...message.flags].filter(isKeyword).map((name) => name.toLowerCase())
+    : null;
+}
+
+function parseFetched(message: FetchMessageObject, labels: ParsedMessage["labels"]): ParsedMessage {
   const envelope = message.envelope ?? {};
   const headers = parseHeaders(message.headers);
   const structure = describeStructure(message.bodyStructure);
@@ -218,7 +235,7 @@ function parseFetched(message: FetchMessageObject): ParsedMessage {
     uid: message.uid,
     messageId: envelope.messageId?.trim() || null,
     gmailThreadId: message.threadId ?? null,
-    labels: message.labels ? [...message.labels] : null,
+    labels,
     from: toAddress(envelope.from?.[0] ?? envelope.sender?.[0]),
     replyTo: (envelope.replyTo ?? []).map(toAddress),
     to: (envelope.to ?? []).map(toAddress),
@@ -288,6 +305,8 @@ export interface SessionEvents {
 export class ImapSession {
   readonly client: ImapFlow;
   roles: MailboxRoles | null = null;
+  customPaths: string[] = [];
+  readonly keywords = new Set<string>();
   /** Set once we have asked imapflow to enable QRESYNC and the server agreed. */
   qresync = false;
 
@@ -330,12 +349,36 @@ export class ImapSession {
     try {
       await this.client.connect();
       this.qresync = this.client.enabled.has("QRESYNC");
-      const mailboxes = await this.client.list();
-      this.roles = pickRoles(mailboxes, this.gmail);
-      return this.roles;
+      return await this.refreshPaths();
     } catch (error) {
       throw classifyImapError(error);
     }
+  }
+
+  private labelsOf(message: FetchMessageObject) {
+    const labels = messageLabels(message, this.gmail);
+    if (!this.gmail && labels) for (const label of labels) this.keywords.add(label);
+    return labels;
+  }
+
+  async refreshPaths() {
+    const mailboxes = await this.client.list();
+    const roles = pickRoles(mailboxes, this.gmail);
+    this.roles = roles;
+    const reserved = [roles.primary, roles.sent, roles.archive, roles.trash];
+    this.customPaths = mailboxes
+      .filter(
+        (box) =>
+          !box.specialUse &&
+          !box.path.startsWith("\\") &&
+          !box.flags.has("\\Noselect") &&
+          box.path.toUpperCase() !== "INBOX" &&
+          !reserved.includes(box.path) &&
+          (this.gmail || !/^(?:INBOX[./])?(?:Drafts|Junk|Spam|Outbox)$/i.test(box.path)),
+      )
+      .map((box) => box.path)
+      .sort();
+    return roles;
   }
 
   /** Selects a mailbox for a unit of work, handing QRESYNC our last known state. */
@@ -363,6 +406,10 @@ export class ImapSession {
           detail: "The mailbox closed while it was being read.",
         });
       }
+      if (!this.gmail)
+        for (const flag of [...mailbox.flags, ...(mailbox.permanentFlags ?? [])]) {
+          if (isKeyword(flag)) this.keywords.add(flag.toLowerCase());
+        }
       return await work({
         uidValidity: String(mailbox.uidValidity),
         uidNext: mailbox.uidNext,
@@ -389,7 +436,7 @@ export class ImapSession {
     if (uids.length === 0) return [];
     const messages: Array<ParsedMessage> = [];
     for await (const message of this.client.fetch(uids.join(","), FETCH_QUERY, { uid: true })) {
-      messages.push(parseFetched(message));
+      messages.push(parseFetched(message, this.labelsOf(message)));
     }
     return messages.sort((a, b) => a.uid - b.uid);
   }
@@ -400,7 +447,7 @@ export class ImapSession {
     const from = Math.max(1, exists - count + 1);
     const messages: Array<ParsedMessage> = [];
     for await (const message of this.client.fetch(`${from}:*`, FETCH_QUERY)) {
-      messages.push(parseFetched(message));
+      messages.push(parseFetched(message, this.labelsOf(message)));
     }
     return messages.sort((a, b) => a.uid - b.uid);
   }
@@ -418,24 +465,22 @@ export class ImapSession {
     readonly sinceModseq: string | null;
     readonly windowFromUid: number;
   }): Promise<ReadonlyArray<FlagChange>> {
-    const changes: Array<FlagChange> = [];
-    const range =
-      input.sinceModseq !== null && this.condstore
-        ? "1:*"
-        : `${Math.max(1, input.windowFromUid)}:*`;
-    const options =
-      input.sinceModseq !== null && this.condstore
-        ? { uid: true, changedSince: BigInt(input.sinceModseq) }
-        : { uid: true };
+    if (input.sinceModseq !== null && this.condstore)
+      return this.readFlags("1:*", BigInt(input.sinceModseq));
+    return this.readFlags(`${Math.max(1, input.windowFromUid)}:*`);
+  }
+
+  async readFlags(range: string, changedSince?: bigint): Promise<FlagChange[]> {
+    const changes: FlagChange[] = [];
     for await (const message of this.client.fetch(
       range,
       { uid: true, flags: true, labels: true },
-      options,
+      { uid: true, ...(changedSince === undefined ? {} : { changedSince }) },
     )) {
       changes.push({
         uid: message.uid,
         seen: message.flags?.has("\\Seen") ?? false,
-        labels: message.labels ? [...message.labels] : null,
+        labels: this.labelsOf(message),
       });
     }
     return changes;
@@ -567,6 +612,33 @@ export class ImapSession {
       await this.client.messageFlagsAdd(uids.join(","), ["\\Seen"], { uid: true, silent: true });
     else
       await this.client.messageFlagsRemove(uids.join(","), ["\\Seen"], { uid: true, silent: true });
+  }
+
+  async setLabel(uids: ReadonlyArray<number>, name: string, apply: boolean): Promise<FlagChange[]> {
+    const box = this.client.mailbox;
+    if (!box || box.readOnly || !uids.length)
+      throw new Error("The mailbox is unavailable for label changes.");
+    let flag = name;
+    if (this.gmail) {
+      if (!this.customPaths.includes(name))
+        throw new Error("This Gmail label is no longer available.");
+    } else {
+      if (!isKeyword(name)) throw new Error("Invalid IMAP tag.");
+      const permanent = box.permanentFlags;
+      const existing = [...(permanent ?? []), ...box.flags].find(
+        (item) => item.toLowerCase() === name.toLowerCase(),
+      );
+      flag = existing ?? name;
+      if (permanent && !permanent.has("\\*") && !permanent.has(flag))
+        throw new Error("This mailbox does not allow changes to that tag.");
+    }
+    const range = uids.join(",");
+    const options = { uid: true, useLabels: this.gmail };
+    const updated = apply
+      ? await this.client.messageFlagsAdd(range, [flag], options)
+      : await this.client.messageFlagsRemove(range, [flag], options);
+    if (!updated) throw new Error("The mail server declined the label change.");
+    return this.readFlags(range);
   }
 
   /** Gmail archive: drop the Inbox label. Undo puts it back. */
