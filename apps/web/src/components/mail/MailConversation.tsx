@@ -161,13 +161,15 @@ function ThreadMessage({
   const forwarded = isForward(message);
   const toNames = message.to.map(name).join(", ");
   const ccNames = message.cc.map(name).join(", ");
+  const bcc = message.outgoing ? (message.bcc ?? []) : [];
   const recipients = [
     toNames && gt("to {names}", { names: toNames }),
     ccNames && gt("cc {names}", { names: ccNames }),
+    bcc.length > 0 && `${gt("Bcc")} ${bcc.map(name).join(", ")}`,
   ]
     .filter(Boolean)
     .join(" · ");
-  const everyone = [...message.to, ...message.cc].map(full).join(", ");
+  const everyone = [...message.to, ...message.cc, ...bcc].map(full).join(", ");
 
   if (!expanded) {
     return (

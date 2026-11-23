@@ -1,5 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, MailDraft, MailMessage, MailThreadDetail } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  MailDraft,
+  MailDraftFile,
+  MailMessage,
+  MailThreadDetail,
+} from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { useGT } from "gt-react";
 import {
@@ -22,6 +28,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Textarea } from "../ui/textarea";
+import { MailAttachButton, MailDraftFileList, useMailDraftUpload } from "./MailDraftFiles";
 import { QuotedToggle } from "./MailFormattedMessage";
 import {
   type ComposeMode,
@@ -40,9 +47,13 @@ export interface ComposeTask {
 interface Fields {
   readonly to: string;
   readonly cc: string;
+  readonly bcc: string;
   readonly subject: string;
   readonly body: string;
+  readonly files: ReadonlyArray<MailDraftFile>;
 }
+
+const fileKey = (files: ReadonlyArray<MailDraftFile>) => files.map((file) => file.id).join(",");
 
 const MODE_ICONS = { reply: ReplyIcon, replyAll: ReplyAllIcon, forward: ForwardIcon } as const;
 
@@ -96,8 +107,10 @@ export function MailComposer({
     return {
       to: recipients.to.join(", "),
       cc: recipients.cc.join(", "),
+      bcc: "",
       subject: composeSubject(mode, baseSubject),
       body: "",
+      files: [],
     };
   };
   const initialDraft = task.draft;
@@ -110,8 +123,10 @@ export function MailComposer({
       ? {
           to: initialDraft.to.join(", "),
           cc: initialDraft.cc.join(", "),
+          bcc: initialDraft.bcc.join(", "),
           subject: initialDraft.subject,
           body: initialDraft.body,
+          files: initialDraft.files,
         }
       : defaults(task.mode),
   );
@@ -119,6 +134,9 @@ export function MailComposer({
   const [draft, setDraft] = useState(initialDraft);
   const [savedFields, setSavedFields] = useState(fields);
   const [showCc, setShowCc] = useState(fields.cc.length > 0);
+  const [showBcc, setShowBcc] = useState(fields.bcc.length > 0);
+  const uploads = useMailDraftUpload(environmentId);
+  const canSave = useAtomValue(mailEnvironment.saveDraft.permissionAtom(environmentId));
   const [showQuoted, setShowQuoted] = useState(false);
   const latest = draft && detail.drafts.find((item) => item.id === draft.id);
   const stale = draft !== null && (!latest || latest.revision !== draft.revision);
@@ -127,6 +145,8 @@ export function MailComposer({
   const dirty =
     fields.to !== savedFields.to ||
     fields.cc !== savedFields.cc ||
+    fields.bcc !== savedFields.bcc ||
+    fileKey(fields.files) !== fileKey(savedFields.files) ||
     fields.subject !== savedFields.subject ||
     fields.body !== savedFields.body ||
     (draft !== null && (draft.mode === "forward") !== forward) ||
@@ -147,6 +167,8 @@ export function MailComposer({
       ...(draft && !asCopy ? { draftId: draft.id, expectedRevision: draft.revision } : {}),
       to: parseRecipients(values.to),
       cc: parseRecipients(values.cc),
+      bcc: parseRecipients(values.bcc),
+      fileIds: values.files.map((file) => file.id),
       subject: values.subject,
       body: values.body,
       mode: forward ? "forward" : "reply",
@@ -178,17 +200,22 @@ export function MailComposer({
     if (next === mode) return;
     const base = defaults(next);
     setMode(next);
-    setFields({ ...base, body: fields.body });
+    setFields({ ...base, body: fields.body, bcc: fields.bcc, files: fields.files });
     setShowCc(base.cc.length > 0);
   };
-  const set = (key: keyof Fields) => (value: string) => setFields({ ...fields, [key]: value });
+  const set = (key: Exclude<keyof Fields, "files">) => (value: string) =>
+    setFields({ ...fields, [key]: value });
+  const attach = (picked: ReadonlyArray<File>) =>
+    void uploads.upload(detail.thread.accountId, picked, fields.files, (file) =>
+      setFields((current) => ({ ...current, files: [...current.files, file] })),
+    );
   const finish = () => {
     finished.current = true;
     // A slow save or send must not close the editor the user has since opened elsewhere.
     if (mounted.current) close();
   };
 
-  const field = (key: "to" | "cc" | "subject", label: string, autoFocus = false) => (
+  const field = (key: "to" | "cc" | "bcc" | "subject", label: string, autoFocus = false) => (
     <div className="flex items-center gap-2 border-b border-border/70 px-3">
       <label htmlFor={`${formId}-${key}`} className="w-14 shrink-0 text-muted-foreground">
         {label}
@@ -207,6 +234,11 @@ export function MailComposer({
           {gt("Cc")}
         </Button>
       ) : null}
+      {key === "to" && uploads.capabilities?.bcc && !showBcc ? (
+        <Button type="button" size="xs" variant="ghost-muted" onClick={() => setShowBcc(true)}>
+          {gt("Bcc")}
+        </Button>
+      ) : null}
     </div>
   );
 
@@ -221,8 +253,9 @@ export function MailComposer({
       className="my-3 overflow-hidden rounded-xl border border-border bg-background shadow-xs"
       onSubmit={async (event) => {
         event.preventDefault();
-        if (pending || stale) return;
-        if (parseRecipients(fields.to).length + parseRecipients(fields.cc).length === 0) {
+        if (pending || stale || uploads.uploading) return;
+        const recipients = [fields.to, fields.cc, fields.bcc].flatMap(parseRecipients);
+        if (recipients.length === 0) {
           form.current?.querySelector<HTMLInputElement>("input[name=to]")?.focus();
           return;
         }
@@ -286,6 +319,7 @@ export function MailComposer({
       <fieldset disabled={pending} className="text-sm">
         {field("to", gt("To"), forward)}
         {showCc ? field("cc", gt("Cc")) : null}
+        {showBcc ? field("bcc", gt("Bcc")) : null}
         {showSubject ? field("subject", gt("Subject")) : null}
         <Textarea
           name="body"
@@ -298,6 +332,14 @@ export function MailComposer({
         />
       </fieldset>
       <div className="px-3 pb-2">
+        <MailDraftFileList
+          className="mb-2"
+          files={fields.files}
+          disabled={pending}
+          onRemove={(id) =>
+            setFields({ ...fields, files: fields.files.filter((file) => file.id !== id) })
+          }
+        />
         {forward && !legacy ? (
           <div className="rounded-lg border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">{gt("Forwarded message")}</p>
@@ -339,16 +381,16 @@ export function MailComposer({
           </div>
         ) : null}
       </div>
-      {stale || failed ? (
+      {stale || failed || uploads.error ? (
         <p role="alert" className="px-3 pb-2 text-sm text-warning-foreground">
           {stale
             ? gt("This draft changed elsewhere. Saving keeps your version as a separate draft.")
-            : failed}
+            : (failed ?? uploads.error)}
         </p>
       ) : null}
       <div className="flex items-center gap-2 px-3 pb-3">
         {canSend ? (
-          <Button type="submit" size="sm" disabled={pending || stale}>
+          <Button type="submit" size="sm" disabled={pending || stale || uploads.uploading}>
             <SendIcon />
             {gt("Send")}
           </Button>
@@ -364,6 +406,9 @@ export function MailComposer({
         >
           {gt("Save draft")}
         </Button>
+        {canSave && uploads.capabilities?.draftAttachments ? (
+          <MailAttachButton disabled={pending || uploads.uploading} onPick={attach} />
+        ) : null}
         {from ? (
           <span className="min-w-0 truncate text-xs text-muted-foreground">
             {gt("From: {sender}", { sender: from })}

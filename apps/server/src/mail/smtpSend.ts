@@ -14,6 +14,7 @@ export interface OutgoingMessage {
   readonly from: { readonly name: string; readonly address: string };
   readonly to: ReadonlyArray<string>;
   readonly cc: ReadonlyArray<string>;
+  readonly bcc?: ReadonlyArray<string>;
   readonly subject: string;
   readonly text: string;
   readonly html?: string | null;
@@ -30,12 +31,17 @@ export interface OutgoingMessage {
 
 const isLocal = (host: string) => host === "127.0.0.1" || host === "localhost";
 
-/** Builds the RFC 5322 message once, so the copy appended to Sent is exactly what was sent. */
-export async function buildRaw(message: OutgoingMessage): Promise<Buffer> {
+/** Only the sender's own Sent copy keeps the Bcc header. */
+export async function buildRaw(
+  message: OutgoingMessage,
+  options: { readonly keepBcc?: boolean } = {},
+): Promise<Buffer> {
+  const bcc = message.bcc ?? [];
   const composer = new MailComposer({
     from: { name: message.from.name, address: message.from.address },
     to: [...message.to],
     cc: message.cc.length > 0 ? [...message.cc] : undefined,
+    bcc: bcc.length > 0 ? [...bcc] : undefined,
     subject: message.subject,
     text: message.text,
     ...(message.html ? { html: message.html } : {}),
@@ -53,7 +59,9 @@ export async function buildRaw(message: OutgoingMessage): Promise<Buffer> {
     inReplyTo: message.inReplyTo ?? undefined,
     references: message.references.length > 0 ? [...message.references] : undefined,
   });
-  return composer.compile().build();
+  const node = composer.compile();
+  node.keepBcc = options.keepBcc === true;
+  return node.build();
 }
 
 export async function sendRaw(config: SmtpConfig, message: OutgoingMessage, raw: Buffer) {
@@ -70,7 +78,10 @@ export async function sendRaw(config: SmtpConfig, message: OutgoingMessage, raw:
   });
   try {
     const result = await transport.sendMail({
-      envelope: { from: message.from.address, to: [...message.to, ...message.cc] },
+      envelope: {
+        from: message.from.address,
+        to: [...message.to, ...message.cc, ...(message.bcc ?? [])],
+      },
       raw,
     });
     const addressOf = (entry: string | { address: string }) =>

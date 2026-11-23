@@ -162,6 +162,7 @@ export const MailMessage = Schema.Struct({
   replyTo: Schema.Array(MailAddress).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   to: Schema.Array(MailAddress),
   cc: Schema.Array(MailAddress),
+  bcc: Schema.optionalKey(Schema.Array(MailAddress)),
   date: IsoDateTime,
   subject: Schema.String,
   /** Cleaned text: no HTML, tracking junk, signature or quoted chain. */
@@ -181,12 +182,37 @@ export type MailDraftStatus = typeof MailDraftStatus.Type;
 export const MailDraftMode = Schema.Literals(["reply", "forward"]);
 export type MailDraftMode = typeof MailDraftMode.Type;
 
+/** Outgoing files, with forwarded attachments, stay under the common 25 MB limit once encoded. */
+export const MAIL_OUTGOING_FILE_BYTES = 18 * 1024 * 1024;
+
+export const MailDraftFileId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^file-[0-9a-f-]{36}$/),
+);
+export type MailDraftFileId = typeof MailDraftFileId.Type;
+/** A file the user attached to a draft. */
+export const MailDraftFile = Schema.Struct({
+  id: MailDraftFileId,
+  filename: Schema.String,
+  contentType: Schema.String,
+  size: NonNegativeInt,
+});
+export type MailDraftFile = typeof MailDraftFile.Type;
+export const MailUploadDraftFileInput = Schema.Struct({
+  accountId: MailAccountId,
+  filename: Schema.String.check(Schema.isMaxLength(1_000)),
+  contentType: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(255))),
+});
+export type MailUploadDraftFileInput = typeof MailUploadDraftFileInput.Type;
+
 export const MailDraft = Schema.Struct({
   id: MailDraftId,
   threadId: MailThreadId,
   accountId: MailAccountId,
   to: Schema.Array(Schema.String),
   cc: Schema.Array(Schema.String),
+  /** Delivered to, but never shown to, the other recipients. */
+  bcc: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  files: Schema.Array(MailDraftFile).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   subject: Schema.String,
   body: Schema.String,
   origin: MailActor,
@@ -220,6 +246,8 @@ export const MailActionKind = Schema.Literals([
   "mark_read",
   "mark_unread",
   "delete",
+  "spam",
+  "unsubscribe",
   "wait_for_reply",
   "nudge",
   "propose",
@@ -266,6 +294,8 @@ export const MailThreadDetail = Schema.Struct({
   ),
   /** The model's short name for this type of email, such as "Amazon shipping updates". */
   kind: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
+  /** A message from someone else carries List-Unsubscribe. */
+  canUnsubscribe: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
 });
 export type MailThreadDetail = typeof MailThreadDetail.Type;
 
@@ -402,6 +432,13 @@ export const MailRecap = Schema.Struct({
 export type MailRecap = typeof MailRecap.Type;
 
 export const MailStatus = Schema.Struct({
+  capabilities: Schema.optionalKey(
+    Schema.Struct({
+      spam: Schema.optionalKey(Schema.Boolean),
+      draftAttachments: Schema.optionalKey(Schema.Boolean),
+      bcc: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
   accounts: Schema.Array(MailAccount),
   settings: MailSettings,
   usage: MailUsage,
@@ -519,12 +556,19 @@ export const MailThreadAction = Schema.Union([
   Schema.Struct({ type: Schema.Literal("mark_unread") }),
   /** Moves every message to the mail server's Trash and removes the email here. */
   Schema.Struct({ type: Schema.Literal("delete") }),
+  /** Moves every message to the mail server's spam folder and removes the email here. */
+  Schema.Struct({ type: Schema.Literal("spam") }),
   Schema.Struct({ type: Schema.Literal("wait_for_reply") }),
 ]);
 export type MailThreadAction = typeof MailThreadAction.Type;
 
+export const MAIL_ACTION_BATCH_SIZE = 500;
+
 export const MailActInput = Schema.Struct({
-  threadIds: Schema.Array(MailThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(500)),
+  threadIds: Schema.Array(MailThreadId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(MAIL_ACTION_BATCH_SIZE),
+  ),
   action: MailThreadAction,
 });
 export const MailActResult = Schema.Struct({ actionIds: Schema.Array(NonNegativeInt) });
@@ -536,13 +580,15 @@ export const MailListSentInput = Schema.Struct({
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
 });
 
-/** Email deleted here that can still be restored from the server's Trash. */
+/** Email deleted or marked as spam here that can still be restored from the server. */
 export const MailListTrashInput = Schema.Struct({
+  kind: Schema.optionalKey(Schema.Literals(["delete", "spam"])),
   beforeId: Schema.optionalKey(NonNegativeInt),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
 });
 
 export const MailListActionsInput = Schema.Struct({
+  includeSpamAndUnsubscribe: Schema.optionalKey(Schema.Boolean),
   automatic: Schema.optionalKey(Schema.Boolean),
   beforeId: Schema.optionalKey(NonNegativeInt),
   actor: Schema.optionalKey(MailActor),
@@ -559,6 +605,9 @@ export const MailSaveDraftInput = Schema.Struct({
   expectedRevision: Schema.optionalKey(NonNegativeInt),
   to: Schema.Array(Schema.String),
   cc: Schema.Array(Schema.String),
+  /** Omitted keeps the draft's Bcc and files, so an agent's edit leaves them alone. */
+  bcc: Schema.optionalKey(Schema.Array(Schema.String)),
+  fileIds: Schema.optionalKey(Schema.Array(MailDraftFileId)),
   subject: Schema.String,
   body: Schema.String,
   mode: Schema.optionalKey(MailDraftMode),
@@ -575,6 +624,8 @@ export const MailComposeInput = Schema.Struct({
   accountId: MailAccountId,
   to: Schema.Array(Schema.String),
   cc: Schema.Array(Schema.String),
+  bcc: Schema.optionalKey(Schema.Array(Schema.String)),
+  fileIds: Schema.optionalKey(Schema.Array(MailDraftFileId)),
   subject: Schema.String,
   body: Schema.String,
 });
@@ -669,6 +720,31 @@ export const MailDryRunRuleResult = Schema.Struct({
   ),
   total: NonNegativeInt,
 });
+
+/**
+ * How the sender asks to be unsubscribed. `one_click` posts to the sender (RFC 8058) and needs a
+ * verified DKIM signature from the sender's domain; `email` sends a message; `link` only opens a page.
+ */
+export const MailUnsubscribeMethod = Schema.Literals(["one_click", "email", "link"]);
+export type MailUnsubscribeMethod = typeof MailUnsubscribeMethod.Type;
+export const MailUnsubscribeOptions = Schema.Struct({
+  method: MailUnsubscribeMethod,
+  sender: Schema.String,
+  confirmation: Schema.String,
+  emailPreview: Schema.NullOr(Schema.Struct({ subject: Schema.String, body: Schema.String })),
+  /** The host that receives the request, or the address that receives the email. */
+  target: Schema.String,
+  /** The sender's unsubscribe page, an alternative when the request fails. */
+  pageUrl: Schema.NullOr(Schema.String),
+});
+export type MailUnsubscribeOptions = typeof MailUnsubscribeOptions.Type;
+export const MailUnsubscribeInput = Schema.Struct({
+  threadId: MailThreadId,
+  confirmation: Schema.String,
+  /** The method the user confirmed; refused if the sender's request no longer offers it. */
+  method: Schema.Literals(["one_click", "email"]),
+});
+export type MailUnsubscribeInput = typeof MailUnsubscribeInput.Type;
 
 export const MailSeedVoiceResult = Schema.Struct({ notes: Schema.String });
 export const MailDismissRecapInput = Schema.Struct({ date: TrimmedNonEmptyString });

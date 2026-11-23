@@ -15,7 +15,7 @@ export function MailDraftRow({
   onOpen: () => void;
 }) {
   const gt = useGT();
-  const recipients = [...draft.to, ...draft.cc];
+  const recipients = [...draft.to, ...draft.cc, ...draft.bcc];
   const label =
     draft.status === "sending"
       ? gt("Sending…")

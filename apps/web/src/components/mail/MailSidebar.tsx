@@ -4,10 +4,12 @@ import type {
   MailActionEntry,
   MailLabelScope,
   MailListLabeledInput,
+  MailThreadAction,
   MailThreadId,
   MailThreadRow,
 } from "@t3tools/contracts";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { MAIL_ACTION_BATCH_SIZE } from "@t3tools/contracts";
+import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import {
   ChevronDownIcon,
@@ -15,6 +17,7 @@ import {
   ListFilterIcon,
   SearchIcon,
   SquarePenIcon,
+  ListChecksIcon,
   Undo2Icon,
   XIcon,
 } from "lucide-react";
@@ -48,14 +51,28 @@ import {
 import { SidebarContent, SidebarGroup, SidebarInput } from "../ui/sidebar";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
+import { MailInboxSelection } from "./MailInboxSelection";
 import { MailLabelFilter } from "./MailLabels";
 import { MailSidebarRow } from "./MailSidebarRow";
 import { useMailActions } from "./useMailActions";
 import { useMailIntentPrefetch } from "./useMailIntentPrefetch";
 import { useMailRowMenu } from "./useMailRowMenu";
 
-const mailboxes = ["inbox", "working", "snoozed", "drafts", "settled", "sent", "trash"] as const;
+const mailboxes = [
+  "inbox",
+  "working",
+  "snoozed",
+  "drafts",
+  "settled",
+  "sent",
+  "spam",
+  "trash",
+] as const;
 type Mailbox = (typeof mailboxes)[number];
+/** Lists of what was removed here, not thread lists a label can filter. */
+type RemovedMailbox = "spam" | "trash";
+const isRemoved = (mailbox: Mailbox | "all"): mailbox is RemovedMailbox =>
+  mailbox === "spam" || mailbox === "trash";
 type SettledFilter = "all" | "rule" | "user";
 const SETTLED_PAGE = 30;
 const THREAD_PAGE = 30;
@@ -85,10 +102,13 @@ export default function MailSidebar() {
 function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   const gt = useGT();
   const navigate = useNavigate();
+  const router = useRouter();
   const sections = useMailSections(environmentId);
   const actions = useMailActions(environmentId);
   const prefetch = useMailIntentPrefetch(environmentId);
-  const openRowMenu = useMailRowMenu(environmentId, actions);
+  const status = useMailStatus(environmentId);
+  const supportsSpam = status?.capabilities?.spam === true;
+  const openRowMenu = useMailRowMenu(environmentId, actions, supportsSpam);
   const routeMailThreadId = useParams({
     strict: false,
     select: (params) => ("mailThreadId" in params ? String(params.mailThreadId) : null),
@@ -99,13 +119,58 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   const [serverSearch, setServerSearch] = useState(false);
   const debouncedQuery = useDebouncedValue(query.trim(), 200);
   const [mailbox, setMailbox] = useState<Mailbox>("inbox");
-  const [filteredMailbox, setFilteredMailbox] = useState<Exclude<Mailbox, "trash"> | "all">("all");
+  const [filteredMailbox, setFilteredMailbox] = useState<Exclude<Mailbox, RemovedMailbox> | "all">(
+    "all",
+  );
   const [labelScope, setLabelScope] = useState<MailLabelScope | null>(null);
   const searching = query.trim() !== "" && debouncedQuery !== "";
   const view = labelScope ? "label" : searching ? "search" : mailbox;
+  const [selection, setSelection] = useState<Set<MailThreadId> | null>(null);
+  const [selectionBusy, setSelectionBusy] = useState(false);
+  const selecting = selection !== null && view === "inbox";
+  const toggleSelection = (id: MailThreadId) =>
+    setSelection((current) => {
+      if (!current) return null;
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const applySelection = async (ids: MailThreadId[], action: MailThreadAction, done?: string) => {
+    if (selectionBusy || actions.disabled) return;
+    const undoIds: number[] = [];
+    const applyBatches = async () => {
+      for (let offset = 0; offset < ids.length; offset += MAIL_ACTION_BATCH_SIZE) {
+        const batch = ids.slice(offset, offset + MAIL_ACTION_BATCH_SIZE);
+        const result = await actions.act(batch, action);
+        if (result === null) return;
+        undoIds.push(...result);
+        const completed = new Set(batch);
+        if (offset + batch.length < ids.length) {
+          setSelection(
+            (current) => current && new Set([...current].filter((id) => !completed.has(id))),
+          );
+        }
+        if (
+          action.type === "delete" &&
+          router.state.matches.some(
+            ({ params }) =>
+              "mailThreadId" in params && batch.some((id) => id === params.mailThreadId),
+          )
+        ) {
+          void navigate({ to: "/mail" });
+        }
+      }
+      setSelection(null);
+    };
+    setSelectionBusy(true);
+    await applyBatches().finally(() => {
+      if (done !== undefined) actions.showUndo(undoIds, done);
+      setSelectionBusy(false);
+    });
+  };
   const content = useRef<HTMLDivElement>(null);
   const inboxScroll = useRef(0);
-  const status = useMailStatus(environmentId);
   const mailboxLabels = {
     inbox: gt("Inbox"),
     working: gt("Working", { $context: "sidebar section" }),
@@ -113,6 +178,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
     drafts: gt("Drafts", { $context: "sidebar section" }),
     settled: gt("Settled", { $context: "sidebar section" }),
     sent: gt("Sent", { $context: "sidebar section" }),
+    spam: gt("Spam", { $context: "sidebar section" }),
     trash: gt("Trash", { $context: "sidebar section" }),
   };
   const counts: Partial<Record<Mailbox, number | undefined>> = {
@@ -169,8 +235,11 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
           ? thread.lastOutgoingAt
           : thread.lastMessageAt
       }
-      onIntent={prefetch}
-      onContextMenu={openRowMenu}
+      selected={selecting ? selection.has(thread.id) : undefined}
+      selectionBusy={selectionBusy}
+      onToggleSelection={toggleSelection}
+      onIntent={selecting ? undefined : prefetch}
+      onContextMenu={selecting ? undefined : openRowMenu}
     />
   );
 
@@ -188,6 +257,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                 type="search"
                 value={query}
                 onChange={(event) => {
+                  setSelection(null);
                   setQuery(event.currentTarget.value);
                   setServerSearch(false);
                 }}
@@ -216,10 +286,11 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
               accounts={status?.accounts ?? []}
               scope={labelScope}
               onPick={(scope) => {
+                setSelection(null);
                 setLabelScope(scope);
                 if (scope?.kind === "folder") setFilteredMailbox("all");
                 else if (scope && !labelScope)
-                  setFilteredMailbox(mailbox === "trash" ? "all" : mailbox);
+                  setFilteredMailbox(isRemoved(mailbox) ? "all" : mailbox);
               }}
             />
             <SidebarHeaderIconButton
@@ -241,57 +312,87 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
             </SidebarHeaderIconButton>
           </div>
           <div className="mt-1 flex items-center">
-            <Menu>
-              <MenuTrigger render={<Button variant="ghost" size="sm" />}>
-                {labelScope
-                  ? filteredMailbox === "all"
-                    ? gt("All mail")
-                    : mailboxLabels[filteredMailbox]
-                  : searching
-                    ? gt("Search results")
-                    : mailboxLabels[mailbox]}
-                <ChevronDownIcon className="size-3.5 text-muted-foreground" />
-              </MenuTrigger>
-              <MenuPopup align="start">
-                <MenuRadioGroup
-                  value={labelScope ? filteredMailbox : view}
-                  onValueChange={(next: Mailbox | "all") => {
-                    if (labelScope && next !== "trash") {
-                      setFilteredMailbox(next);
-                      if (next !== "all") setMailbox(next);
-                      return;
-                    }
-                    if (next === "all") return;
-                    setQuery("");
-                    setServerSearch(false);
-                    setLabelScope(null);
-                    setMailbox(next);
-                  }}
-                >
-                  {labelScope && (
-                    <MenuRadioItem value="all" closeOnClick>
-                      <MenuRadioItemIndicator />
-                      {gt("All mail")}
-                    </MenuRadioItem>
-                  )}
-                  {mailboxes.map((item) => (
-                    <MenuRadioItem key={item} value={item} closeOnClick>
-                      <span className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-x-2">
-                        <span>
+            {selecting && sections ? (
+              <MailInboxSelection
+                rows={[...sections.pinned, ...sections.active]}
+                selected={selection}
+                accounts={status?.accounts ?? []}
+                busy={selectionBusy}
+                disabled={actions.disabled}
+                onSelectAll={setSelection}
+                onClose={() => setSelection(null)}
+                onAction={(ids, action, done) => void applySelection(ids, action, done)}
+              />
+            ) : (
+              <>
+                <Menu>
+                  <MenuTrigger render={<Button variant="ghost" size="sm" />}>
+                    {labelScope
+                      ? filteredMailbox === "all"
+                        ? gt("All mail")
+                        : mailboxLabels[filteredMailbox]
+                      : searching
+                        ? gt("Search results")
+                        : mailboxLabels[mailbox]}
+                    <ChevronDownIcon className="size-3.5 text-muted-foreground" />
+                  </MenuTrigger>
+                  <MenuPopup align="start">
+                    <MenuRadioGroup
+                      value={labelScope ? filteredMailbox : view}
+                      onValueChange={(next: Mailbox | "all") => {
+                        if (labelScope && !isRemoved(next)) {
+                          setFilteredMailbox(next);
+                          if (next !== "all") setMailbox(next);
+                          return;
+                        }
+                        if (next === "all") return;
+                        setQuery("");
+                        setServerSearch(false);
+                        setLabelScope(null);
+                        setMailbox(next);
+                      }}
+                    >
+                      {labelScope && (
+                        <MenuRadioItem value="all" closeOnClick>
                           <MenuRadioItemIndicator />
-                        </span>
-                        <span>{mailboxLabels[item]}</span>
-                        {!labelScope && counts[item] ? (
-                          <span className="text-end text-xs tabular-nums text-muted-foreground">
-                            {counts[item]}
-                          </span>
-                        ) : null}
-                      </span>
-                    </MenuRadioItem>
-                  ))}
-                </MenuRadioGroup>
-              </MenuPopup>
-            </Menu>
+                          {gt("All mail")}
+                        </MenuRadioItem>
+                      )}
+                      {mailboxes
+                        .filter((item) => item !== "spam" || supportsSpam)
+                        .map((item) => (
+                          <MenuRadioItem key={item} value={item} closeOnClick>
+                            <span className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-x-2">
+                              <span>
+                                <MenuRadioItemIndicator />
+                              </span>
+                              <span>{mailboxLabels[item]}</span>
+                              {!labelScope && counts[item] ? (
+                                <span className="text-end text-xs tabular-nums text-muted-foreground">
+                                  {counts[item]}
+                                </span>
+                              ) : null}
+                            </span>
+                          </MenuRadioItem>
+                        ))}
+                    </MenuRadioGroup>
+                  </MenuPopup>
+                </Menu>
+                {view === "inbox" &&
+                  sections &&
+                  sections.pinned.length + sections.active.length > 0 &&
+                  !actions.disabled && (
+                    <SidebarHeaderIconButton
+                      className="ms-auto"
+                      label={gt("Select emails")}
+                      disabled={selectionBusy}
+                      onClick={() => setSelection(new Set())}
+                    >
+                      <ListChecksIcon />
+                    </SidebarHeaderIconButton>
+                  )}
+              </>
+            )}
           </div>
         </SidebarGroup>
       }
@@ -349,7 +450,12 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
               renderRow={row}
             />
             <PagedThreads active={view === "sent"} environmentId={environmentId} renderRow={row} />
-            <TrashList active={view === "trash"} environmentId={environmentId} />
+            <TrashList
+              key={view}
+              kind={view === "spam" ? "spam" : "delete"}
+              active={view === "trash" || view === "spam"}
+              environmentId={environmentId}
+            />
           </ul>
         )}
       </SidebarGroup>
@@ -541,19 +647,27 @@ function PagedThreads(props: {
   );
 }
 
-function TrashList(props: { active: boolean; environmentId: EnvironmentId }) {
+function TrashList(props: {
+  active: boolean;
+  kind: "delete" | "spam";
+  environmentId: EnvironmentId;
+}) {
   const [cursors, setCursors] = useState<Array<number>>([]);
   const beforeId = cursors.at(-1);
   const page = useEnvironmentQuery(
     props.active
       ? mailEnvironment.trash({
           environmentId: props.environmentId,
-          input: { limit: TRASH_PAGE, ...(beforeId === undefined ? {} : { beforeId }) },
+          input: {
+            limit: TRASH_PAGE,
+            ...(props.kind === "spam" ? { kind: "spam" as const } : {}),
+            ...(beforeId === undefined ? {} : { beforeId }),
+          },
         })
       : null,
   );
   if (!props.active) return null;
-  const entries = page.data?.actions ?? [];
+  const entries = (page.data?.actions ?? []).filter((entry) => entry.kind === props.kind);
   return (
     <>
       {entries.map((entry) => (
@@ -566,7 +680,11 @@ function TrashList(props: { active: boolean; environmentId: EnvironmentId }) {
       ))}
       {page.data && entries.length === 0 ? (
         <EmptyMailbox>
-          <T>Nothing deleted in the last 30 days.</T>
+          {props.kind === "spam" ? (
+            <T>Nothing marked as spam in the last 30 days.</T>
+          ) : (
+            <T>Nothing deleted in the last 30 days.</T>
+          )}
         </EmptyMailbox>
       ) : null}
       {!page.data && !page.error && (
@@ -581,7 +699,7 @@ function TrashList(props: { active: boolean; environmentId: EnvironmentId }) {
       )}
       <PageButtons
         hasPrevious={beforeId !== undefined}
-        hasMore={page.data?.hasMore ?? false}
+        hasMore={entries.length > 0 && (page.data?.hasMore ?? false)}
         onPrevious={() => setCursors(cursors.slice(0, -1))}
         onNext={() => {
           const last = entries.at(-1);
@@ -592,7 +710,7 @@ function TrashList(props: { active: boolean; environmentId: EnvironmentId }) {
   );
 }
 
-/** An email deleted here. It is gone from this list until Restore brings it back from Trash. */
+/** An email deleted or marked as spam here. Restore or Not spam brings it back to the inbox. */
 function MailTrashRow(props: {
   environmentId: EnvironmentId;
   entry: MailActionEntry;
@@ -604,6 +722,7 @@ function MailTrashRow(props: {
   const { entry } = props;
   const subject =
     entry.reason === "sign_in_code" ? gt("Sign-in code") : entry.subject || gt("(No subject)");
+  const spam = entry.kind === "spam";
   return (
     <li className="group/sidebar-row flex list-none items-center gap-1.5 rounded-md px-(--sidebar-row-content-inset) py-1.5 text-sidebar-muted-foreground hover:bg-sidebar-row-hover">
       <div className="min-w-0 flex-1">
@@ -616,7 +735,9 @@ function MailTrashRow(props: {
         size="xs"
         variant="ghost"
         disabled={disabled || restoring}
-        aria-label={gt("Restore {subject}", { subject })}
+        aria-label={
+          spam ? gt("Not spam: {subject}", { subject }) : gt("Restore {subject}", { subject })
+        }
         onClick={async () => {
           setRestoring(true);
           const restored = await undo([entry.id]);
@@ -627,7 +748,7 @@ function MailTrashRow(props: {
         }}
       >
         <Undo2Icon />
-        {gt("Restore")}
+        {spam ? gt("Not spam") : gt("Restore")}
       </Button>
     </li>
   );

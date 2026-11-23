@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   MailAccountId,
   MailDraft,
+  MailDraftFile,
   MailThreadDetail,
   MailThreadRow,
   ThreadId,
@@ -20,6 +21,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "../ui/select";
 import { Toggle } from "../ui/toggle";
 import { MailChatAside } from "./MailChatPanel";
+import { MailAttachButton, MailDraftFileList, useMailDraftUpload } from "./MailDraftFiles";
 import { parseRecipients } from "./mailPresentation";
 import { MailPage } from "./MailPage";
 import { useDiscardDraft } from "./useDiscardDraft";
@@ -27,20 +29,35 @@ import { useDiscardDraft } from "./useDiscardDraft";
 interface Fields {
   readonly to: string;
   readonly cc: string;
+  readonly bcc: string;
   readonly subject: string;
   readonly body: string;
+  readonly files: ReadonlyArray<MailDraftFile>;
 }
 
-const EMPTY: Fields = { to: "", cc: "", subject: "", body: "" };
+const EMPTY: Fields = { to: "", cc: "", bcc: "", subject: "", body: "", files: [] };
 const AUTOSAVE_MS = 1_500;
 
 const fieldsOf = (draft: MailDraft | null): Fields =>
   draft
-    ? { to: draft.to.join(", "), cc: draft.cc.join(", "), subject: draft.subject, body: draft.body }
+    ? {
+        to: draft.to.join(", "),
+        cc: draft.cc.join(", "),
+        bcc: draft.bcc.join(", "),
+        subject: draft.subject,
+        body: draft.body,
+        files: draft.files,
+      }
     : EMPTY;
 
+const fileKey = (files: ReadonlyArray<MailDraftFile>) => files.map((file) => file.id).join(",");
 const sameFields = (a: Fields, b: Fields) =>
-  a.to === b.to && a.cc === b.cc && a.subject === b.subject && a.body === b.body;
+  a.to === b.to &&
+  a.cc === b.cc &&
+  a.bcc === b.bcc &&
+  a.subject === b.subject &&
+  a.body === b.body &&
+  fileKey(a.files) === fileKey(b.files);
 
 /**
  * A new email, written like a new chat: it becomes a draft once there is something to keep,
@@ -156,6 +173,8 @@ function MailNewEmailEditor({
   const [draft, setDraft] = useState(initialDraft);
   const [savedFields, setSavedFields] = useState(fields);
   const [showCc, setShowCc] = useState(fields.cc.length > 0);
+  const [showBcc, setShowBcc] = useState(fields.bcc.length > 0);
+  const uploads = useMailDraftUpload(environmentId);
   const [saving, setSaving] = useState(false);
   const [openedChatId, setOpenedChatId] = useState<ThreadId | null>(null);
   // Set before the first await, so a second click or an edit can't slip in mid-send.
@@ -170,6 +189,7 @@ function MailNewEmailEditor({
     setFields(fieldsOf(latest));
     setSavedFields(fieldsOf(latest));
     if (latest.cc.length > 0) setShowCc(true);
+    if (latest.bcc.length > 0) setShowBcc(true);
   }
   const conflict = newer && dirty;
   const sending = latest?.status === "sending" || send.pending;
@@ -177,7 +197,9 @@ function MailNewEmailEditor({
   const pending = sending || openSession.pending || busy;
   const senderId = draft?.accountId ?? thread?.accountId ?? accountId;
   const account = accounts.find((entry) => entry.id === senderId);
-  const canPickSender = draft === null && thread === null && !saving;
+  // Uploaded files belong to the account they were attached from.
+  const canPickSender =
+    draft === null && thread === null && !saving && fields.files.length === 0 && !uploads.uploading;
 
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   // Queued saves run after earlier ones finish, so they read the newest saved copy here.
@@ -191,6 +213,8 @@ function MailNewEmailEditor({
     const input = {
       to: parseRecipients(values.to),
       cc: parseRecipients(values.cc),
+      bcc: parseRecipients(values.bcc),
+      fileIds: values.files.map((file) => file.id),
       subject: values.subject,
       body: values.body,
     };
@@ -247,7 +271,14 @@ function MailNewEmailEditor({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keeps unsaved text when the editor unmounts.
   useEffect(() => () => autosave(), []);
 
-  const set = (key: keyof Fields) => (value: string) => setFields({ ...fields, [key]: value });
+  const set = (key: Exclude<keyof Fields, "files">) => (value: string) =>
+    setFields({ ...fields, [key]: value });
+  const attach = (picked: ReadonlyArray<File>) => {
+    if (senderId === null) return;
+    void uploads.upload(senderId, picked, fields.files, (file) =>
+      setFields((current) => ({ ...current, files: [...current.files, file] })),
+    );
+  };
   const chatThreadId = thread?.chatThreadId ?? openedChatId;
   const showChat = chatOpen && chatThreadId !== null;
   const setChatOpen = async (open: boolean) => {
@@ -272,7 +303,7 @@ function MailNewEmailEditor({
     onChatOpenChange(true);
   };
 
-  const field = (key: "to" | "cc" | "subject", label: string, autoFocus = false) => (
+  const field = (key: "to" | "cc" | "bcc" | "subject", label: string, autoFocus = false) => (
     <div className="flex min-h-10 items-center gap-2 border-b border-border/70 px-4">
       <label htmlFor={`${formId}-${key}`} className="w-16 shrink-0 text-muted-foreground">
         {label}
@@ -290,6 +321,11 @@ function MailNewEmailEditor({
       {key === "to" && !showCc ? (
         <Button type="button" size="xs" variant="ghost-muted" onClick={() => setShowCc(true)}>
           {gt("Cc")}
+        </Button>
+      ) : null}
+      {key === "to" && uploads.capabilities?.bcc && !showBcc ? (
+        <Button type="button" size="xs" variant="ghost-muted" onClick={() => setShowBcc(true)}>
+          {gt("Bcc")}
         </Button>
       ) : null}
     </div>
@@ -324,8 +360,8 @@ function MailNewEmailEditor({
             className="flex min-h-0 flex-1 flex-col text-sm"
             onSubmit={async (event) => {
               event.preventDefault();
-              if (pending || conflict) return;
-              if (parseRecipients(fields.to).length + parseRecipients(fields.cc).length === 0) {
+              if (pending || conflict || uploads.uploading) return;
+              if ([fields.to, fields.cc, fields.bcc].flatMap(parseRecipients).length === 0) {
                 form.current?.querySelector<HTMLInputElement>("input[name=to]")?.focus();
                 return;
               }
@@ -378,6 +414,7 @@ function MailNewEmailEditor({
               ) : null}
               {field("to", gt("To"), fields.to.length === 0)}
               {showCc ? field("cc", gt("Cc")) : null}
+              {showBcc ? field("bcc", gt("Bcc")) : null}
               {field("subject", gt("Subject"))}
               {/* Fills the page like a letter, which the shared textarea's capped height can't. */}
               <textarea
@@ -388,14 +425,22 @@ function MailNewEmailEditor({
                 onChange={(event) => set("body")(event.currentTarget.value)}
                 autoFocus={fields.to.length > 0}
               />
+              <MailDraftFileList
+                className="px-4 pb-3"
+                files={fields.files}
+                disabled={pending}
+                onRemove={(id) =>
+                  setFields({ ...fields, files: fields.files.filter((file) => file.id !== id) })
+                }
+              />
             </fieldset>
-            {conflict || failed ? (
+            {conflict || failed || uploads.error ? (
               <div
                 role="alert"
                 className="flex flex-wrap items-center gap-2 border-t border-border/70 px-4 py-2 text-warning-foreground"
               >
                 <span className="min-w-0 flex-1">
-                  {conflict ? gt("The draft changed in chat.") : failed}
+                  {conflict ? gt("The draft changed in chat.") : (failed ?? uploads.error)}
                 </span>
                 {conflict && latest ? (
                   <>
@@ -430,13 +475,25 @@ function MailNewEmailEditor({
             ) : null}
             <div className="flex items-center gap-3 border-t border-border/70 px-4 py-3">
               {canSend ? (
-                <Button type="submit" size="sm" disabled={pending || conflict}>
+                <Button type="submit" size="sm" disabled={pending || conflict || uploads.uploading}>
                   <SendIcon />
                   {sending ? gt("Sending…") : gt("Send")}
                 </Button>
               ) : null}
+              {canSave && uploads.capabilities?.draftAttachments ? (
+                <MailAttachButton
+                  disabled={pending || uploads.uploading || senderId === null}
+                  onPick={attach}
+                />
+              ) : null}
               <span role="status" className="min-w-0 truncate text-xs text-muted-foreground">
-                {saving ? gt("Saving…") : draft !== null && !dirty ? gt("Draft saved") : null}
+                {uploads.uploading
+                  ? gt("Attaching…")
+                  : saving
+                    ? gt("Saving…")
+                    : draft !== null && !dirty
+                      ? gt("Draft saved")
+                      : null}
               </span>
               <Button
                 type="button"

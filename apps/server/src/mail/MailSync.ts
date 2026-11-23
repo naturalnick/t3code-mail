@@ -28,7 +28,14 @@ import { ImapFailure, ImapSession, classifyImapError, type ParsedMessage } from 
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
 import * as MailStore from "./MailStore.ts";
-import { type EnqueueOp, enqueueOp, replayOp } from "./mailServerOp.ts";
+import {
+  type EnqueueOp,
+  enqueueOp,
+  moveToSpam as moveToSpamOn,
+  replayOp,
+  restoreFromSpam,
+  type SpamSource,
+} from "./mailServerOp.ts";
 
 /** Newest messages fetched on a mailbox's first sync; the rest arrives by backfill. */
 const INITIAL_PAGE = 200;
@@ -101,6 +108,11 @@ export class MailSync extends Context.Service<
       maxBytes: number,
       index?: number,
     ) => Effect.Effect<Awaited<ReturnType<ImapSession["fetchAttachments"]>> | null, SqlError>;
+    /** Original source for one-click verification, or just list headers for the other methods. */
+    readonly getUnsubscribeSource: (
+      input: MailMessageBodyInput,
+      maxBytes: number,
+    ) => Effect.Effect<Buffer | null, SqlError>;
     readonly openFolder: (
       accountId: MailAccountId,
       path: string,
@@ -114,6 +126,16 @@ export class MailSync extends Context.Service<
       accountId: MailAccountId,
       query: string,
     ) => Effect.Effect<ReadonlyArray<MailThreadId>>;
+    /** Fails only when nothing could be tried; a partial move reports `failure` instead. */
+    readonly moveToSpam: (
+      accountId: MailAccountId,
+      sources: ReadonlyArray<SpamSource>,
+    ) => Effect.Effect<Awaited<ReturnType<typeof moveToSpamOn>>, MailError>;
+    /** How many reported messages went back to the inbox. */
+    readonly restoreSpam: (
+      accountId: MailAccountId,
+      spam: MailStore.SpamCopies,
+    ) => Effect.Effect<number, MailError>;
   }
 >()("t3/mail/MailSync") {}
 
@@ -746,6 +768,20 @@ const make = Effect.gen(function* () {
       ),
     ).pipe(Effect.orElseSucceed(() => null));
   });
+  const getUnsubscribeSource: MailSync["Service"]["getUnsubscribeSource"] = Effect.fn(
+    "MailSync.getUnsubscribeSource",
+  )(function* (input, maxBytes) {
+    const [target] = yield* store.messageTargets(input.threadId, [input.messageId]);
+    const imap = target ? live.get(target.accountId)?.imap : undefined;
+    if (!target || !imap) return null;
+    return yield* promise(() =>
+      imap.withMailbox(target.mailbox, null, async (box) =>
+        box.uidValidity === target.uidValidity
+          ? imap.fetchUnsubscribeSource(target.uid, maxBytes)
+          : null,
+      ),
+    ).pipe(Effect.orElseSucceed(() => null));
+  });
   const unavailable = (message: string) => new MailError({ code: "unavailable", message });
   const openFolder: MailSync["Service"]["openFolder"] = Effect.fn("MailSync.openFolder")(
     function* (accountId, path) {
@@ -816,6 +852,34 @@ const make = Effect.gen(function* () {
           }
         }),
       );
+    },
+  );
+  const spamSession = (accountId: MailAccountId) => {
+    const imap = live.get(accountId)?.imap;
+    return imap?.usable && imap.roles
+      ? Effect.succeed({ imap, roles: imap.roles })
+      : Effect.fail(unavailable("Connect this mail account and try again."));
+  };
+  const moveToSpam: MailSync["Service"]["moveToSpam"] = Effect.fn("MailSync.moveToSpam")(
+    function* (accountId, sources) {
+      const { imap, roles } = yield* spamSession(accountId);
+      return yield* accountLock.withLock(
+        accountId,
+        Effect.promise(() => moveToSpamOn(imap, roles, sources)),
+      );
+    },
+  );
+  const restoreSpam: MailSync["Service"]["restoreSpam"] = Effect.fn("MailSync.restoreSpam")(
+    function* (accountId, spam) {
+      const { imap, roles } = yield* spamSession(accountId);
+      const restored = yield* accountLock
+        .withLock(
+          accountId,
+          promise(() => restoreFromSpam(imap, roles, spam)),
+        )
+        .pipe(Effect.mapError((error) => unavailable(error.detail)));
+      yield* wake(accountId);
+      return restored;
     },
   );
   const searchGmail: MailSync["Service"]["searchGmail"] = Effect.fn("MailSync.searchGmail")(
@@ -892,8 +956,11 @@ const make = Effect.gen(function* () {
     enqueue,
     getMessageBody,
     getAttachments,
+    getUnsubscribeSource,
     searchGmail,
     setLabel,
+    moveToSpam,
+    restoreSpam,
     openFolder,
   });
 });

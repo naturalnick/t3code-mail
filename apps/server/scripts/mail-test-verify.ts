@@ -15,6 +15,7 @@ import * as MailEngine from "../src/mail/MailEngine.ts";
 import * as MailService from "../src/mail/MailService.ts";
 import * as MailStore from "../src/mail/MailStore.ts";
 import * as MailSync from "../src/mail/MailSync.ts";
+import * as MailUnsubscribeTransport from "../src/mail/MailUnsubscribeTransport.ts";
 import * as ThreadLaunchService from "../src/orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../src/orchestration-v2/ThreadManagementService.ts";
 import * as Sqlite from "../src/persistence/Sqlite.ts";
@@ -192,6 +193,11 @@ export async function verifyGreenMail(input: {
           MailService.layer.pipe(
             Layer.provide(Layer.mock(EventSink.EventSinkV2)({})),
             Layer.provide(MailSync.layer),
+            Layer.provide(
+              Layer.mock(MailUnsubscribeTransport.MailUnsubscribeTransport)({
+                resolveTxt: async () => [],
+              }),
+            ),
             Layer.provide(MailEngine.layer),
             Layer.provide(MailCredentials.layerMemory),
             Layer.provideMerge(MailStore.layerMemory(dir)),

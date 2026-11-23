@@ -26,7 +26,12 @@ export function useMailIntentPrefetch(environmentId: EnvironmentId) {
   const [threadId, setThreadId] = useState<MailThreadId | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const detail = useEnvironmentQuery(
-    threadId === null ? null : mailEnvironment.thread({ environmentId, input: { threadId } }),
+    threadId === null
+      ? null
+      : mailEnvironment.thread({
+          environmentId,
+          input: { threadId, includeSpamAndUnsubscribe: true },
+        }),
   ).data;
   useEnvironmentQuery(
     detail === null || detail.thread.id !== threadId

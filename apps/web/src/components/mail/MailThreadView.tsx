@@ -423,7 +423,7 @@ export function MailThreadView({
   const gt = useGT();
   const resolve = useMessages();
   const query = useEnvironmentQuery(
-    mailEnvironment.thread({ environmentId, input: { threadId } }),
+    mailEnvironment.thread({ environmentId, input: { threadId, includeSpamAndUnsubscribe: true } }),
     resolve,
   );
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
@@ -575,6 +575,8 @@ export function MailThreadView({
           onOpenRule={() => onRuleOpenChange(true)}
           canReply={canReply && replyTarget !== null}
           canReplyAll={replyTarget !== null && hasOtherRecipients(replyTarget, mine)}
+          supportsSpam={view?.status.capabilities?.spam === true}
+          canUnsubscribe={detail?.canUnsubscribe ?? false}
           onCompose={(mode) =>
             replyTarget && openCompose({ mode, targetId: replyTarget.id, draft: null })
           }

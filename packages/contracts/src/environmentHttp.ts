@@ -71,7 +71,7 @@ import {
   EnvironmentSpeechStatus,
   EnvironmentSpeechTranscriptionResult,
 } from "./speech.ts";
-import { MailAttachmentInput, MailError } from "./mail.ts";
+import { MailAttachmentInput, MailDraftFile, MailError, MailUploadDraftFileInput } from "./mail.ts";
 import { PeerLinkClientPairingCredential, PeerLinkClientPairingRequest } from "./peerLink.ts";
 import { SecretReference } from "./secretReference.ts";
 import {
@@ -832,14 +832,30 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-class EnvironmentMailHttpApi extends HttpApiGroup.make("mail").add(
-  HttpApiEndpoint.post("attachment", "/api/mail/attachment", {
-    headers: OptionalBearerHeaders,
-    payload: MailAttachmentInput,
-    success: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
-    error: [...EnvironmentScopedOperationErrors, MailError],
-  }).middleware(EnvironmentAuthenticatedAuth),
+export class EnvironmentMailUploadBodyLimit extends HttpApiMiddleware.Service<EnvironmentMailUploadBodyLimit>()(
+  "EnvironmentMailUploadBodyLimit",
 ) {}
+
+export class EnvironmentMailHttpApi extends HttpApiGroup.make("mail")
+  .add(
+    HttpApiEndpoint.post("attachment", "/api/mail/attachment", {
+      headers: OptionalBearerHeaders,
+      payload: MailAttachmentInput,
+      success: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      error: [...EnvironmentScopedOperationErrors, MailError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("uploadDraftFile", "/api/mail/draft-file", {
+      headers: OptionalBearerHeaders,
+      query: MailUploadDraftFileInput,
+      payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      success: MailDraftFile,
+      error: [...EnvironmentScopedOperationErrors, MailError],
+    })
+      .middleware(EnvironmentMailUploadBodyLimit)
+      .middleware(EnvironmentAuthenticatedAuth),
+  ) {}
 
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {

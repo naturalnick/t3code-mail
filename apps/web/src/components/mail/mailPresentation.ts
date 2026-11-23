@@ -51,6 +51,10 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "delete":
       if (action.reason === "sign_in_code") return resolve(msg("Sign-in code moved to Trash"));
       return resolve(msg("Moved to Trash"));
+    case "spam":
+      return resolve(msg("Marked as spam"));
+    case "unsubscribe":
+      return resolve(msg("Unsubscribed", { $context: "email action log" }));
     case "wait_for_reply":
       return resolve(msg("Waiting for reply"));
     case "send":

@@ -35,11 +35,17 @@ A thread reads oldest first. The newest and unread messages are open; select a c
 
 Select an attachment beneath an open message to preview a PDF, Office document (.docx, .xlsx, .pptx), image, text, audio, or video file. Use the download button to save a copy. Other file types download when selected. Mail retrieves the file from your connected mailbox when you open or save it, with a limit of 50 MiB per file.
 
-Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Turn off AI for this sender**, mail rules and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation, or **Restore** under **Trash** in the sidebar, to bring it back to your inbox. Trash lists what you deleted in Mail during the last 30 days.
+Use **Select emails** beside **Inbox** to mark several conversations read or unread, apply or remove a label shared by their accounts, or move them to Trash. Choose the selection count to see the actions.
+
+Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Turn off AI for this sender**, mail rules, **Mark as spam** and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation, or **Restore** under **Trash** in the sidebar, to bring it back to your inbox. Trash lists what you deleted in Mail during the last 30 days. To move a conversation to your provider’s Junk folder, choose **Mark as spam** while connected. Send or discard any open draft first. Choose **Spam → Not spam** to return it to Inbox. The Spam list shows conversations you marked here in the last 30 days.
+
+Choose **… → Unsubscribe…** on a mailing-list email to see the option the sender offers. Confirm to send a verified one-click request, review and send an unsubscribe email, or open the sender’s unsubscribe page. If a request fails and the sender provided a website, you can open it from the dialog.
 
 ## Write a new email
 
 Choose **New email** at the top of the Mail sidebar, or use the **New thread** shortcut while in Mail. Mail saves it to **Drafts** as you type, so you can leave and come back to it. Choose **Chat** to have your mail model help write it; edits the chat makes appear in the email, and only you can send it. With more than one account, choose the sending address under **From**.
+
+In any new email, reply or forward, choose **Bcc** to add recipients the others won't see, and **Attach files** (the paperclip) to add files. Attachments stay with the draft when you reopen it, and together with a forward's attachments can total up to 18 MB.
 
 **Sent** in the sidebar lists conversations you've written in, newest first. A sent email that asks a question waits in **Working** for the answer, and the reply brings it back to your inbox.
 

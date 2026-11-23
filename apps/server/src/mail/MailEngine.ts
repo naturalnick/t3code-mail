@@ -239,6 +239,7 @@ const make = Effect.gen(function* () {
     );
     return {
       accounts: withCounts,
+      capabilities: { spam: true, draftAttachments: true, bcc: true },
       settings: yield* settings,
       usage: yield* usage,
       recap: yield* recap,
@@ -405,6 +406,7 @@ const make = Effect.gen(function* () {
         replyTo: message.replyTo,
         to: message.to,
         cc: message.cc,
+        bcc: outgoing ? message.bcc : undefined,
         subject: message.subject,
         date: message.date,
         inReplyTo: message.inReplyTo,

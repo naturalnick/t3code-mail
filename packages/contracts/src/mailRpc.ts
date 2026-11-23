@@ -48,6 +48,8 @@ import {
   MailThreadInput,
   MailThreadPage,
   MailUndoInput,
+  MailUnsubscribeInput,
+  MailUnsubscribeOptions,
   MailUpdateAccountInput,
   MailUpdateSettingsInput,
   MailWriteEmailMdInput,
@@ -84,6 +86,8 @@ export const MAIL_WS_METHODS = {
   mailDismissRecap: "mail.dismissRecap",
   mailSetSenderAi: "mail.setSenderAi",
   mailReviewExisting: "mail.reviewExisting",
+  mailUnsubscribeOptions: "mail.unsubscribeOptions",
+  mailUnsubscribe: "mail.unsubscribe",
 } as const;
 
 const error = Schema.Union([MailError, EnvironmentAuthorizationError]);
@@ -107,7 +111,10 @@ export const MailRpcs = [
     error,
   }),
   Rpc.make(MAIL_WS_METHODS.mailGetThread, {
-    payload: MailThreadInput,
+    payload: MailThreadInput.mapFields((fields) => ({
+      ...fields,
+      includeSpamAndUnsubscribe: Schema.optionalKey(Schema.Boolean),
+    })),
     success: MailThreadDetail,
     error,
   }),
@@ -213,6 +220,12 @@ export const MailRpcs = [
   Rpc.make(MAIL_WS_METHODS.mailDismissRecap, { payload: MailDismissRecapInput, error }),
   Rpc.make(MAIL_WS_METHODS.mailSetSenderAi, { payload: MailSetSenderAiInput, error }),
   Rpc.make(MAIL_WS_METHODS.mailReviewExisting, { payload: MailReviewExistingInput, error }),
+  Rpc.make(MAIL_WS_METHODS.mailUnsubscribeOptions, {
+    payload: MailThreadInput,
+    success: Schema.NullOr(MailUnsubscribeOptions),
+    error,
+  }),
+  Rpc.make(MAIL_WS_METHODS.mailUnsubscribe, { payload: MailUnsubscribeInput, error }),
 ] as const;
 
 /** Reading mail is reading the environment's data. */
@@ -243,6 +256,9 @@ export const MAIL_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailSyncNow]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailDismissRecap]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailSeedVoice]: AuthOrchestrationOperateScope,
+  // Reading the options fetches the message and looks up the sender's DKIM key.
+  [MAIL_WS_METHODS.mailUnsubscribeOptions]: AuthOrchestrationOperateScope,
+  [MAIL_WS_METHODS.mailUnsubscribe]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailAddAccount]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailUpdateAccount]: AuthSettingsWriteScope,
   [MAIL_WS_METHODS.mailRemoveAccount]: AuthSettingsWriteScope,

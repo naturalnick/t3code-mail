@@ -7,6 +7,7 @@ import {
   type MailAttachment,
   type MailCategory,
   type MailDraft,
+  type MailDraftFile,
   type MailGuardrail,
   type MailMessage,
   type MailListLabeledInput,
@@ -84,7 +85,10 @@ const indexMessageLabels = `INSERT OR IGNORE INTO mail_message_labels(message_id
   WHERE NEW.removed = 0 AND value != '' AND substr(value, 1, 1) != char(92)`;
 
 // Each entry runs once, in order; `PRAGMA user_version` records how many ran.
-const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
+type MailMigration =
+  | readonly string[]
+  | ((sql: SqlClient.SqlClient) => Effect.Effect<void, SqlError.SqlError>);
+const MIGRATIONS: ReadonlyArray<MailMigration> = [
   [
     `CREATE TABLE mail_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
     `CREATE TABLE mail_accounts (
@@ -426,6 +430,29 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       WHEN NEW.seen = 1 AND OLD.seen = 0 AND NEW.code_received_at IS NOT NULL AND NEW.code_read_at IS NULL
       BEGIN UPDATE mail_messages SET code_read_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE id = NEW.id; END`,
   ],
+  [
+    `ALTER TABLE mail_drafts ADD COLUMN bcc_json TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE mail_drafts ADD COLUMN files_json TEXT NOT NULL DEFAULT '[]'`,
+    // Uploaded before a draft names them, so a file outlives the draft until pruned; undo can bring it back.
+    `CREATE TABLE mail_draft_files (id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+      content BLOB NOT NULL, created_at TEXT NOT NULL)`,
+  ],
+  (sql) =>
+    Effect.gen(function* () {
+      // Some development databases already have the file metadata columns at version 19.
+      const columns = yield* sql<{ name: string }>`PRAGMA table_info(mail_draft_files)`;
+      if (columns.some(({ name }) => name === "filename")) return;
+      yield* sql`ALTER TABLE mail_draft_files ADD COLUMN filename TEXT NOT NULL DEFAULT 'attachment'`;
+      yield* sql`ALTER TABLE mail_draft_files ADD COLUMN content_type TEXT NOT NULL DEFAULT 'application/octet-stream'`;
+      yield* sql`ALTER TABLE mail_draft_files ADD COLUMN size INTEGER NOT NULL DEFAULT 0`;
+      yield* sql`UPDATE mail_draft_files SET size = length(content)`;
+      yield* sql`UPDATE mail_draft_files AS f SET
+      filename = COALESCE(json_extract(item.value, '$.filename'), f.filename),
+      content_type = COALESCE(json_extract(item.value, '$.contentType'), f.content_type)
+      FROM mail_drafts AS d, json_each(d.files_json) AS item
+      WHERE json_extract(item.value, '$.id') = f.id AND d.account_id = f.account_id`;
+    }),
+  [`ALTER TABLE mail_messages ADD COLUMN bcc_json TEXT`],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -443,6 +470,7 @@ export interface MessageInsert {
   readonly replyTo?: ReadonlyArray<MailAddress> | null;
   readonly to: ReadonlyArray<MailAddress>;
   readonly cc: ReadonlyArray<MailAddress>;
+  readonly bcc?: ReadonlyArray<MailAddress> | undefined;
   readonly subject: string;
   readonly date: string;
   readonly inReplyTo: string | null;
@@ -580,6 +608,16 @@ export type ThreadStatePatch = Partial<
 export const MessageTarget = Schema.Struct({ id: Schema.Int, identity: Schema.String });
 export type MessageTarget = typeof MessageTarget.Type;
 
+/** Where reported spam landed, so Not spam can find mail without a Message-ID (UIDPLUS). */
+export interface SpamCopies {
+  readonly folder: string;
+  readonly uidValidity: string | null;
+  readonly copies: ReadonlyArray<{
+    readonly uid: number | null;
+    readonly messageId: string | null;
+  }>;
+}
+
 export interface MirrorUndo {
   readonly kind: "archive" | "unarchive";
   readonly targets: ReadonlyArray<MessageTarget>;
@@ -592,7 +630,17 @@ export interface ThreadChange {
 }
 type DraftContent = Pick<
   DraftRecord,
-  "body" | "to" | "cc" | "subject" | "status" | "error" | "messageId" | "mode" | "targetMessageId"
+  | "body"
+  | "to"
+  | "cc"
+  | "bcc"
+  | "files"
+  | "subject"
+  | "status"
+  | "error"
+  | "messageId"
+  | "mode"
+  | "targetMessageId"
 >;
 
 export interface ActionRecord {
@@ -630,6 +678,7 @@ export interface ActionRecord {
       /** Kept so Trash can name the email after its thread is gone. */
       readonly subject?: string;
       readonly from?: string;
+      readonly spam?: SpamCopies;
     };
   } | null;
   readonly undoneAt: string | null;
@@ -775,6 +824,7 @@ const toMessage = (row: Row): StoredMessage => ({
   replyTo: json<ReadonlyArray<MailAddress> | null>(row.reply_to_json, null),
   to: json<ReadonlyArray<MailAddress>>(row.to_json, []),
   cc: json<ReadonlyArray<MailAddress>>(row.cc_json, []),
+  bcc: json<ReadonlyArray<MailAddress>>(row.bcc_json, []),
   subject: str(row.subject),
   date: str(row.date),
   inReplyTo: strOrNull(row.in_reply_to),
@@ -802,6 +852,7 @@ export function messageView(message: StoredMessage, clean: (text: string) => str
     replyTo: message.replyTo ?? [],
     to: message.to,
     cc: message.cc,
+    ...(message.outgoing && message.bcc?.length ? { bcc: message.bcc } : {}),
     date: message.date,
     subject: message.subject,
     text: message.body === null ? null : clean(message.body),
@@ -857,6 +908,8 @@ const toDraft = (row: Row): DraftRecord => ({
   accountId: MailAccountId.make(str(row.account_id)),
   to: json<ReadonlyArray<string>>(row.to_json, []),
   cc: json<ReadonlyArray<string>>(row.cc_json, []),
+  bcc: json<ReadonlyArray<string>>(row.bcc_json, []),
+  files: json<ReadonlyArray<MailDraftFile>>(row.files_json, []),
   subject: str(row.subject),
   body: str(row.body),
   origin: str(row.origin) as MailActor,
@@ -905,7 +958,9 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     for (let version = current; version < MIGRATIONS.length; version++) {
       yield* sql.withTransaction(
         Effect.gen(function* () {
-          for (const statement of MIGRATIONS[version]!) yield* sql.unsafe(statement);
+          const migration = MIGRATIONS[version]!;
+          if (typeof migration === "function") yield* migration(sql);
+          else for (const statement of migration) yield* sql.unsafe(statement);
           yield* sql.unsafe(`PRAGMA user_version = ${version + 1}`);
         }),
       );
@@ -997,6 +1052,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         yield* sql`DELETE FROM mail_search WHERE rowid IN (SELECT id FROM mail_messages WHERE account_id = ${id})`;
         yield* sql`DELETE FROM mail_messages WHERE account_id = ${id}`;
         yield* sql`DELETE FROM mail_drafts WHERE account_id = ${id}`;
+        yield* sql`DELETE FROM mail_draft_files WHERE account_id = ${id}`;
         // Thread IDs retain the account prefix even after their last message was expunged.
         const prefix = `${id}:`;
         // Trust is shared. Keep a key when another inbox uses it or a global setting names it.
@@ -1101,12 +1157,14 @@ const makeStore = (sql: SqlClient.SqlClient) => {
 
   /** Inserts or refreshes one synced message. Returns whether it was new. */
   const upsertMessage = Effect.fnUntraced(function* (message: MessageInsert) {
+    const bcc = message.outgoing && message.bcc?.length ? toJson(message.bcc) : null;
     const existing = yield* sql<{ id: number }>`SELECT id FROM mail_messages
         WHERE account_id = ${message.accountId} AND mailbox = ${message.mailbox} AND uid = ${message.uid}`;
     if (existing[0]) {
       yield* sql`UPDATE mail_messages SET seen = ${message.seen ? 1 : 0},
             labels = ${message.labels === null ? null : toJson([...message.labels].sort())},
             in_inbox = ${message.inInbox ? 1 : 0}, removed = 0,
+            bcc_json = COALESCE(${bcc}, bcc_json),
             reply_to_json = COALESCE(reply_to_json, ${message.replyTo == null ? null : toJson(message.replyTo)})
           WHERE id = ${existing[0].id}`;
       return { id: num(existing[0].id), inserted: false };
@@ -1121,7 +1179,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     // The server's copy of a message sent from here takes over the local row, body and all.
     if (message.messageId !== null && message.outgoing) {
       const local = yield* sql<{ id: number }>`UPDATE mail_messages
-          SET mailbox = ${message.mailbox}, uid = ${message.uid},
+          SET mailbox = ${message.mailbox}, uid = ${message.uid}, bcc_json = COALESCE(${bcc}, bcc_json),
             labels = ${message.labels === null ? null : toJson([...message.labels].sort())},
             in_inbox = ${message.inInbox ? 1 : 0}
           WHERE account_id = ${message.accountId} AND mailbox = '__local'
@@ -1134,7 +1192,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     }>`INSERT INTO mail_messages (account_id, mailbox, uid, message_id,
           thread_id, labels, in_inbox, from_name, from_address, to_json, cc_json, subject, date,
           in_reply_to, references_json, seen, outgoing, size, attachments_json, list_unsubscribe,
-          list_id, precedence, auto_submitted, calendar, text_part, body, body_state, reply_to_json)
+          list_id, precedence, auto_submitted, calendar, text_part, body, body_state, reply_to_json, bcc_json)
         VALUES (${message.accountId}, ${message.mailbox}, ${message.uid}, ${message.messageId},
           ${message.threadId}, ${message.labels === null ? null : toJson([...message.labels].sort())},
           ${message.inInbox ? 1 : 0}, ${message.from.name}, ${message.from.address},
@@ -1146,7 +1204,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
           ${message.calendar ? 1 : 0},
           ${message.textPart === null ? null : toJson(message.textPart)}, NULL,
           ${message.textPart === null ? "unavailable" : "pending"},
-          ${message.replyTo == null ? null : toJson(message.replyTo)})
+          ${message.replyTo == null ? null : toJson(message.replyTo)}, ${bcc})
         RETURNING id`;
     const id = num(rows[0]?.id);
     yield* sql`INSERT INTO mail_search (rowid, subject, sender, body)
@@ -1393,7 +1451,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   /** Recomputes the thread's message-derived columns; state columns are left alone. */
   const refreshThreadAggregate = Effect.fnUntraced(function* (id: MailThreadId) {
     const rows = yield* sql<Row>`WITH ranked AS (
-        SELECT id, date, subject, from_name, from_address, to_json, cc_json, outgoing, seen, in_inbox,
+        SELECT id, date, subject, from_name, from_address, to_json,
+          COALESCE(NULLIF(cc_json, '[]'), bcc_json) AS cc_json, outgoing, seen, in_inbox,
           row_number() OVER (PARTITION BY COALESCE(message_id, id) ORDER BY date, id) AS copy
         FROM mail_messages WHERE thread_id = ${id} AND removed = 0
       ), messages AS (SELECT * FROM ranked WHERE copy = 1),
@@ -1474,6 +1533,32 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       FROM mail_messages m LEFT JOIN mail_mailboxes b ON b.account_id = m.account_id AND b.path = m.mailbox
       WHERE m.thread_id = ${threadId} AND m.removed = 0 AND m.mailbox != '__local'
         AND COALESCE(m.moved_uid_validity, b.uid_validity) IS NOT NULL`;
+
+  /** Every message still here; a null `uidValidity` has no server copy this side knows of yet. */
+  const spamSources = (threadId: MailThreadId) =>
+    sql<{
+      id: number;
+      mailbox: string;
+      uid: number;
+      uidValidity: string | null;
+      messageId: string | null;
+    }>`SELECT m.id, m.mailbox, m.uid, m.message_id AS messageId,
+        CAST(COALESCE(m.moved_uid_validity, b.uid_validity) AS TEXT) AS uidValidity
+      FROM mail_messages m LEFT JOIN mail_mailboxes b ON b.account_id = m.account_id AND b.path = m.mailbox
+      WHERE m.thread_id = ${threadId} AND m.removed = 0`;
+
+  /** Removes some of a thread's messages; returns the thread when none are left. */
+  const removeMessages = Effect.fn("MailStore.removeMessages")(function* (
+    threadId: MailThreadId,
+    ids: ReadonlyArray<number>,
+  ) {
+    if (ids.length === 0) return [];
+    yield* sql`UPDATE mail_messages SET removed = 1, in_inbox = 0
+      WHERE thread_id = ${threadId} AND removed = 0 AND id IN ${sql.in(ids)}`;
+    const removed = yield* deleteExpungedThreads([threadId]);
+    if (removed.length === 0) yield* refreshThreadAggregate(threadId);
+    return removed;
+  });
 
   /** Removes the thread here at once; messages restored later arrive as new mail. */
   const removeThread = Effect.fn("MailStore.removeThread")(function* (threadId: MailThreadId) {
@@ -1624,14 +1709,16 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       })),
     );
 
-  /** Deletes made here and not undone since `since`, newest first. */
+  /** Deletes or spam reports made here and not undone since `since`, newest first. */
   const trashPage = (input: {
+    readonly kind: "delete" | "spam";
     readonly beforeId: number | undefined;
     readonly since: string;
     readonly limit: number;
   }) =>
-    sql<Row>`SELECT * FROM mail_actions WHERE kind = 'delete' AND undone_at IS NULL
-        AND json_array_length(undo_json, '$.trash.messageIds') > 0 AND at >= ${input.since}
+    sql<Row>`SELECT * FROM mail_actions WHERE kind = ${input.kind} AND undone_at IS NULL
+        AND (json_array_length(undo_json, '$.trash.messageIds') > 0
+          OR json_array_length(undo_json, '$.trash.spam.copies') > 0) AND at >= ${input.since}
         ${input.beforeId === undefined ? sql`` : sql`AND id < ${input.beforeId}`}
       ORDER BY id DESC LIMIT ${input.limit + 1}`.pipe(
       Effect.map((rows) => ({
@@ -1806,6 +1893,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const markActionUndone = (id: number, at: string) =>
     sql`UPDATE mail_actions SET undone_at = ${at} WHERE id = ${id}`.pipe(Effect.asVoid);
   const listActions = (input: {
+    readonly includeSpamAndUnsubscribe?: boolean | undefined;
     readonly beforeId: number | undefined;
     readonly actor: MailActor | undefined;
     readonly automatic?: boolean | undefined;
@@ -1813,6 +1901,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     readonly limit: number;
   }) =>
     sql<Row>`SELECT * FROM mail_action_history WHERE 1 = 1
+        ${input.includeSpamAndUnsubscribe === false ? sql`AND kind NOT IN ('spam', 'unsubscribe')` : sql``}
         ${input.beforeId === undefined ? sql`` : sql`AND id < ${input.beforeId}`}
         ${input.actor === undefined ? sql`` : sql`AND actor = ${input.actor}`}
         ${input.automatic ? sql`AND (actor = 'rule' OR (actor = 'mail' AND kind = 'delete' AND reason = 'sign_in_code'))` : sql``}
@@ -1896,16 +1985,17 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     );
   /** Saves an edit. Every save bumps the revision, so a send approves exactly one version. */
   const saveDraftContent = (draft: DraftRecord) =>
-    sql<Row>`INSERT INTO mail_drafts (id, thread_id, account_id, to_json, cc_json, subject, body,
-        origin, original_body, status, error, message_id, revision, updated_at, sent_at, mode,
-        target_message)
+    sql<Row>`INSERT INTO mail_drafts (id, thread_id, account_id, to_json, cc_json, bcc_json,
+        files_json, subject, body, origin, original_body, status, error, message_id, revision,
+        updated_at, sent_at, mode, target_message)
       VALUES (${draft.id}, ${draft.threadId}, ${draft.accountId}, ${toJson(draft.to)},
-        ${toJson(draft.cc)}, ${draft.subject}, ${draft.body}, ${draft.origin},
+        ${toJson(draft.cc)}, ${toJson(draft.bcc)}, ${toJson(draft.files)},
+        ${draft.subject}, ${draft.body}, ${draft.origin},
         ${draft.originalBody}, ${draft.status}, ${draft.error}, ${draft.messageId}, ${draft.revision},
         ${draft.updatedAt}, NULL, ${draft.mode},
         ${draft.targetMessageId === null ? null : Number(draft.targetMessageId)})
       ON CONFLICT (id) DO UPDATE SET to_json = excluded.to_json, cc_json = excluded.cc_json,
-        mode = excluded.mode, target_message = excluded.target_message,
+        bcc_json = excluded.bcc_json, files_json = excluded.files_json, mode = excluded.mode, target_message = excluded.target_message,
         subject = excluded.subject, body = excluded.body, status = excluded.status, error = excluded.error,
         message_id = excluded.message_id, revision = mail_drafts.revision + 1, updated_at = excluded.updated_at
       WHERE mail_drafts.status IN ('draft', 'failed')
@@ -1927,7 +2017,11 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       readonly at: string;
       readonly editSender?: string | null;
       readonly remaining?:
-        | { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> }
+        | {
+            readonly to: ReadonlyArray<string>;
+            readonly cc: ReadonlyArray<string>;
+            readonly bcc: ReadonlyArray<string>;
+          }
         | undefined;
     },
   ) =>
@@ -1935,7 +2029,7 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         ${
           result.remaining
             ? sql`to_json = ${toJson(result.remaining.to)}, cc_json = ${toJson(result.remaining.cc)},
-          message_id = NULL, revision = revision + 1,`
+          bcc_json = ${toJson(result.remaining.bcc)}, message_id = NULL, revision = revision + 1,`
             : sql``
         }
         updated_at = ${result.at}, sent_at = ${result.status === "sent" ? result.at : null},
@@ -1979,6 +2073,60 @@ const makeStore = (sql: SqlClient.SqlClient) => {
 
   const deleteDraft = (id: MailDraftId) =>
     sql`DELETE FROM mail_drafts WHERE id = ${id} AND status != 'sending'`.pipe(Effect.asVoid);
+
+  const insertDraftFile = (
+    file: MailDraftFile & { readonly accountId: MailAccountId; readonly content: Uint8Array },
+    at: string,
+  ) =>
+    sql`INSERT INTO mail_draft_files (id, account_id, filename, content_type, size, content, created_at)
+      VALUES (${file.id}, ${file.accountId}, ${file.filename}, ${file.contentType}, ${file.size},
+        ${file.content}, ${at})`.pipe(Effect.asVoid);
+  /** The files among `ids` this account uploaded that are still kept. */
+  const draftFiles = (accountId: MailAccountId, ids: ReadonlyArray<string>) =>
+    ids.length === 0
+      ? Effect.succeed(new Map<string, MailDraftFile>())
+      : sql<Row>`SELECT id, filename, content_type, size FROM mail_draft_files
+          WHERE account_id = ${accountId} AND id IN ${sql.in(ids)}`.pipe(
+          Effect.map(
+            (rows) =>
+              new Map(
+                rows.map((row): [string, MailDraftFile] => [
+                  str(row.id),
+                  {
+                    id: str(row.id),
+                    filename: str(row.filename),
+                    contentType: str(row.content_type),
+                    size: num(row.size),
+                  },
+                ]),
+              ),
+          ),
+        );
+  const draftFileContents = (accountId: MailAccountId, ids: ReadonlyArray<string>) =>
+    ids.length === 0
+      ? Effect.succeed(new Map<string, Uint8Array>())
+      : sql<{ id: string; content: Uint8Array }>`SELECT id, content FROM mail_draft_files
+          WHERE account_id = ${accountId} AND id IN ${sql.in(ids)}`.pipe(
+          Effect.map((rows) => new Map(rows.map((row) => [row.id, row.content]))),
+        );
+  // Discarding a draft removes its row, but Undo can still restore the files named in its history.
+  const retainedFileIds = sql`(
+    SELECT json_extract(f.value, '$.id') FROM mail_drafts d, json_each(d.files_json) f
+      WHERE d.status IN ('draft', 'failed', 'sending')
+    UNION ALL
+    SELECT json_extract(f.value, '$.id') FROM mail_actions a, json_each(a.undo_json, '$.discardedDraft.files') f
+      WHERE a.kind = 'draft' AND a.undone_at IS NULL
+    UNION ALL
+    SELECT json_extract(f.value, '$.id') FROM mail_action_history a, json_each(a.undo_json, '$.draft.before.files') f
+      WHERE a.kind = 'draft' AND a.undone_at IS NULL
+  )`;
+  const releaseDraftFiles = (draftId: MailDraftId) =>
+    sql`DELETE FROM mail_draft_files WHERE id IN (SELECT json_extract(f.value, '$.id')
+        FROM mail_drafts d, json_each(d.files_json) f WHERE d.id = ${draftId})
+      AND id NOT IN ${retainedFileIds}`.pipe(Effect.asVoid);
+  const pruneDraftFiles = (before: string) =>
+    sql`DELETE FROM mail_draft_files WHERE created_at < ${before}
+      AND id NOT IN ${retainedFileIds}`.pipe(Effect.asVoid);
 
   const insertUsage = (usage: {
     readonly at: string;
@@ -2071,6 +2219,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     markNewestUnread,
     undoMessagesUnread,
     serverLocations,
+    spamSources,
+    removeMessages,
     removeThread,
     setTriage,
     setChatThread,
@@ -2118,6 +2268,11 @@ const makeStore = (sql: SqlClient.SqlClient) => {
     recentReplyEdits,
     recoverInterruptedSends,
     deleteDraft,
+    insertDraftFile,
+    draftFiles,
+    draftFileContents,
+    releaseDraftFiles,
+    pruneDraftFiles,
     insertUsage,
     usageSince,
     enqueueOp,

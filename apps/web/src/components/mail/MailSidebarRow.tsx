@@ -17,6 +17,7 @@ import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime, formatShortTimestamp } from "../../timestampFormat";
 import { SnoozeMenuButton } from "../sidebar/SidebarThreadRow";
+import { CheckboxMark } from "../ui/checkbox";
 import { MenuItem } from "../ui/menu";
 import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -42,6 +43,9 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
   readonly thread: MailThreadRow;
   readonly isActive: boolean;
   readonly readerOpen: boolean;
+  readonly selected?: boolean | undefined;
+  readonly selectionBusy?: boolean;
+  readonly onToggleSelection?: (id: MailThreadRow["id"]) => void;
   readonly actions: ReturnType<typeof useMailActions>;
   /** The time to show instead of the latest message's, such as when it was sent. */
   readonly timestamp?: string;
@@ -92,7 +96,8 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
     );
   };
 
-  const hideRowActions = isNew || (props.readerOpen && !isMobile);
+  const selecting = props.selected !== undefined;
+  const hideRowActions = selecting || isNew || (props.readerOpen && !isMobile);
   const controls = hideRowActions ? null : settled ? (
     <Tooltip>
       <TooltipTrigger
@@ -173,25 +178,37 @@ export const MailSidebarRow = memo(function MailSidebarRow(props: {
         onFocus={() => onIntent?.(thread)}
         onContextMenu={onContextMenu ? (event) => onContextMenu(thread, event) : undefined}
         className={cn(
-          "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md px-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none",
-          isActive
+          "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md px-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-inset has-[input:focus-visible]:ring-ring",
+          (selecting ? props.selected : isActive)
             ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
             : recede
               ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
               : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
         )}
       >
-        <Link
-          className="absolute inset-0 z-[1] rounded-md focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none"
-          to="/mail/$mailThreadId"
-          params={{ mailThreadId: thread.id }}
-          aria-label={`${sender}: ${subject}`}
-          aria-current={isActive ? "page" : undefined}
-          onClick={() => {
-            if (isMobile) setOpenMobile(false);
-          }}
-        />
+        {selecting ? (
+          <input
+            type="checkbox"
+            className="absolute inset-0 z-[3] size-full cursor-pointer opacity-0"
+            aria-label={`${sender}: ${subject}`}
+            checked={props.selected}
+            disabled={props.selectionBusy}
+            onChange={() => props.onToggleSelection?.(thread.id)}
+          />
+        ) : (
+          <Link
+            className="absolute inset-0 z-[1] rounded-md focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none"
+            to="/mail/$mailThreadId"
+            params={{ mailThreadId: thread.id }}
+            aria-label={`${sender}: ${subject}`}
+            aria-current={isActive ? "page" : undefined}
+            onClick={() => {
+              if (isMobile) setOpenMobile(false);
+            }}
+          />
+        )}
         <div className="flex h-5 min-w-0 items-center gap-1.5">
+          {selecting && <CheckboxMark checked={props.selected === true} />}
           {unread ? (
             <span
               role="img"

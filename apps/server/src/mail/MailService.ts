@@ -10,8 +10,10 @@ import {
   type MailActor,
   type MailCategory,
   type MailDraft,
+  type MailDraftFile,
   MailDraftId,
   MailError,
+  MAIL_OUTGOING_FILE_BYTES,
   MailRule,
   mailSenderEntry,
   type MailReviewExistingInput,
@@ -26,6 +28,8 @@ import {
   type MailThreadDetail,
   MailThreadId,
   type MailThreadRow,
+  type MailUnsubscribeInput,
+  type MailUnsubscribeOptions,
   MessageId,
   type ModelSelection,
   ThreadId,
@@ -56,10 +60,12 @@ import type {
   MailThreadState,
   MailUpdateAccountInput,
   MailUpdateSettingsInput,
+  MailUploadDraftFileInput,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- session receipts need stable ids across server restarts.
 import * as NodeCrypto from "node:crypto";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
@@ -126,6 +132,8 @@ import {
   type TrustUndoEntry,
 } from "./mailTrust.ts";
 import { composeOutgoing, type ComposedFile } from "./mailCompose.ts";
+import { planUnsubscribe, UNSUBSCRIBE_SOURCE_MAX_BYTES } from "./listUnsubscribe.ts";
+import * as MailUnsubscribeTransport from "./MailUnsubscribeTransport.ts";
 import { buildRaw, classifySmtpError, sendRaw } from "./smtpSend.ts";
 
 type MailStreamEventType = MailStreamEvent;
@@ -160,12 +168,14 @@ function trustFacts(trust: {
   );
 }
 
-const sameRecipients = (
-  a: { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> },
-  b: { readonly to: ReadonlyArray<string>; readonly cc: ReadonlyArray<string> },
-) => {
-  const key = (draft: typeof a) =>
-    [...draft.to, ...draft.cc]
+type Recipients = {
+  readonly to: ReadonlyArray<string>;
+  readonly cc: ReadonlyArray<string>;
+  readonly bcc: ReadonlyArray<string>;
+};
+const sameRecipients = (a: Recipients, b: Recipients) => {
+  const key = (draft: Recipients) =>
+    [...draft.to, ...draft.cc, ...draft.bcc]
       .map((address) => address.toLowerCase())
       .toSorted()
       .join(",");
@@ -173,8 +183,22 @@ const sameRecipients = (
 };
 const DRAFT_CHANGED = "The draft changed after you reviewed it. Review it again before sending.";
 const MAYBE_SENT = "It may have been sent; check Sent before sending again.";
-/** Leaves room under the common 25 MB limit for base64 encoding. */
-const FORWARD_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+const FILE_GONE = "An attached file is no longer available. Remove it and attach it again.";
+const TOO_LARGE = `Attachments can total at most ${MAIL_OUTGOING_FILE_BYTES / 1024 / 1024} MB. Share a link to larger files instead.`;
+
+/** A plain file name: no folders, control characters or header-breaking length. */
+function cleanFilename(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? "";
+  const clean = base
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 200);
+  return clean || "attachment";
+}
+const cleanContentType = (type: string | undefined) =>
+  type && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(type.trim())
+    ? type.trim().toLowerCase()
+    : "application/octet-stream";
 
 const MAIL_CATEGORIES = new Set<MailCategory>([
   "person",
@@ -289,11 +313,20 @@ export class MailService extends Context.Service<
     readonly getMessageBody: (
       input: MailMessageBodyInput,
     ) => Effect.Effect<MailFormattedBody | null, MailError>;
-    readonly getThread: (threadId: MailThreadId) => Effect.Effect<MailThreadDetail, MailError>;
+    readonly getThread: (
+      threadId: MailThreadId,
+      includeSpamAndUnsubscribe?: boolean,
+    ) => Effect.Effect<MailThreadDetail, MailError>;
     readonly listSettled: (input: MailListSettledInput) => Effect.Effect<MailThreadPage, MailError>;
     readonly listLabeled: (input: MailListLabeledInput) => Effect.Effect<MailThreadPage, MailError>;
     readonly listSent: (input: MailListSentInput) => Effect.Effect<MailThreadPage, MailError>;
     readonly listTrash: (input: MailListTrashInput) => Effect.Effect<MailActionPage, MailError>;
+    /** What the sender's List-Unsubscribe offers; null when the email has none Mail can use. */
+    readonly unsubscribeOptions: (
+      threadId: MailThreadId,
+    ) => Effect.Effect<MailUnsubscribeOptions | null, MailError>;
+    /** Asks the sender to stop, by one-click POST or email. Only the user starts this. */
+    readonly unsubscribe: (input: MailUnsubscribeInput) => Effect.Effect<void, MailError>;
     /** Sidebar order: oldest entry first, except Settled, newest first. */
     readonly listThreads: (
       state: MailThreadState,
@@ -327,6 +360,11 @@ export class MailService extends Context.Service<
       expectedRevision?: number,
     ) => Effect.Effect<{ readonly actionId: number | null }, MailError>;
     readonly sendDraft: (input: MailSendDraftInput) => Effect.Effect<MailDraft, MailError>;
+    /** Keeps a file for a draft of this account; saving the draft with its id attaches it. */
+    readonly uploadDraftFile: (
+      input: MailUploadDraftFileInput,
+      content: Uint8Array,
+    ) => Effect.Effect<MailDraftFile, MailError>;
     readonly openSession: (
       input: MailOpenSessionInput,
     ) => Effect.Effect<MailOpenSessionResult, MailError>;
@@ -376,6 +414,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
+  const unsubscribeTransport = yield* MailUnsubscribeTransport.MailUnsubscribeTransport;
   // A send can write messages and learned edits after SMTP returns. Removal must wait for it.
   const accountLock = yield* TxReentrantLock.make();
   const changeAccounts = <A, E, R>(operation: Effect.Effect<A, E, R>) =>
@@ -518,7 +557,7 @@ const make = Effect.gen(function* () {
 
   const actOne = Effect.fn("MailService.actOne")(function* (
     thread: MailStore.ThreadRecord,
-    action: Exclude<MailThreadAction, { type: "label" }>,
+    action: Exclude<MailThreadAction, { type: "label" | "spam" }>,
     actor: MailActorInfo,
     now: string,
   ) {
@@ -732,7 +771,7 @@ const make = Effect.gen(function* () {
     function* (
       input: {
         threadIds: MailActInput["threadIds"];
-        action: Exclude<MailThreadAction, { type: "label" }>;
+        action: Exclude<MailThreadAction, { type: "label" | "spam" }>;
       },
       actor: MailActorInfo,
     ) {
@@ -774,8 +813,116 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
+  const recordSpam = Effect.fn("MailService.recordSpam")(
+    function* (
+      thread: MailStore.ThreadRecord,
+      actor: MailActorInfo,
+      moved: ReadonlyArray<number>,
+      spam: MailStore.SpamCopies,
+    ) {
+      const actionId = yield* recordThreadAction(
+        thread,
+        {},
+        {
+          at: yield* nowIso,
+          actor: actor.actor,
+          actorLabel: actor.label ?? null,
+          kind: "spam",
+          reason: null,
+        },
+        {
+          trash: {
+            accountId: thread.accountId,
+            messageIds: spam.copies.flatMap(({ messageId }) => (messageId ? [messageId] : [])),
+            subject: thread.subject,
+            from: thread.fromName || thread.fromAddress,
+            spam,
+          },
+        },
+      );
+      const removed = yield* store.removeMessages(thread.id, moved);
+      return { actionId, removed };
+    },
+    store.transaction,
+    commit,
+    (effect, thread) =>
+      effect.pipe(
+        Effect.tap(({ removed }) =>
+          removed.length > 0 ? engine.publishRemoved(removed) : engine.publishThreads([thread.id]),
+        ),
+      ),
+  );
+
+  /** Moves on the server first, so the email leaves here only once its messages are in spam. */
+  const reportSpam = Effect.fn("MailService.reportSpam")(
+    function* (threadIds: MailActInput["threadIds"], actor: MailActorInfo) {
+      const threads = yield* store.getThreads(threadIds);
+      if (threads.length === 0) return yield* notFound("email");
+      for (const thread of threads) {
+        if ((yield* store.draftsForThread(thread.id)).some((draft) => draft.status !== "sent"))
+          return yield* invalid("Send or discard the draft in this email before reporting spam.");
+      }
+      const actionIds: Array<number> = [];
+      for (const thread of threads) {
+        // A new email has nothing on the server to report.
+        if (thread.messageCount === 0) continue;
+        const rows = yield* store.spamSources(thread.id);
+        const synced = rows.filter((row) => row.mailbox !== "__local");
+        const sources = synced.flatMap(({ uidValidity, ...row }) =>
+          uidValidity === null ? [] : [{ ...row, uidValidity }],
+        );
+        const unsynced = sources.length < rows.length;
+        const syncing = "This email hasn't finished syncing. Try again in a moment.";
+        if (sources.length === 0) return yield* invalid(syncing);
+        const { moved, spam, failure } = yield* sync.moveToSpam(thread.accountId, sources);
+        const complete = failure === null && !unsynced && moved.length === sources.length;
+        if (moved.length > 0) {
+          const { actionId } = yield* recordSpam(thread, actor, moved, spam);
+          if (actionId !== null) actionIds.push(actionId);
+          yield* engine.publishStatus;
+        }
+        if (complete) continue;
+        const detail = failure?.detail ?? syncing;
+        return yield* new MailError({
+          code: failure?.kind === "auth" ? "auth_failed" : failure ? "unavailable" : "invalid",
+          message:
+            moved.length === 0
+              ? `Could not move this email to spam. ${detail}`
+              : `Only part of this email moved to spam; the rest is still here. ${detail}`,
+        });
+      }
+      return { actionIds };
+    },
+    (operation) => TxReentrantLock.withReadLock(accountLock, operation),
+    sqlSafe,
+  );
+
+  /** Restores from the server first; the messages come back here through sync. */
+  const undoSpam = Effect.fn("MailService.undoSpam")(
+    function* (
+      action: MailStore.ActionRecord,
+      trash: { readonly accountId: MailAccountId; readonly spam: MailStore.SpamCopies },
+    ) {
+      const restored = yield* sync.restoreSpam(trash.accountId, trash.spam);
+      yield* store.markActionUndone(action.id, yield* nowIso).pipe(commit);
+      yield* engine.publishStatus;
+      const missing = trash.spam.copies.length - restored;
+      if (missing > 0)
+        return yield* new MailError({
+          code: "unavailable",
+          message:
+            restored === 0
+              ? "This email is no longer in spam on the mail server."
+              : "Part of this email is no longer in spam on the mail server.",
+        });
+    },
+    (operation) => TxReentrantLock.withReadLock(accountLock, operation),
+    sqlSafe,
+  );
+
   const act: MailService["Service"]["act"] = (input, actor) => {
     const { action, threadIds } = input;
+    if (action.type === "spam") return reportSpam(threadIds, actor);
     if (action.type !== "label") return changeState({ action, threadIds }, actor);
     return Effect.forEach(threadIds, (id) => sync.setLabel(id, action.name, action.apply), {
       discard: true,
@@ -784,8 +931,21 @@ const make = Effect.gen(function* () {
 
   const staleUndo = () => invalid("This item changed after that action.");
 
-  const undo: MailService["Service"]["undo"] = Effect.fn("MailService.undo")(
-    function* (actionId, permissions) {
+  const undo: MailService["Service"]["undo"] = (actionId, permissions) =>
+    store.getAction(actionId).pipe(
+      sqlSafe,
+      Effect.flatMap((action) => {
+        if (action?.kind !== "spam" || action.undoneAt !== null)
+          return undoAction(actionId, permissions);
+        const trash = action.undo?.trash;
+        return trash?.spam
+          ? undoSpam(action, { accountId: trash.accountId, spam: trash.spam })
+          : Effect.fail(invalid("That action cannot be undone."));
+      }),
+    );
+
+  const undoAction = Effect.fn("MailService.undo")(
+    function* (actionId: number, permissions: Parameters<MailService["Service"]["undo"]>[1]) {
       const action = yield* store.getAction(actionId);
       if (action === null) return yield* notFound("action");
       const history = action.undo;
@@ -849,6 +1009,8 @@ const make = Effect.gen(function* () {
           // Discards recorded before drafts had a mode and target.
           mode: draft.mode ?? "reply",
           targetMessageId: draft.targetMessageId ?? null,
+          bcc: draft.bcc ?? [],
+          files: draft.files ?? [],
           revision: draft.revision + 1,
           updatedAt: now,
         });
@@ -940,6 +1102,7 @@ const make = Effect.gen(function* () {
       const page = yield* store.listActions({
         beforeId: input.beforeId,
         actor: input.actor,
+        includeSpamAndUnsubscribe: input.includeSpamAndUnsubscribe,
         automatic: input.automatic,
         threadId: undefined,
         limit: input.limit ?? 50,
@@ -962,7 +1125,7 @@ const make = Effect.gen(function* () {
   );
 
   const getThread: MailService["Service"]["getThread"] = Effect.fn("MailService.getThread")(
-    function* (threadId) {
+    function* (threadId, includeSpamAndUnsubscribe = true) {
       const thread = yield* store.getThread(threadId);
       if (thread === null) return yield* notFound("email");
       const messages = yield* store.threadMessages(threadId);
@@ -971,6 +1134,7 @@ const make = Effect.gen(function* () {
         ? yield* store.relatedThreads(thread.accountId, thread.fromAddress, threadId, 5)
         : [];
       const actions = yield* store.listActions({
+        includeSpamAndUnsubscribe,
         beforeId: undefined,
         actor: undefined,
         threadId,
@@ -1000,6 +1164,7 @@ const make = Effect.gen(function* () {
                 source: thread.verdict.source === "user_rule" ? "rule" : thread.verdict.source,
               },
         kind: thread.verdict?.kind ?? null,
+        canUnsubscribe: messages.some((message) => !message.outgoing && message.listUnsubscribe),
       } satisfies MailThreadDetail;
     },
     sqlSafe,
@@ -1041,8 +1206,9 @@ const make = Effect.gen(function* () {
     function* (input) {
       const now = yield* DateTime.now;
       const page = yield* store.trashPage({
+        kind: input.kind ?? "delete",
         beforeId: input.beforeId,
-        // Mail servers empty Trash after about 30 days; older mail can't be restored.
+        // Mail servers empty Trash and spam after about 30 days; older mail can't be restored.
         since: DateTime.formatIso(DateTime.subtract(now, { days: TRASH_DAYS })),
         limit: input.limit ?? 50,
       });
@@ -1725,10 +1891,10 @@ const make = Effect.gen(function* () {
   /** A new email has no messages yet, so its row shows the draft's subject and recipient. */
   const setComposedHeader = (
     threadId: MailThreadId,
-    draft: Pick<MailStore.DraftRecord, "subject" | "to" | "cc">,
+    draft: Pick<MailStore.DraftRecord, "subject" | "to" | "cc" | "bcc">,
     at: string,
   ) => {
-    const recipient = parseMailbox(draft.to[0] ?? draft.cc[0] ?? "");
+    const recipient = parseMailbox(draft.to[0] ?? draft.cc[0] ?? draft.bcc[0] ?? "");
     return store.setComposedHeader(threadId, {
       subject: draft.subject,
       fromName: recipient.name,
@@ -1785,7 +1951,7 @@ const make = Effect.gen(function* () {
           actor,
         );
       }
-      const recipient = parseMailbox(input.to[0] ?? input.cc[0] ?? "");
+      const recipient = parseMailbox(input.to[0] ?? input.cc[0] ?? input.bcc?.[0] ?? "");
       yield* store.insertThread({
         id: threadId,
         accountId: account.id,
@@ -1829,6 +1995,41 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
+  /** The files a save names, in order; ones the draft already had keep their details. */
+  const draftFilesFor = Effect.fnUntraced(function* (
+    accountId: MailAccountId,
+    ids: ReadonlyArray<string>,
+    existing: MailStore.DraftRecord | null,
+  ) {
+    const unique = [...new Set(ids)];
+    const kept = yield* store.draftFiles(accountId, unique);
+    const files: Array<MailDraftFile> = [];
+    for (const fileId of unique) {
+      const file = kept.get(fileId) ?? existing?.files.find((entry) => entry.id === fileId);
+      if (!file) return yield* invalid(FILE_GONE);
+      files.push(file);
+    }
+    if (files.reduce((total, file) => total + file.size, 0) > MAIL_OUTGOING_FILE_BYTES)
+      return yield* invalid(TOO_LARGE);
+    return files;
+  });
+
+  const uploadDraftFile: MailService["Service"]["uploadDraftFile"] = Effect.fn(
+    "MailService.uploadDraftFile",
+  )(function* (input, content) {
+    if (content.byteLength > MAIL_OUTGOING_FILE_BYTES) return yield* invalid(TOO_LARGE);
+    const account = yield* store.getAccount(input.accountId);
+    if (account === null) return yield* notFound("account");
+    const file: MailDraftFile = {
+      id: `file-${yield* uuid}`,
+      filename: cleanFilename(input.filename),
+      contentType: cleanContentType(input.contentType),
+      size: content.byteLength,
+    };
+    yield* store.insertDraftFile({ ...file, accountId: account.id, content }, yield* nowIso);
+    return file;
+  }, sqlSafe);
+
   // Traced by saveDraft and compose, which wrap it in their transaction.
   const writeDraft = Effect.fnUntraced(function* (input: MailSaveDraftInput, actor: MailActorInfo) {
     const thread = yield* store.getThread(input.threadId);
@@ -1859,12 +2060,17 @@ const make = Effect.gen(function* () {
     ) {
       return yield* notFound("message");
     }
+    const files = input.fileIds
+      ? yield* draftFilesFor(thread.accountId, input.fileIds, existing)
+      : (existing?.files ?? []);
     const saved = yield* store.saveDraftContent({
       id,
       threadId: thread.id,
       accountId: thread.accountId,
       to: input.to,
       cc: input.cc,
+      bcc: input.bcc ?? existing?.bcc ?? [],
+      files,
       subject: input.subject,
       body: input.body,
       mode: input.mode ?? existing?.mode ?? "reply",
@@ -1891,6 +2097,8 @@ const make = Effect.gen(function* () {
             ...(existing.body !== saved.body ? { body: existing.body } : {}),
             ...(toJson(existing.to) !== toJson(saved.to) ? { to: existing.to } : {}),
             ...(toJson(existing.cc) !== toJson(saved.cc) ? { cc: existing.cc } : {}),
+            ...(toJson(existing.bcc) !== toJson(saved.bcc) ? { bcc: existing.bcc } : {}),
+            ...(toJson(existing.files) !== toJson(saved.files) ? { files: existing.files } : {}),
             ...(existing.mode !== saved.mode ? { mode: existing.mode } : {}),
             ...(existing.targetMessageId !== saved.targetMessageId
               ? { targetMessageId: existing.targetMessageId }
@@ -1958,7 +2166,7 @@ const make = Effect.gen(function* () {
       if (draft === null) return yield* notFound("draft");
       if (draft.status === "sent" || draft.status === "sending") return MailStore.draftView(draft);
       if (draft.revision !== input.revision) return yield* invalid(DRAFT_CHANGED);
-      if (draft.to.length + draft.cc.length === 0)
+      if (draft.to.length + draft.cc.length + draft.bcc.length === 0)
         return yield* invalid("Add at least one recipient.");
       const account = yield* store.getAccount(draft.accountId);
       if (account === null) return yield* notFound("account");
@@ -1972,6 +2180,8 @@ const make = Effect.gen(function* () {
           other.body.trim() === draft.body.trim() &&
           other.mode === draft.mode &&
           other.targetMessageId === draft.targetMessageId &&
+          toJson(other.files.map((file) => file.id)) ===
+            toJson(draft.files.map((file) => file.id)) &&
           sameRecipients(other, draft) &&
           other.sentAt !== null &&
           isoMillis(now) - isoMillis(other.sentAt) < SEND_DEDUPE_MS,
@@ -2029,12 +2239,27 @@ const make = Effect.gen(function* () {
               .pipe(Effect.orElseSucceed(() => null));
       if (forward && chosen !== null && !formatted?.html && !chosen.body)
         return yield* fail("Couldn't download the message to forward. Try again.");
+      const contents = yield* store.draftFileContents(
+        claimed.accountId,
+        claimed.files.map((file) => file.id),
+      );
+      const attached: Array<ComposedFile> = [];
+      for (const file of claimed.files) {
+        const content = contents.get(file.id);
+        if (!content) return yield* fail(FILE_GONE);
+        attached.push({
+          filename: file.filename,
+          contentType: file.contentType,
+          content: Buffer.from(content.buffer, content.byteOffset, content.byteLength),
+        });
+      }
+      const attachedBytes = attached.reduce((total, file) => total + file.content.length, 0);
       let files: ReadonlyArray<ComposedFile> = [];
       if (forward && chosen !== null && chosen.attachments.length > 0) {
         const fetched = yield* sync
           .getAttachments(
             { threadId: claimed.threadId, messageId: chosen.id },
-            FORWARD_ATTACHMENT_BYTES,
+            MAIL_OUTGOING_FILE_BYTES - attachedBytes,
           )
           .pipe(Effect.orElseSucceed(() => null));
         if (fetched === null)
@@ -2045,6 +2270,7 @@ const make = Effect.gen(function* () {
           );
         files = fetched.files;
       }
+      files = [...files, ...attached];
       const composed = composeOutgoing({
         mode: claimed.mode,
         body: claimed.body,
@@ -2067,6 +2293,7 @@ const make = Effect.gen(function* () {
         from: { name: account.displayName, address: account.email },
         to: claimed.to,
         cc: claimed.cc,
+        bcc: claimed.bcc,
         subject: claimed.subject,
         text: composed.text,
         html: composed.html,
@@ -2081,6 +2308,9 @@ const make = Effect.gen(function* () {
       const sent = yield* Effect.tryPromise({
         try: async () => {
           const raw = await buildRaw(outgoing);
+          // Recipients never see Bcc; the user's own Sent copy records who got one.
+          const sentCopy =
+            outgoing.bcc.length > 0 ? await buildRaw(outgoing, { keepBcc: true }) : raw;
           const delivery = await sendRaw(
             {
               host: account.smtpHost,
@@ -2092,7 +2322,7 @@ const make = Effect.gen(function* () {
             outgoing,
             raw,
           );
-          return { raw, ...delivery };
+          return { raw, sentCopy, ...delivery };
         },
         catch: (error) => classifySmtpError(error),
       }).pipe(Effect.exit);
@@ -2113,19 +2343,32 @@ const make = Effect.gen(function* () {
         sender &&
         claimed.originalBody !== null &&
         claimed.originalBody.trim() !== claimed.body.trim() &&
-        [...claimed.to, ...claimed.cc].every((address) => address.trim().toLowerCase() === sender)
+        [...claimed.to, ...claimed.cc, ...claimed.bcc].every(
+          (address) => address.trim().toLowerCase() === sender,
+        )
           ? sender
           : null;
-      const { accepted, rejected, raw } = sent.value;
+      const { accepted, rejected, raw, sentCopy } = sent.value;
       const partial = rejected.length > 0;
       const deliveryDetail = partial
         ? `SMTP accepted: ${accepted.join(", ")}. SMTP rejected: ${rejected.join(", ")}.`
         : null;
-      const originalCc = new Set(claimed.cc.map((entry) => entry.toLowerCase()));
+      const listed = (entries: ReadonlyArray<string>) =>
+        new Set(entries.map((entry) => parseMailbox(entry).address.toLowerCase()));
+      const originalTo = listed(claimed.to);
+      const originalCc = listed(claimed.cc);
+      // SMTP reports envelope addresses. Only put an address back in a visible field if it was visible before.
       const remaining = partial
         ? {
-            to: rejected.filter((address) => !originalCc.has(address.toLowerCase())),
-            cc: rejected.filter((address) => originalCc.has(address.toLowerCase())),
+            to: rejected.filter((address) => originalTo.has(address.toLowerCase())),
+            cc: rejected.filter(
+              (address) =>
+                !originalTo.has(address.toLowerCase()) && originalCc.has(address.toLowerCase()),
+            ),
+            bcc: rejected.filter(
+              (address) =>
+                !originalTo.has(address.toLowerCase()) && !originalCc.has(address.toLowerCase()),
+            ),
           }
         : undefined;
       const final = yield* store.transaction(
@@ -2138,6 +2381,7 @@ const make = Effect.gen(function* () {
             editSender: partial ? null : editSender,
           });
           if (saved === null) return yield* invalid(DRAFT_CHANGED);
+          if (!partial && claimed.files.length > 0) yield* store.releaseDraftFiles(claimed.id);
           const local = yield* store.upsertMessage({
             accountId: account.id,
             mailbox: "__local",
@@ -2148,7 +2392,8 @@ const make = Effect.gen(function* () {
             inInbox: false,
             from: { name: account.displayName, address: account.email },
             to: claimed.to.map((address) => ({ name: "", address })),
-            cc: claimed.cc.map((address) => ({ name: "", address })),
+            cc: claimed.cc.map(parseMailbox),
+            bcc: claimed.bcc.map(parseMailbox),
             subject: claimed.subject,
             date: sentAt,
             inReplyTo: outgoing.inReplyTo,
@@ -2192,7 +2437,7 @@ const make = Effect.gen(function* () {
           if (account.provider !== "gmail") {
             yield* sync.enqueue(account.id, {
               kind: "append_sent",
-              raw: raw.toString("base64"),
+              raw: sentCopy.toString("base64"),
             });
           }
           return saved;
@@ -2782,6 +3027,144 @@ const make = Effect.gen(function* () {
     yield* engine.publishStatus;
   }, sqlSafe);
 
+  /** Reads the newest message that offers List-Unsubscribe from the server, never from the client. */
+  const planThreadUnsubscribe = Effect.fn("MailService.planThreadUnsubscribe")(function* (
+    threadId: MailThreadId,
+  ) {
+    const thread = yield* store.getThread(threadId);
+    if (thread === null) return yield* notFound("email");
+    const message = (yield* store.threadMessages(threadId)).findLast(
+      (entry) => !entry.outgoing && entry.listUnsubscribe,
+    );
+    if (!message) return { thread, plan: null, confirmation: null };
+    const source = yield* sync.getUnsubscribeSource(
+      { threadId, messageId: message.id },
+      UNSUBSCRIBE_SOURCE_MAX_BYTES,
+    );
+    if (source === null)
+      return yield* new MailError({
+        code: "unavailable",
+        message:
+          "Could not reach the original message. Check the mail account connection and try again.",
+      });
+    const nowSeconds = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+    const plan = yield* Effect.promise(() =>
+      planUnsubscribe(source, unsubscribeTransport.resolveTxt, nowSeconds),
+    );
+    const confirmation = plan
+      ? NodeCrypto.createHash("sha256")
+          .update(`${message.id}:${plan.method}:`)
+          .update(source)
+          .digest("hex")
+      : null;
+    return { thread, plan, confirmation, sender: message.from.name || message.from.address };
+  });
+
+  const unsubscribeOptions: MailService["Service"]["unsubscribeOptions"] = Effect.fn(
+    "MailService.unsubscribeOptions",
+  )(function* (threadId) {
+    const { plan, confirmation, sender } = yield* planThreadUnsubscribe(threadId);
+    if (!plan || !confirmation || sender === undefined) return null;
+    return {
+      sender,
+      method: plan.method,
+      target: plan.target,
+      pageUrl: plan.pageUrl,
+      confirmation,
+      emailPreview:
+        plan.method === "email" && plan.email
+          ? { subject: plan.email.subject, body: plan.email.body }
+          : null,
+    };
+  }, sqlSafe);
+
+  const sendUnsubscribeEmail = Effect.fn("MailService.sendUnsubscribeEmail")(function* (
+    accountId: MailAccountId,
+    email: { readonly address: string; readonly subject: string; readonly body: string },
+  ) {
+    const account = yield* store.getAccount(accountId);
+    if (account === null) return yield* notFound("account");
+    if (account.credentialPending)
+      return yield* invalid(account.statusDetail ?? "Finish updating this account first.");
+    const password = yield* credentials
+      .get(account.id, account.credentialStore)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (password === null)
+      return yield* new MailError({
+        code: "auth_failed",
+        message: "Re-enter the app password for this account.",
+      });
+    const outgoing = {
+      from: { name: account.displayName, address: account.email },
+      to: [email.address],
+      cc: [],
+      subject: email.subject,
+      text: email.body,
+      messageId: `<${yield* uuid}@${domainOf(account.email) || "t3.mail"}>`,
+      inReplyTo: null,
+      references: [],
+    };
+    const sent = yield* Effect.tryPromise({
+      try: async () => {
+        const raw = await buildRaw(outgoing);
+        const delivery = await sendRaw(
+          {
+            host: account.smtpHost,
+            port: account.smtpPort,
+            secure: account.smtpTls,
+            user: account.username,
+            password,
+          },
+          outgoing,
+          raw,
+        );
+        return { raw, ...delivery };
+      },
+      catch: (error) => {
+        const info = classifySmtpError(error);
+        return new MailError({
+          code: info.auth ? "auth_failed" : "send_failed",
+          message: info.definite ? info.detail : `${info.detail} ${MAYBE_SENT}`,
+        });
+      },
+    });
+    if (sent.accepted.length === 0)
+      return yield* new MailError({
+        code: "send_failed",
+        message: "The mail server refused the unsubscribe email.",
+      });
+    if (account.provider !== "gmail")
+      yield* sync.enqueue(account.id, { kind: "append_sent", raw: sent.raw.toString("base64") });
+  });
+
+  const unsubscribe: MailService["Service"]["unsubscribe"] = Effect.fn("MailService.unsubscribe")(
+    function* (input) {
+      const { thread, plan, confirmation } = yield* planThreadUnsubscribe(input.threadId);
+      if (plan === null || plan.method !== input.method || confirmation !== input.confirmation)
+        return yield* invalid(
+          "The sender's unsubscribe options changed. Review them and try again.",
+        );
+      if (plan.method === "one_click" && plan.oneClickUrl)
+        yield* unsubscribeTransport.postOneClick(plan.oneClickUrl);
+      else if (plan.method === "email" && plan.email)
+        yield* sendUnsubscribeEmail(thread.accountId, plan.email);
+      yield* store
+        .insertAction({
+          at: yield* nowIso,
+          actor: "user",
+          actorLabel: null,
+          kind: "unsubscribe",
+          threadId: thread.id,
+          reason: plan.target,
+          undo: null,
+        })
+        .pipe(commit);
+      yield* engine.publishThreads([thread.id]);
+    },
+    (operation) => TxReentrantLock.withReadLock(accountLock, operation),
+    sqlSafe,
+  );
+
   const dismissRecap: MailService["Service"]["dismissRecap"] = (date) =>
     store.setKv("recap-dismissed", date).pipe(Effect.andThen(engine.publishStatus), sqlSafe);
 
@@ -2791,6 +3174,14 @@ const make = Effect.gen(function* () {
       store.recoverInterruptedSends(now, `Sending was interrupted. ${MAYBE_SENT}`),
     ),
     Effect.ignore,
+  );
+  yield* DateTime.now.pipe(
+    Effect.flatMap((now) =>
+      store.pruneDraftFiles(DateTime.formatIso(DateTime.subtract(now, { days: 1 }))),
+    ),
+    Effect.catchCause((cause) => Effect.logWarning("Mail upload cleanup failed.", cause)),
+    Effect.repeat(Schedule.spaced("1 day")),
+    Effect.forkScoped,
   );
   yield* store.requeueWaitingTriage.pipe(Effect.ignore);
   for (const account of yield* store.listAccounts.pipe(Effect.orElseSucceed(() => []))) {
@@ -2825,6 +3216,8 @@ const make = Effect.gen(function* () {
     listSent,
     listLabeled,
     listTrash,
+    unsubscribeOptions,
+    unsubscribe,
     listThreads,
     search,
     act,
@@ -2835,6 +3228,7 @@ const make = Effect.gen(function* () {
     saveDraft,
     discardDraft,
     sendDraft,
+    uploadDraftFile,
     openSession,
     addAccount,
     updateAccount,
@@ -2862,6 +3256,7 @@ export const layer = Layer.effect(MailService, make);
 
 /** The whole mail stack over the server's state directory. */
 export const layerLive = layer.pipe(
+  Layer.provide(MailUnsubscribeTransport.layer),
   Layer.provideMerge(MailSync.layer),
   Layer.provideMerge(MailEngine.layer),
   Layer.provideMerge(MailCredentials.layer),

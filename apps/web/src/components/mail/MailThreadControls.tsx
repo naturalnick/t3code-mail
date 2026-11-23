@@ -24,6 +24,7 @@ import { Menu, MenuItem, MenuItemDetail, MenuPopup, MenuSeparator, MenuTrigger }
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposeMode } from "./mailCompose.logic";
+import { useMailUnsubscribe } from "./MailUnsubscribeDialog";
 import { useMailActions } from "./useMailActions";
 import { useSenderAi } from "./useSenderAi";
 
@@ -113,6 +114,8 @@ export function MailThreadToolbar({
   onOpenRule,
   canReply,
   canReplyAll,
+  canUnsubscribe,
+  supportsSpam,
   onCompose,
   detailsOpen,
   onToggleDetails,
@@ -128,6 +131,9 @@ export function MailThreadToolbar({
   canReply: boolean;
   /** Whether the message Reply answers has anyone else on it. */
   canReplyAll: boolean;
+  /** The sender included List-Unsubscribe. */
+  canUnsubscribe: boolean;
+  supportsSpam: boolean;
   onCompose: (mode: ComposeMode) => void;
   detailsOpen: boolean;
   onToggleDetails: (() => void) | null;
@@ -138,6 +144,7 @@ export function MailThreadToolbar({
   const gt = useGT();
   const { act, disabled } = useMailActions(environmentId);
   const senderAi = useSenderAi(environmentId);
+  const unsubscribe = useMailUnsubscribe(environmentId);
   const navigate = useNavigate();
   const markRead = useEffectEvent(() => void act([thread.id], { type: "mark_read" }));
   const readAt = useRef<string | null>(null);
@@ -286,7 +293,23 @@ export function MailThreadToolbar({
               {senderAi.toggleLabel(thread.from.address)}
             </MenuItem>
           )}
+          {canUnsubscribe && (
+            <MenuItem disabled={disabled} onClick={() => void unsubscribe.open(thread.id)}>
+              {gt("Unsubscribe…")}
+            </MenuItem>
+          )}
           <MenuSeparator />
+          {supportsSpam && (
+            <MenuItem
+              disabled={disabled}
+              onClick={async () => {
+                const marked = await act([thread.id], { type: "spam" }, gt("Marked as spam"));
+                if (marked) void navigate({ to: "/mail" });
+              }}
+            >
+              {gt("Mark as spam")}
+            </MenuItem>
+          )}
           <MenuItem
             disabled={disabled}
             variant="destructive"
@@ -299,6 +322,7 @@ export function MailThreadToolbar({
           </MenuItem>
         </MenuPopup>
       </Menu>
+      {unsubscribe.dialog}
       {onToggleDetails === null ? null : (
         <Tooltip>
           <TooltipTrigger

@@ -1,7 +1,14 @@
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { MailAccountId, ProviderInstanceId, ThreadId, type MailThreadId } from "@t3tools/contracts";
+import {
+  MAIL_OUTGOING_FILE_BYTES,
+  MailAccountId,
+  MailError,
+  ProviderInstanceId,
+  ThreadId,
+  type MailThreadId,
+} from "@t3tools/contracts";
 import type { MailTriageVerdict } from "@t3tools/provider-core/server/textGeneration";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -25,18 +32,23 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ImapSession from "./imapSession.ts";
 import type { ParsedMessage } from "./imapSession.ts";
-import { enqueueOp, replayOp } from "./mailServerOp.ts";
+import { enqueueOp, moveToSpam, replayOp, restoreFromSpam } from "./mailServerOp.ts";
 import * as MailChatContext from "./MailChatContext.ts";
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
 import * as MailService from "./MailService.ts";
 import * as MailStore from "./MailStore.ts";
 import * as MailSync from "./MailSync.ts";
+import * as MailUnsubscribeTransport from "./MailUnsubscribeTransport.ts";
+import { dkimRecord, signedMessage } from "./listUnsubscribe.testkit.ts";
 import * as Smtp from "./smtpSend.ts";
 
 vi.mock(import("./smtpSend.ts"), async (importOriginal) => ({
   ...(await importOriginal()),
-  sendRaw: async (_config, message) => ({ accepted: [...message.to, ...message.cc], rejected: [] }),
+  sendRaw: async (_config, message) => ({
+    accepted: [...message.to, ...message.cc, ...(message.bcc ?? [])],
+    rejected: [],
+  }),
 }));
 
 const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "luna" };
@@ -110,6 +122,73 @@ const textGeneration = (reply: ModelReply, duringCall: DuringCall) =>
       }),
   });
 
+/** What the server returns for an unsubscribe: the message source, DNS and the one-click posts. */
+const unsubscribeFixture = {
+  source: null as Buffer | null,
+  txt: new Map<string, string>(),
+  posts: [] as Array<string>,
+};
+
+type SpamSession = Parameters<typeof moveToSpam>[0];
+const spamRoles = {
+  primary: "INBOX",
+  sent: null,
+  archive: null,
+  trash: "Trash",
+  junk: null,
+  gmail: false,
+};
+/** The server spam reports reach: UIDVALIDITY by mailbox, and mailboxes that refuse MOVE. */
+const spamServer = {
+  online: true,
+  uidValidity: new Map<string, string>(),
+  refuse: new Set<string>(),
+  /** UIDs the server holds in spam; restore only finds these. */
+  inSpam: new Set<number>(),
+  calls: [] as Array<ReadonlyArray<unknown>>,
+};
+const resetSpamServer = () => {
+  spamServer.online = true;
+  spamServer.uidValidity = new Map([
+    ["INBOX", "101"],
+    ["Junk", "303"],
+  ]);
+  spamServer.refuse = new Set();
+  spamServer.inSpam = new Set();
+  spamServer.calls = [];
+};
+let selected = "";
+let spamUid = 500;
+const spamSession: SpamSession = {
+  supportsUidPlus: true,
+  withMailbox: (path, _known, work) => {
+    selected = path;
+    spamServer.calls.push(["select", path]);
+    return work({
+      uidValidity: spamServer.uidValidity.get(path) ?? "1",
+      exists: 1,
+      uidNext: 900,
+      highestModseq: null,
+    });
+  },
+  ensureMailbox: async (path) => void spamServer.calls.push(["create", path]),
+  moveOrThrow: async (uids, to) => {
+    spamServer.calls.push(["move", uids, to]);
+    if (spamServer.refuse.has(selected))
+      throw new ImapSession.ImapFailure({ kind: "network", detail: "Connection closed." });
+    const present = to === "INBOX" ? uids.filter((uid) => spamServer.inSpam.has(uid)) : uids;
+    const uidMap = new Map(present.map((uid) => [uid, spamUid++] as const));
+    if (to !== "INBOX") for (const uid of uidMap.values()) spamServer.inSpam.add(uid);
+    for (const uid of present) spamServer.inSpam.delete(uid);
+    return { uidMap, uidValidity: spamServer.uidValidity.get(to) ?? "1" };
+  },
+  searchMessageIds: async (messageIds) => {
+    spamServer.calls.push(["search", messageIds]);
+    return [];
+  },
+};
+const offline = () => new MailError({ code: "unavailable", message: "Connect this account." });
+
 let randomCounter = 0;
 const testLayer = (
   mailDir: string,
@@ -130,6 +209,14 @@ const testLayer = (
               enqueueOp(id, op, at).pipe(Effect.provideService(MailStore.MailStore, store)),
             getMessageBody: () =>
               Effect.succeed({ html: "<p>Original <b>formatted</b></p>", inlineImages: {} }),
+            moveToSpam: (_id, sources) =>
+              spamServer.online
+                ? Effect.promise(() => moveToSpam(spamSession, spamRoles, sources))
+                : Effect.fail(offline()),
+            restoreSpam: (_id, spam) =>
+              spamServer.online
+                ? Effect.promise(() => restoreFromSpam(spamSession, spamRoles, spam))
+                : Effect.fail(offline()),
             getAttachments: () =>
               Effect.succeed({
                 files: [
@@ -141,9 +228,19 @@ const testLayer = (
                 ],
                 complete: true,
               }),
+            getUnsubscribeSource: () => Effect.succeed(unsubscribeFixture.source),
           }),
         ),
       ),
+    ),
+    Layer.provide(
+      Layer.mock(MailUnsubscribeTransport.MailUnsubscribeTransport)({
+        resolveTxt: async (name) => {
+          const record = unsubscribeFixture.txt.get(name);
+          return record === undefined ? [] : [record];
+        },
+        postOneClick: (url) => Effect.sync(() => void unsubscribeFixture.posts.push(url.href)),
+      }),
     ),
     Layer.provideMerge(MailEngine.layer),
     Layer.provideMerge(credentials),
@@ -367,6 +464,39 @@ it.effect("prefetches formatted bodies only for mail a reader is likely to open"
 );
 
 describe("MailService rules and feedback", () => {
+  it.effect.each([false, true])(
+    "keeps uploaded files when upgrading version 19 with metadata = %s",
+    (metadata) =>
+      withMail(
+        Effect.gen(function* () {
+          const store = yield* MailStore.MailStore;
+          const mail = yield* MailService.MailService;
+          yield* addSendingAccount;
+          const content = Uint8Array.of(1, 3, 5);
+          const file = yield* mail.uploadDraftFile(
+            { accountId, filename: "receipt.txt", contentType: "text/plain" },
+            content,
+          );
+          yield* mail.compose(
+            { accountId, to: [], cc: [], subject: "Receipt", body: "", fileIds: [file.id] },
+            { actor: "user" },
+          );
+          if (!metadata) {
+            yield* store.sql`ALTER TABLE mail_draft_files DROP COLUMN filename`;
+            yield* store.sql`ALTER TABLE mail_draft_files DROP COLUMN content_type`;
+            yield* store.sql`ALTER TABLE mail_draft_files DROP COLUMN size`;
+          }
+          yield* store.sql`ALTER TABLE mail_messages DROP COLUMN bcc_json`;
+          yield* store.sql`PRAGMA user_version = 19`;
+          yield* store.migrate;
+          expect((yield* store.draftFiles(accountId, [file.id])).get(file.id)).toEqual(file);
+          expect(
+            Array.from((yield* store.draftFileContents(accountId, [file.id])).get(file.id)!),
+          ).toEqual([1, 3, 5]);
+        }),
+      ),
+  );
+
   it.effect.each([false, true])("migrates hidden senders with saved settings = %s", (saved) =>
     withMail(
       Effect.gen(function* () {
@@ -406,6 +536,10 @@ describe("MailService rules and feedback", () => {
         yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_lifetime`;
         yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_received_at`;
         yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_read_at`;
+        yield* store.sql`ALTER TABLE mail_drafts DROP COLUMN bcc_json`;
+        yield* store.sql`ALTER TABLE mail_drafts DROP COLUMN files_json`;
+        yield* store.sql`DROP TABLE mail_draft_files`;
+        yield* store.sql`ALTER TABLE mail_messages DROP COLUMN bcc_json`;
         yield* store.sql`PRAGMA user_version = 15`;
         yield* store.migrate;
         expect(yield* engine.settings).toEqual({
@@ -1658,6 +1792,159 @@ describe("MailService model usage and replies", () => {
     ),
   );
 
+  it.effect(
+    "attaches uploaded files and Bcc that survive reopening, retries and discard undo",
+    () =>
+      withMail(
+        Effect.gen(function* () {
+          const mail = yield* MailService.MailService;
+          const store = yield* MailStore.MailStore;
+          yield* addSendingAccount;
+          const threadId = yield* deliver({ subject: "Contract", body: "Draft attached?", at });
+          const hidden = "boss@example.org";
+          const namedHidden = `Reviewer <${hidden}>`;
+          const tooLarge = yield* Effect.flip(
+            mail.uploadDraftFile(
+              { accountId, filename: "huge.bin" },
+              new Uint8Array(MAIL_OUTGOING_FILE_BYTES + 1),
+            ),
+          );
+          expect(tooLarge.code).toBe("invalid");
+          const file = yield* mail.uploadDraftFile(
+            { accountId, filename: "../signed\ncontract.txt", contentType: "text/plain; x" },
+            new TextEncoder().encode("signed"),
+          );
+          expect(file).toMatchObject({
+            filename: "signedcontract.txt",
+            contentType: "application/octet-stream",
+            size: 6,
+          });
+          const missing = yield* Effect.flip(
+            mail.saveDraft(
+              {
+                threadId,
+                to: ["sam@example.org"],
+                cc: [],
+                fileIds: ["file-00000000-0000-4000-8000-000000000000"],
+                subject: "Re: Contract",
+                body: "Here",
+              },
+              { actor: "user" },
+            ),
+          );
+          expect(missing.message).toContain("no longer available");
+
+          const saved = yield* mail.saveDraft(
+            {
+              threadId,
+              to: ["sam@example.org"],
+              cc: [],
+              bcc: [namedHidden],
+              fileIds: [file.id],
+              subject: "Re: Contract",
+              body: "Here it is.",
+            },
+            { actor: "user" },
+          );
+          // An agent's edit that names neither keeps them.
+          const edited = yield* mail.saveDraft(
+            {
+              threadId,
+              draftId: saved.id,
+              expectedRevision: saved.revision,
+              to: ["sam@example.org"],
+              cc: [],
+              subject: "Re: Contract",
+              body: "Here it is, signed.",
+            },
+            { actor: "agent", label: "Mail" },
+          );
+          const reopened = (yield* mail.getThread(threadId)).drafts.find(
+            (draft) => draft.id === saved.id,
+          );
+          expect(reopened).toMatchObject({ bcc: [namedHidden], files: [file] });
+          expect(edited.revision).toBe(reopened!.revision);
+
+          yield* mail.saveDraft(
+            {
+              threadId,
+              draftId: edited.id,
+              expectedRevision: edited.revision,
+              to: edited.to,
+              cc: edited.cc,
+              fileIds: [],
+              subject: edited.subject,
+              body: edited.body,
+            },
+            { actor: "user" },
+          );
+          const removal = (yield* mail.getThread(threadId)).actions[0]!;
+          yield* store.pruneDraftFiles("2099-01-01T00:00:00.000Z");
+          yield* mail.undo(removal.id);
+          const withFile = (yield* mail.getThread(threadId)).drafts.find(
+            (draft) => draft.id === edited.id,
+          )!;
+          expect(withFile.files).toEqual([file]);
+          expect((yield* store.draftFiles(accountId, [file.id])).get(file.id)).toEqual(file);
+          const { actionId } = yield* mail.discardDraft(withFile.id, withFile.revision);
+          const abandoned = yield* mail.uploadDraftFile(
+            { accountId, filename: "unused.txt" },
+            Uint8Array.of(1),
+          );
+          yield* store.pruneDraftFiles("2099-01-01T00:00:00.000Z");
+          expect(
+            (yield* store.draftFiles(accountId, [file.id, abandoned.id])).get(file.id),
+          ).toEqual(file);
+          expect((yield* store.draftFiles(accountId, [abandoned.id])).size).toBe(0);
+          yield* mail.undo(actionId!);
+          const restored = (yield* mail.getThread(threadId)).drafts.find(
+            (draft) => draft.id === saved.id,
+          )!;
+          expect(restored).toMatchObject({ bcc: [namedHidden], files: [file] });
+
+          const delivered: Array<{ message: Smtp.OutgoingMessage; raw: string }> = [];
+          using _send = vi
+            .spyOn(Smtp, "sendRaw")
+            .mockImplementationOnce(async (_config, message, raw) => {
+              delivered.push({ message, raw: raw.toString() });
+              return { accepted: ["sam@example.org"], rejected: [hidden] };
+            })
+            .mockImplementationOnce(async (_config, message, raw) => {
+              delivered.push({ message, raw: raw.toString() });
+              return { accepted: [hidden], rejected: [] };
+            });
+          const retry = yield* mail.sendDraft({
+            draftId: restored.id,
+            revision: restored.revision,
+          });
+          expect(retry).toMatchObject({ status: "failed", to: [], cc: [], bcc: [hidden] });
+          expect(retry.files).toEqual([file]);
+          const sent = yield* mail.sendDraft({ draftId: retry.id, revision: retry.revision });
+          expect(sent.status).toBe("sent");
+
+          for (const { message, raw } of delivered) {
+            expect(message.attachments?.map((entry) => entry.filename)).toEqual([
+              "signedcontract.txt",
+            ]);
+            expect(raw).not.toMatch(/^bcc:/im);
+            expect(raw).not.toContain(hidden);
+          }
+          expect(delivered[0]!.message.bcc).toEqual([namedHidden]);
+          expect(
+            (yield* mail.getThread(threadId)).messages.some(
+              (entry) =>
+                entry.outgoing && entry.bcc?.some((recipient) => recipient.address === hidden),
+            ),
+          ).toBe(true);
+          const sentCopies = yield* store.sql<{ payload: string }>`SELECT payload FROM mail_ops
+          WHERE kind = 'append_sent' ORDER BY id`;
+          const copy = Buffer.from(JSON.parse(sentCopies[0]!.payload).raw, "base64").toString();
+          expect(copy).toMatch(new RegExp(`^Bcc: Reviewer <${hidden}>`, "im"));
+          expect(yield* store.sql`SELECT id FROM mail_draft_files`).toEqual([]);
+        }),
+      ),
+  );
+
   it.effect("checks the weekly cap before generating voice notes", () =>
     withMail(
       Effect.gen(function* () {
@@ -2142,6 +2429,7 @@ it.effect("undo mirrors only messages that settle found in the inbox", () =>
         sent: null,
         archive: "Archive",
         trash: "Trash",
+        junk: null,
         gmail: true,
       };
       const replay = (gmail: boolean) =>
@@ -2352,7 +2640,14 @@ it.effect("delete moves the thread to Trash and undo restores it by Message-ID",
         },
       };
       for (const gmail of [false, true]) {
-        const roles = { primary: "INBOX", sent: null, archive: null, trash: "Trash", gmail };
+        const roles = {
+          primary: "INBOX",
+          sent: null,
+          archive: null,
+          trash: "Trash",
+          junk: null,
+          gmail,
+        };
         yield* Effect.forEach(ops, (op) => replayOp(accountId, op.payload, roles, session));
       }
       expect(calls).toEqual([
@@ -2366,6 +2661,342 @@ it.effect("delete moves the thread to Trash and undo restores it by Message-ID",
     }),
   ),
 );
+
+describe("spam", () => {
+  const inbox = Effect.fn("fixture.inbox")(function* () {
+    const store = yield* MailStore.MailStore;
+    resetSpamServer();
+    yield* store.putMailbox({
+      accountId,
+      path: "INBOX",
+      role: "primary",
+      uidValidity: "101",
+      maxUid: 4,
+      minUid: 1,
+      highestModseq: null,
+      backfillDone: true,
+    });
+  });
+  const spamList = MailService.MailService.pipe(
+    Effect.flatMap((mail) => mail.listTrash({ kind: "spam" })),
+    Effect.map((page) => page.actions),
+  );
+  const report = (threadId: MailThreadId) =>
+    MailService.MailService.pipe(
+      Effect.flatMap((mail) =>
+        mail.act({ threadIds: [threadId], action: { type: "spam" } }, { actor: "user" }),
+      ),
+    );
+
+  it.effect("moves on the server before the email leaves, and Not spam moves that copy back", () =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        const mail = yield* MailService.MailService;
+        yield* inbox();
+        const threadId = yield* deliver({ subject: "You won", body: "Claim now", at });
+        const original = (yield* store.threadMessages(threadId))[0]!;
+        const marked = yield* report(threadId);
+        expect(yield* store.getThread(threadId)).toBeNull();
+        expect(yield* store.pendingOps(accountId)).toEqual([]);
+        expect((yield* mail.listTrash({})).actions).toEqual([]);
+        expect(yield* spamList).toMatchObject([
+          { id: marked.actionIds[0], kind: "spam", subject: "You won", undoable: true },
+        ]);
+        const [copy] = spamServer.inSpam;
+        expect(spamServer.calls).toEqual([
+          ["create", "Junk"],
+          ["select", "INBOX"],
+          ["move", [original.uid], "Junk"],
+        ]);
+
+        spamServer.calls = [];
+        yield* mail.undo(marked.actionIds[0]!);
+        // COPYUID named the spam copy, so restore needs no Message-ID search.
+        expect(spamServer.calls).toEqual([
+          ["select", "Junk"],
+          ["move", [copy], "INBOX"],
+        ]);
+        expect(yield* spamList).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps the email when the server can't be reached or refuses the move", () =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        yield* inbox();
+        const threadId = yield* deliver({ subject: "Maybe spam", body: "Hi", at });
+
+        spamServer.online = false;
+        expect((yield* report(threadId).pipe(Effect.flip)).code).toBe("unavailable");
+        spamServer.online = true;
+        spamServer.refuse.add("INBOX");
+        const refused = yield* report(threadId).pipe(Effect.flip);
+        expect(refused.code).toBe("unavailable");
+        expect(refused.message).toMatch(/Connection closed/);
+
+        expect(yield* store.getThread(threadId)).not.toBeNull();
+        expect((yield* store.threadMessages(threadId)).map((row) => row.removed)).toEqual([false]);
+        expect(yield* spamList).toEqual([]);
+        spamServer.refuse.clear();
+        yield* report(threadId);
+        expect(yield* store.getThread(threadId)).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("removes only what moved, keeps the rest, and reports the partial move", () =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        const engine = yield* MailEngine.MailEngine;
+        yield* inbox();
+        yield* store.putMailbox({
+          accountId,
+          path: "Receipts",
+          role: "folder",
+          uidValidity: "202",
+          maxUid: 90,
+          minUid: 1,
+          highestModseq: null,
+          backfillDone: true,
+        });
+        spamServer.uidValidity.set("Receipts", "202");
+        const threadId = yield* deliver({ subject: "Prize", body: "Claim", at });
+        const first = (yield* store.threadMessages(threadId))[0]!;
+        const followUp = message({ subject: "Re: Prize", at: "2026-11-02T10:00:00.000Z" });
+        yield* engine.ingest(
+          {
+            accountId,
+            accountEmail: me,
+            gmail: false,
+            mailbox: "Receipts",
+            role: "folder",
+            initial: false,
+            backfill: false,
+          },
+          [{ ...followUp, inReplyTo: first.messageId, references: [first.messageId!] }],
+        );
+        expect(yield* store.threadMessages(threadId)).toHaveLength(2);
+        spamServer.refuse.add("Receipts");
+
+        const partial = yield* report(threadId).pipe(Effect.flip);
+        expect(partial.message).toMatch(/Only part of this email moved to spam/);
+        const left = (yield* store.threadMessages(threadId)).filter((row) => !row.removed);
+        expect(left.map((row) => row.mailbox)).toEqual(["Receipts"]);
+        expect((yield* store.getThread(threadId))?.messageCount).toBe(1);
+        expect(yield* spamList).toHaveLength(1);
+
+        spamServer.refuse.clear();
+        yield* report(threadId);
+        expect(yield* store.getThread(threadId)).toBeNull();
+        expect(yield* spamList).toHaveLength(2);
+      }),
+    ),
+  );
+
+  it.effect("waits for unsynced mail and keeps unsent drafts reachable", () =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        const mail = yield* MailService.MailService;
+        resetSpamServer();
+        // No mailbox row yet, so the message has no UIDVALIDITY to move it by.
+        const unsynced = yield* deliver({ subject: "Too soon", body: "Hi", at });
+        expect((yield* report(unsynced).pipe(Effect.flip)).code).toBe("invalid");
+        expect(spamServer.calls).toEqual([]);
+        expect(yield* store.getThread(unsynced)).not.toBeNull();
+
+        yield* inbox();
+        const drafted = yield* deliver({ subject: "Reply pending", body: "Hi", at });
+        yield* mail.saveDraft(
+          { threadId: drafted, to: ["x@example.org"], cc: [], subject: "Re", body: "Draft" },
+          { actor: "user" },
+        );
+        const refused = yield* report(drafted).pipe(Effect.flip);
+        expect(refused.code).toBe("invalid");
+        expect(refused.message).toMatch(/draft/);
+        expect(spamServer.calls).toEqual([]);
+        expect((yield* mail.getThread(drafted)).drafts).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.effect("keeps Not spam retryable offline and says when the server no longer has it", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        yield* inbox();
+        const kept = (yield* report(yield* deliver({ subject: "A", body: "a", at }))).actionIds[0]!;
+        const gone = (yield* report(yield* deliver({ subject: "B", body: "b", at }))).actionIds[0]!;
+
+        spamServer.online = false;
+        expect(yield* mail.undo(kept).pipe(Effect.flip)).toMatchObject({ code: "unavailable" });
+        expect((yield* spamList).map((entry) => entry.id)).toEqual([gone, kept]);
+        spamServer.online = true;
+        yield* mail.undo(kept);
+
+        spamServer.inSpam.clear();
+        const missing = yield* mail.undo(gone).pipe(Effect.flip);
+        expect(missing).toMatchObject({ message: expect.stringMatching(/no longer in spam/) });
+        expect(yield* spamList).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect(
+    "moves a Gmail message once and finds spam by Message-ID after UIDVALIDITY changes",
+    () =>
+      Effect.gen(function* () {
+        resetSpamServer();
+        const gmail = { ...spamRoles, primary: "[Gmail]/All Mail", gmail: true };
+        spamServer.uidValidity.set("[Gmail]/All Mail", "7").set("Work", "8");
+        const sources = [
+          { id: 2, mailbox: "Work", uid: 40, uidValidity: "8", messageId: "<a@x>" },
+          { id: 1, mailbox: "[Gmail]/All Mail", uid: 4, uidValidity: "7", messageId: "<a@x>" },
+        ];
+        const cannotRestore = yield* Effect.promise(() =>
+          moveToSpam({ ...spamSession, supportsUidPlus: false }, gmail, [
+            { ...sources[0]!, messageId: null },
+          ]),
+        );
+        expect(cannotRestore.moved).toEqual([]);
+        expect(cannotRestore.failure).not.toBeNull();
+        const reported = yield* Effect.promise(() => moveToSpam(spamSession, gmail, sources));
+        expect(reported).toMatchObject({ moved: [1, 2], failure: null });
+        expect(reported.spam).toMatchObject({
+          folder: "[Gmail]/Spam",
+          copies: [{ messageId: "<a@x>" }],
+        });
+        expect(spamServer.calls).toEqual([
+          ["select", "[Gmail]/All Mail"],
+          ["move", [4], "[Gmail]/Spam"],
+        ]);
+
+        spamServer.calls = [];
+        const stale = { ...reported.spam, uidValidity: "old" };
+        expect(yield* Effect.promise(() => restoreFromSpam(spamSession, gmail, stale))).toBe(0);
+        expect(spamServer.calls).toEqual([
+          ["select", "[Gmail]/Spam"],
+          ["search", ["<a@x>"]],
+        ]);
+
+        spamServer.calls = [];
+        spamServer.uidValidity.set("Work", "9");
+        const changed = yield* Effect.promise(() =>
+          moveToSpam(spamSession, spamRoles, [sources[0]!]),
+        );
+        expect(changed.moved).toEqual([]);
+        expect(changed.failure?.detail).toMatch(/changed on the mail server/);
+        expect(spamServer.calls).toEqual([
+          ["create", "Junk"],
+          ["select", "Work"],
+        ]);
+      }),
+  );
+});
+
+describe("unsubscribe", () => {
+  const offering = Effect.fn("fixture.offering")(function* () {
+    unsubscribeFixture.source = yield* Effect.promise(() => signedMessage({}));
+    unsubscribeFixture.txt = new Map([["sel._domainkey.example.com", dkimRecord()]]);
+    unsubscribeFixture.posts = [];
+    return yield* deliver({
+      subject: "Weekly news",
+      body: "News",
+      at,
+      from: "news@mail.example.com",
+      listUnsubscribe: true,
+    });
+  });
+
+  it.effect("posts the verified one-click request the user confirmed, once per request", () =>
+    withMail(
+      Effect.gen(function* () {
+        const mail = yield* MailService.MailService;
+        const plain = yield* deliver({ subject: "Hi", body: "Hello", at });
+        expect((yield* mail.getThread(plain)).canUnsubscribe).toBe(false);
+        expect(yield* mail.unsubscribeOptions(plain)).toBeNull();
+
+        const threadId = yield* offering();
+        expect((yield* mail.getThread(threadId)).canUnsubscribe).toBe(true);
+        const options = (yield* mail.unsubscribeOptions(threadId))!;
+        expect(options).toMatchObject({
+          method: "one_click",
+          target: "example.com",
+          pageUrl: "https://example.com/u?id=1",
+        });
+        const refused = yield* mail
+          .unsubscribe({ threadId, method: "email", confirmation: options.confirmation })
+          .pipe(Effect.flip);
+        expect(refused.code).toBe("invalid");
+        expect(unsubscribeFixture.posts).toEqual([]);
+        yield* mail.unsubscribe({
+          threadId,
+          method: "one_click",
+          confirmation: options.confirmation,
+        });
+        expect(unsubscribeFixture.posts).toEqual(["https://example.com/u?id=1"]);
+        expect(
+          (yield* mail.getThread(threadId, false)).actions.map((action) => action.kind),
+        ).not.toContain("unsubscribe");
+        expect(
+          (yield* mail.listActions({ includeSpamAndUnsubscribe: false })).actions.map(
+            (action) => action.kind,
+          ),
+        ).not.toContain("unsubscribe");
+        expect((yield* mail.getThread(threadId)).actions).toContainEqual(
+          expect.objectContaining({ kind: "unsubscribe", reason: "example.com", undoable: false }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("emails the sender's address when one-click can't be verified", () =>
+    withMail(
+      Effect.gen(function* () {
+        const store = yield* MailStore.MailStore;
+        const mail = yield* MailService.MailService;
+        yield* addSendingAccount;
+        const threadId = yield* offering();
+        unsubscribeFixture.txt = new Map();
+        const sent: Array<Parameters<typeof Smtp.sendRaw>[1]> = [];
+        using _send = vi.spyOn(Smtp, "sendRaw").mockImplementation(async (_config, message) => {
+          sent.push(message);
+          return { accepted: [...message.to], rejected: [] };
+        });
+        const options = (yield* mail.unsubscribeOptions(threadId))!;
+        expect(options).toMatchObject({
+          method: "email",
+          target: "leave@example.com",
+          emailPreview: { subject: "stop", body: "Unsubscribe" },
+          pageUrl: "https://example.com/u?id=1",
+        });
+        yield* mail.unsubscribe({ threadId, method: "email", confirmation: options.confirmation });
+        expect(unsubscribeFixture.posts).toEqual([]);
+        expect(sent).toMatchObject([
+          { to: ["leave@example.com"], cc: [], subject: "stop", from: { address: me } },
+        ]);
+        expect((yield* store.pendingOps(accountId)).map((op) => op.kind)).toContain("append_sent");
+
+        const changed = Buffer.from(
+          "List-Unsubscribe: <mailto:other@example.org?subject=stop>\r\n\r\n",
+        );
+        unsubscribeFixture.source = changed;
+        const stale = yield* mail
+          .unsubscribe({ threadId, method: "email", confirmation: options.confirmation })
+          .pipe(Effect.flip);
+        expect(stale.code).toBe("invalid");
+        expect(sent).toHaveLength(1);
+        unsubscribeFixture.source = null;
+        const unreachable = yield* mail.unsubscribeOptions(threadId).pipe(Effect.flip);
+        expect(unreachable.code).toBe("unavailable");
+      }),
+    ),
+  );
+});
 
 it.effect("notifies once for new unread inbox mail and skips backfill and repeat fetches", () =>
   withMail(

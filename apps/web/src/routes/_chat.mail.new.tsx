@@ -39,7 +39,12 @@ function NewEmail({
   const [threadId, setThreadId] = useState<MailThreadId | null>(null);
   const view = useAtomValue(mailEnvironment.view(environmentId));
   const query = useEnvironmentQuery(
-    threadId ? mailEnvironment.thread({ environmentId, input: { threadId } }) : null,
+    threadId
+      ? mailEnvironment.thread({
+          environmentId,
+          input: { threadId, includeSpamAndUnsubscribe: true },
+        })
+      : null,
   );
   const thread = threadId ? (view?.threads.get(threadId) ?? query.data?.thread ?? null) : null;
   // Reopening this page's link after a save shows the saved email. Checked once, when mail

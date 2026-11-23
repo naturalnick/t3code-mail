@@ -2013,18 +2013,25 @@ export const layerWsRpc = (
         [WS_METHODS.mailArrivals]: () => mail.arrivals,
         [WS_METHODS.mailSubscribe]: () => mail.subscribe,
         [WS_METHODS.mailGetMessageBody]: (input) => mail.getMessageBody(input),
-        [WS_METHODS.mailGetThread]: (input) => mail.getThread(input.threadId),
+        [WS_METHODS.mailGetThread]: (input) =>
+          mail.getThread(input.threadId, input.includeSpamAndUnsubscribe ?? false),
         [WS_METHODS.mailListSettled]: (input) => mail.listSettled(input),
         [WS_METHODS.mailListLabeled]: (input) => mail.listLabeled(input),
         [WS_METHODS.mailListSent]: (input) => mail.listSent(input),
         [WS_METHODS.mailListTrash]: (input) => mail.listTrash(input),
+        [WS_METHODS.mailUnsubscribeOptions]: (input) => mail.unsubscribeOptions(input.threadId),
+        [WS_METHODS.mailUnsubscribe]: (input) => mail.unsubscribe(input),
         [WS_METHODS.mailSearch]: (input) => mail.search(input),
         [WS_METHODS.mailAct]: (input) => mail.act(input, mailUser),
         [WS_METHODS.mailUndo]: (input) =>
           mail.undo(input.actionId, {
             canEditRules: currentSession.scopes.includes(AuthSettingsWriteScope),
           }),
-        [WS_METHODS.mailListActions]: (input) => mail.listActions(input),
+        [WS_METHODS.mailListActions]: (input) =>
+          mail.listActions({
+            ...input,
+            includeSpamAndUnsubscribe: input.includeSpamAndUnsubscribe ?? false,
+          }),
         [WS_METHODS.mailCompose]: (input) => mail.compose(input, mailUser),
         [WS_METHODS.mailSaveDraft]: (input) => mail.saveDraft(input, mailUser),
         [WS_METHODS.mailDiscardDraft]: (input) =>

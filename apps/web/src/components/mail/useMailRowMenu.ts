@@ -20,6 +20,7 @@ import { useSenderAi } from "./useSenderAi";
 export function useMailRowMenu(
   environmentId: EnvironmentId,
   actions: ReturnType<typeof useMailActions>,
+  supportsSpam: boolean,
 ) {
   const gt = useGT();
   const resolve = useMessages();
@@ -109,6 +110,7 @@ export function useMailRowMenu(
         label: gt("Auto-settle…"),
         separatorBefore: senderAi.disabled,
       },
+      ...(supportsSpam ? [{ id: "spam", label: gt("Mark as spam"), separatorBefore: true }] : []),
       { id: "delete", label: gt("Delete"), destructive: true },
     ];
     const clicked = await api.contextMenu
@@ -164,9 +166,14 @@ export function useMailRowMenu(
           search: { rule: true },
         });
         return;
+      case "spam":
       case "delete": {
-        const deleted = await actions.act(ids, { type: "delete" }, gt("Moved to Trash"));
-        if (deleted && openMailThreadId === thread.id) void navigate({ to: "/mail" });
+        const removed = await actions.act(
+          ids,
+          { type: clicked === "spam" ? "spam" : "delete" },
+          clicked === "spam" ? gt("Marked as spam") : gt("Moved to Trash"),
+        );
+        if (removed && openMailThreadId === thread.id) void navigate({ to: "/mail" });
         return;
       }
       case "snooze:reply":

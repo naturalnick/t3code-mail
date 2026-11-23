@@ -82,6 +82,7 @@ export interface ParsedMessage {
   readonly replyTo: ReadonlyArray<MailAddress>;
   readonly to: ReadonlyArray<MailAddress>;
   readonly cc: ReadonlyArray<MailAddress>;
+  readonly bcc?: ReadonlyArray<MailAddress> | undefined;
   readonly subject: string;
   readonly date: string;
   readonly inReplyTo: string | null;
@@ -118,6 +119,7 @@ export interface MailboxRoles {
   readonly sent: string | null;
   readonly archive: string | null;
   readonly trash: string | null;
+  readonly junk: string | null;
 }
 
 const HEADER_FIELDS = ["references", "list-unsubscribe", "list-id", "precedence", "auto-submitted"];
@@ -243,6 +245,7 @@ function parseFetched(message: FetchMessageObject, labels: ParsedMessage["labels
     replyTo: (envelope.replyTo ?? []).map(toAddress),
     to: (envelope.to ?? []).map(toAddress),
     cc: (envelope.cc ?? []).map(toAddress),
+    bcc: (envelope.bcc ?? []).map(toAddress),
     subject: envelope.subject?.trim() ?? "",
     date: Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString(),
     inReplyTo: messageIdsIn(envelope.inReplyTo)[0] ?? null,
@@ -272,6 +275,7 @@ function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): Mail
       sent: null,
       archive: null,
       trash: byUse("\\Trash") ?? byName(/^\[Gmail\]\/(Trash|Bin)$/i),
+      junk: byUse("\\Junk") ?? byName(/^\[Gmail\]\/Spam$/i),
     };
   }
   return {
@@ -280,6 +284,7 @@ function pickRoles(mailboxes: ReadonlyArray<ListResponse>, gmail: boolean): Mail
     sent: byUse("\\Sent") ?? byName(/^(INBOX[./])?Sent( Items| Messages| Mail)?$/i),
     archive: byUse("\\Archive") ?? byName(/^(INBOX[./])?Archive$/i),
     trash: byUse("\\Trash") ?? byName(/^(INBOX[./])?(Trash|Deleted( Items| Messages)?)$/i),
+    junk: byUse("\\Junk") ?? byName(/^(INBOX[./])?(Junk|Spam|Junk E-?mail|Bulk Mail)$/i),
   };
 }
 
@@ -368,7 +373,7 @@ export class ImapSession {
     const mailboxes = await this.client.list();
     const roles = pickRoles(mailboxes, this.gmail);
     this.roles = roles;
-    const reserved = [roles.primary, roles.sent, roles.archive, roles.trash];
+    const reserved = [roles.primary, roles.sent, roles.archive, roles.trash, roles.junk];
     this.customPaths = mailboxes
       .filter(
         (box) =>
@@ -596,6 +601,30 @@ export class ImapSession {
     return { files, complete: true };
   }
 
+  /** Only download the signed source when one-click is offered and the message fits the limit. */
+  async fetchUnsubscribeSource(uid: number, maxBytes: number): Promise<Buffer | null> {
+    const summary = await this.client.fetchOne(
+      String(uid),
+      { size: true, headers: ["from", "list-unsubscribe", "list-unsubscribe-post"] },
+      { uid: true },
+    );
+    if (!summary || !summary.headers) return null;
+    if (
+      summary.size === undefined ||
+      summary.size > maxBytes ||
+      !/^list-unsubscribe-post:/im.test(summary.headers.toString("latin1"))
+    )
+      return summary.headers;
+    const message = await this.client.fetchOne(
+      String(uid),
+      { source: { start: 0, maxLength: maxBytes + 1 } },
+      { uid: true },
+    );
+    return message && message.source && message.source.length <= maxBytes
+      ? message.source
+      : summary.headers;
+  }
+
   /** Gmail server-side search; returns All Mail UIDs. */
   async searchGmailRaw(query: string): Promise<ReadonlyArray<number>> {
     const uids = await this.client.search({ gmraw: query }, { uid: true });
@@ -658,6 +687,23 @@ export class ImapSession {
     if (uids.length === 0) return null;
     const result = await this.client.messageMove(uids.join(","), destination, { uid: true });
     return result && result.uidMap && result.uidValidity !== undefined
+      ? { uidMap: result.uidMap, uidValidity: String(result.uidValidity) }
+      : null;
+  }
+
+  get supportsUidPlus() {
+    return this.client.capabilities.has("UIDPLUS") || this.client.capabilities.has("IMAP4REV2");
+  }
+
+  /** Like `move`, but a refused MOVE throws instead of passing for one without UIDPLUS. */
+  async moveOrThrow(uids: ReadonlyArray<number>, destination: string) {
+    const result = await this.client.messageMove(uids.join(","), destination, { uid: true });
+    if (!result)
+      throw new ImapFailure({
+        kind: "other",
+        detail: `The server did not move mail to ${destination}.`,
+      });
+    return result.uidMap && result.uidValidity !== undefined
       ? { uidMap: result.uidMap, uidValidity: String(result.uidValidity) }
       : null;
   }

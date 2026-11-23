@@ -3,6 +3,7 @@ import * as MailEngine from "../mail/MailEngine.ts";
 import * as MailService from "../mail/MailService.ts";
 import * as MailStore from "../mail/MailStore.ts";
 import * as MailSync from "../mail/MailSync.ts";
+import * as MailUnsubscribeTransport from "../mail/MailUnsubscribeTransport.ts";
 import * as MailChatContext from "../mail/MailChatContext.ts";
 import { MailToolkit } from "../mcp/toolkits/mail/tools.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
@@ -413,6 +414,11 @@ it.effect("opens mail triage history without starting a turn and delivers a foll
         }),
       ),
       Layer.provide(Layer.mock(MailSync.MailSync)({})),
+      Layer.provide(
+        Layer.mock(MailUnsubscribeTransport.MailUnsubscribeTransport)({
+          resolveTxt: async () => [],
+        }),
+      ),
       Layer.provide(MailCredentials.layerMemory),
       Layer.provideMerge(MailEngine.layer),
       Layer.provideMerge(MailChatContext.layer),

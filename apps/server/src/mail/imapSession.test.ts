@@ -114,3 +114,18 @@ it("downloads only the selected MIME attachment even when filenames match", asyn
   expect(await session.fetchAttachments(3, 4, 2)).toEqual({ files: [], complete: true });
   expect(download.mock.calls.map(([, part]) => part)).toEqual(["3", "3"]);
 });
+
+it("keeps the list link in a large email without downloading its attachments to verify DKIM", async () => {
+  const session = new ImapSession(
+    { host: "localhost", port: 1, secure: false, user: "fixture", password: "fixture" },
+    { onExists: () => {}, onFlags: () => {}, onExpunge: () => {}, onClose: () => {} },
+  );
+  const headers = Buffer.from(
+    "List-Unsubscribe: <https://example.com/news>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n",
+  );
+  using fetch = vi
+    .spyOn(session.client, "fetchOne")
+    .mockResolvedValueOnce({ seq: 1, uid: 4, headers, size: 2048 });
+  expect(await session.fetchUnsubscribeSource(4, 1024)).toEqual(headers);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});

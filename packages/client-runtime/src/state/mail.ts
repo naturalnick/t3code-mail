@@ -251,5 +251,14 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-command:mail:review-existing",
       tag: WS_METHODS.mailReviewExisting,
     }),
+    // A command, not a query: reading the options fetches the message and looks up DNS.
+    unsubscribeOptions: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:unsubscribe-options",
+      tag: WS_METHODS.mailUnsubscribeOptions,
+    }),
+    unsubscribe: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:unsubscribe",
+      tag: WS_METHODS.mailUnsubscribe,
+    }),
   };
 }
