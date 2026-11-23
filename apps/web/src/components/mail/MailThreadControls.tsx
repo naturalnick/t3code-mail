@@ -275,14 +275,6 @@ export function MailThreadToolbar({
               {gt("Move to inbox")}
             </MenuItem>
           )}
-          {thread.suggestion && (
-            <MenuItem
-              disabled={disabled}
-              onClick={() => void act([thread.id], { type: "keep" }, gt("Suggestion dismissed"))}
-            >
-              {gt("Dismiss suggestion")}
-            </MenuItem>
-          )}
           <MenuItem
             disabled={disabled}
             onClick={() => void act([thread.id], { type: "mark_unread" }, gt("Marked as unread"))}
