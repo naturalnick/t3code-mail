@@ -328,12 +328,17 @@ export const MailRule = Schema.Struct({
 });
 export type MailRule = typeof MailRule.Type;
 
+const cleanupMinutes = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1440 }));
+
 export const MailSettings = Schema.Struct({
   defaultModelSelection: Schema.NullOr(ModelSelection),
   /** A smarter model for low-confidence verdicts and senders who matter. Null keeps them as suggestions. */
   escalationModelSelection: Schema.NullOr(ModelSelection),
   /** Estimated tokens per week. Null means no cap. */
   weeklyTokenCap: Schema.NullOr(NonNegativeInt),
+  codeCleanupEnabled: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
+  codeInboxMinutes: cleanupMinutes.pipe(Schema.withDecodingDefaultKey(Effect.succeed(5))),
+  codeReadMinutes: cleanupMinutes.pipe(Schema.withDecodingDefaultKey(Effect.succeed(1))),
   serverMirroring: Schema.Boolean,
   recapEnabled: Schema.Boolean,
   notificationsEnabled: Schema.Boolean,
@@ -538,6 +543,7 @@ export const MailListTrashInput = Schema.Struct({
 });
 
 export const MailListActionsInput = Schema.Struct({
+  automatic: Schema.optionalKey(Schema.Boolean),
   beforeId: Schema.optionalKey(NonNegativeInt),
   actor: Schema.optionalKey(MailActor),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
@@ -625,6 +631,9 @@ export const MailUpdateSettingsInput = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   escalationModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   weeklyTokenCap: Schema.optionalKey(MailSettings.fields.weeklyTokenCap),
+  codeCleanupEnabled: Schema.optionalKey(Schema.Boolean),
+  codeInboxMinutes: Schema.optionalKey(cleanupMinutes),
+  codeReadMinutes: Schema.optionalKey(cleanupMinutes),
   serverMirroring: Schema.optionalKey(Schema.Boolean),
   recapEnabled: Schema.optionalKey(Schema.Boolean),
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),

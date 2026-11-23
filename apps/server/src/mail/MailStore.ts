@@ -35,6 +35,7 @@ import type * as SqlError from "effect/sql/SqlError";
 import type * as Statement from "effect/sql/Statement";
 
 import * as ServerConfig from "../config.ts";
+import { signInCodeLifetime } from "./signInCode.ts";
 import type { TrustClock, TrustRecord, TrustUndo } from "./mailTrust.ts";
 
 const workflowColumns = [
@@ -65,6 +66,9 @@ export const DEFAULT_SETTINGS: MailSettings = {
   defaultModelSelection: null,
   escalationModelSelection: null,
   weeklyTokenCap: 300_000,
+  codeCleanupEnabled: false,
+  codeInboxMinutes: 5,
+  codeReadMinutes: 1,
   serverMirroring: false,
   recapEnabled: true,
   notificationsEnabled: true,
@@ -411,6 +415,17 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `UPDATE mail_mailboxes SET highest_modseq = NULL WHERE account_id IN
        (SELECT id FROM mail_accounts WHERE provider != 'gmail')`,
   ],
+  [
+    `ALTER TABLE mail_messages ADD COLUMN code_received_at INTEGER`,
+    `ALTER TABLE mail_messages ADD COLUMN code_read_at INTEGER`,
+    `ALTER TABLE mail_messages ADD COLUMN code_lifetime INTEGER`,
+    `CREATE INDEX mail_code_candidates ON mail_messages(code_received_at) WHERE code_received_at IS NOT NULL`,
+    `CREATE INDEX mail_code_handled ON mail_actions(json_extract(undo_json, '$.trash.accountId'),
+        json_extract(undo_json, '$.trash.messageIds[0]')) WHERE reason = 'sign_in_code'`,
+    `CREATE TRIGGER mail_code_read AFTER UPDATE OF seen ON mail_messages
+      WHEN NEW.seen = 1 AND OLD.seen = 0 AND NEW.code_received_at IS NOT NULL AND NEW.code_read_at IS NULL
+      BEGIN UPDATE mail_messages SET code_read_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE id = NEW.id; END`,
+  ],
 ];
 
 const SEARCH_BODY_CHARS = 20_000;
@@ -445,6 +460,7 @@ export interface MessageInsert {
 }
 
 export interface StoredMessage extends MessageInsert {
+  readonly codeCleanupPending: boolean;
   readonly id: number;
   readonly body: string | null;
   readonly bodyState: "pending" | "loaded" | "unavailable";
@@ -746,6 +762,7 @@ export function threadRow(thread: ThreadRecord, hasDraft: boolean): MailThreadRo
 }
 
 const toMessage = (row: Row): StoredMessage => ({
+  codeCleanupPending: row.code_received_at != null && row.code_lifetime != null,
   id: num(row.id),
   accountId: MailAccountId.make(str(row.account_id)),
   mailbox: str(row.mailbox),
@@ -997,7 +1014,8 @@ const makeStore = (sql: SqlClient.SqlClient) => {
         )`;
         yield* sql`DELETE FROM mail_trust_clock WHERE key IN ${exclusiveKeys}`;
         yield* sql`DELETE FROM mail_trust WHERE key IN ${exclusiveKeys}`;
-        yield* sql`DELETE FROM mail_actions WHERE instr(thread_id, ${prefix}) = 1`;
+        yield* sql`DELETE FROM mail_actions WHERE instr(thread_id, ${prefix}) = 1
+          OR (reason = 'sign_in_code' AND json_extract(undo_json, '$.trash.accountId') = ${id})`;
         yield* sql`DELETE FROM mail_contacts WHERE account_id = ${id}`;
         // Legacy reply examples have no ownership information.
         yield* sql`DELETE FROM mail_kv WHERE key IN ('draft-edits', ${"body-quota:" + id}) OR key IN (
@@ -1143,7 +1161,15 @@ const makeStore = (sql: SqlClient.SqlClient) => {
       WHERE id = ${id}`.pipe(Effect.asVoid);
 
   const setMessageBody = Effect.fnUntraced(function* (id: number, body: string | null) {
-    yield* sql`UPDATE mail_messages SET body = ${body}, body_state = ${body === null ? "unavailable" : "loaded"} WHERE id = ${id}`;
+    const [row] = yield* sql<{
+      subject: string;
+      code_received_at: number | null;
+    }>`UPDATE mail_messages SET body = ${body}, body_state = ${body === null ? "unavailable" : "loaded"} WHERE id = ${id} RETURNING subject, code_received_at`;
+    if (row && row.code_received_at !== null) {
+      const lifetime = signInCodeLifetime(row.subject, body ?? "");
+      yield* sql`UPDATE mail_messages SET code_lifetime = ${lifetime},
+        code_received_at = ${lifetime === null ? null : row.code_received_at} WHERE id = ${id}`;
+    }
     if (body !== null) {
       yield* sql`UPDATE mail_search SET body = ${body.slice(0, SEARCH_BODY_CHARS)} WHERE rowid = ${id}`;
     }
@@ -1782,12 +1808,14 @@ const makeStore = (sql: SqlClient.SqlClient) => {
   const listActions = (input: {
     readonly beforeId: number | undefined;
     readonly actor: MailActor | undefined;
+    readonly automatic?: boolean | undefined;
     readonly threadId: MailThreadId | undefined;
     readonly limit: number;
   }) =>
     sql<Row>`SELECT * FROM mail_action_history WHERE 1 = 1
         ${input.beforeId === undefined ? sql`` : sql`AND id < ${input.beforeId}`}
         ${input.actor === undefined ? sql`` : sql`AND actor = ${input.actor}`}
+        ${input.automatic ? sql`AND (actor = 'rule' OR (actor = 'mail' AND kind = 'delete' AND reason = 'sign_in_code'))` : sql``}
         ${input.threadId === undefined ? sql`` : sql`AND thread_id = ${input.threadId}`}
       ORDER BY id DESC LIMIT ${input.limit + 1}`.pipe(
       Effect.map((rows) => ({

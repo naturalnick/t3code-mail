@@ -19,7 +19,7 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { actionLabel, senderName } from "./mailPresentation";
 import { useMailActions } from "./useMailActions";
 
-function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
+function AutomaticActions({ environmentId }: { environmentId: EnvironmentId }) {
   const gt = useGT();
   const resolve = useMessages();
   const [before, setBefore] = useState<number[]>([]);
@@ -27,7 +27,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
   const query = useEnvironmentQuery(
     mailEnvironment.actions({
       environmentId,
-      input: { actor: "rule", limit: 20, ...(cursor === undefined ? {} : { beforeId: cursor }) },
+      input: { automatic: true, limit: 20, ...(cursor === undefined ? {} : { beforeId: cursor }) },
     }),
   );
   const actions = useMailActions(environmentId);
@@ -36,7 +36,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
     <section className="grid min-w-0 grid-cols-1 gap-2 pt-2">
       {query.error && <p role="alert">{query.error}</p>}
       {query.data && entries.length === 0 && (
-        <p className="text-sm text-muted-foreground">{gt("No mail auto-settled via rules yet.")}</p>
+        <p className="text-sm text-muted-foreground">{gt("No automatic actions yet.")}</p>
       )}
       {entries.map((entry) => (
         <div key={entry.id} className="flex items-center gap-3 border-b py-2 text-sm">
@@ -50,7 +50,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
                 {entry.subject || entry.from}
               </Link>
             ) : (
-              entry.subject
+              <span className="block truncate font-medium">{entry.subject || entry.from}</span>
             )}
             <span className="text-xs text-muted-foreground">{actionLabel(entry, resolve)}</span>
           </div>
@@ -63,7 +63,7 @@ function AiLog({ environmentId }: { environmentId: EnvironmentId }) {
                   disabled={actions.disabled}
                   onClick={() => void actions.undo([entry.id])}
                 >
-                  {gt("Undo")}
+                  {entry.reason === "sign_in_code" ? gt("Restore") : gt("Undo")}
                 </Button>
               )}
         </div>
@@ -296,10 +296,10 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
         <Collapsible>
           <CollapsibleTrigger className="flex cursor-pointer items-center gap-1 text-sm font-medium hover:text-foreground data-panel-open:[&_svg]:rotate-90">
             <ChevronRightIcon className="size-4 transition-transform" aria-hidden />
-            {gt("Auto-settled")}
+            {gt("Automatic actions")}
           </CollapsibleTrigger>
           <CollapsiblePanel>
-            <AiLog environmentId={environmentId} />
+            <AutomaticActions environmentId={environmentId} />
           </CollapsiblePanel>
         </Collapsible>
       )}

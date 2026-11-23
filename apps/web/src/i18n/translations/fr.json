@@ -6062,7 +6062,6 @@
   "a06e9bfa588dfa12": "Afficher la version simplifiée",
   "d86ca10f8c1bf2ac": "Masquer les messages précédents",
   "bb2497d180b71e36": "Afficher les messages précédents",
-  "60fdb1f95f43eac7": "Aucun e-mail clos automatiquement par vos règles pour l’instant.",
   "f9108090db82de08": "Annulé",
   "ab47f58386924b4f": "Précédente",
   "7f8cb8174c6d288f": "Suivante",
@@ -6090,7 +6089,6 @@
   "6e67ab167cd02e15": "Clos",
   "75c453382d18333b": "Clore {count}",
   "bf2040844a269e5c": "Clore {subject}",
-  "70681e745dede343": "Clos automatiquement",
   "4c1bb2b7f39a614a": "Aucun serveur connecté ne propose le courrier.",
   "e27b5bc79c61b49f": "Chargement du courrier…",
   "5d4063cd15d7cc1e": "Chargement du message…",
@@ -9282,7 +9280,6 @@
   "3eab81a3f4e043c9": "{count, plural, one {# fil correspondant} other {# fils correspondants}}",
   "3b344b5ddaf1178e": "Simuler",
   "a7b1acd546820064": "Ajouter une règle",
-  "563216737906c7c0": "Aucune règle",
   "d8632c3ee4db09ea": "Uniquement si : {when}",
   "f8d405c47fc93011": "Ajoutée par {agent}",
   "666b6f323f7f3274": "Activer la règle",
@@ -13084,5 +13081,13 @@
   "eba00638c6719508": "Sélectionné",
   "95c5094bd9ce2f0a": "Tous les messages",
   "1da710e85cc2abd4": "Effacer le filtre de libellé",
-  "b1d0b06451637aa2": "Filtrer par libellé"
+  "b1d0b06451637aa2": "Filtrer par libellé",
+  "fdf5475c653bfb04": "Aucune action automatique pour le moment.",
+  "a1a5802c9fbed9a5": "Actions automatiques",
+  "6962f5f812e06f4e": "Code de connexion",
+  "0e75f619aada9705": "Code de connexion déplacé dans la corbeille",
+  "297d5ce4c4a3d943": "Mettre automatiquement les codes de connexion à la corbeille",
+  "5ce7cd08a5109013": "Les nouveaux messages contenant un code sont mis à la corbeille dès le premier délai atteint ou à l’expiration du code si elle survient avant.",
+  "f38f53b7c49b1a07": "Minutes après réception",
+  "2b2554fe4126fe5c": "Minutes après lecture"
 }

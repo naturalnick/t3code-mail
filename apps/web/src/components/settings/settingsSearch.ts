@@ -272,7 +272,10 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "mail-rules",
     title: msg("Rules"),
     to: "/settings/mail",
-    searchTerms: [msg("filters automatic settle domain subject list dry run when condition")],
+    searchTerms: [
+      msg("filters automatic settle domain subject list dry run when condition"),
+      msg("Automatically trash sign-in codes"),
+    ],
   },
   {
     id: "mail-ai-off",

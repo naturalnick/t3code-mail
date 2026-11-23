@@ -367,6 +367,7 @@ const make = Effect.gen(function* () {
     const me = context.accountEmail.toLowerCase();
     const newMessageIds: Array<{ id: number; uid: number }> = [];
     let arrived = 0;
+    const cleanupSince = yield* store.getKv("code-cleanup-since");
     const touched = new Map<
       string,
       {
@@ -420,6 +421,26 @@ const make = Effect.gen(function* () {
         textPart: message.textPart,
       });
       if (!result.inserted) continue;
+      const received = message.deliveredAt;
+      if (
+        cleanupSince &&
+        received !== undefined &&
+        received >= Number(cleanupSince) &&
+        !outgoing &&
+        inInbox &&
+        message.messageId &&
+        !message.calendar &&
+        !message.listId &&
+        !message.listUnsubscribe &&
+        !message.attachments.some((file) => !file.contentType.startsWith("image/"))
+      ) {
+        yield* store.sql`UPDATE mail_messages SET code_received_at = ${Math.min(received, Date.parse(now))},
+          code_read_at = ${message.seen ? Date.parse(now) : null} WHERE id = ${result.id}
+          AND NOT EXISTS (SELECT 1 FROM mail_actions WHERE reason = 'sign_in_code'
+            AND json_extract(undo_json, '$.trash.accountId') = ${context.accountId}
+            AND json_extract(undo_json, '$.trash.messageIds[0]') = ${message.messageId})`;
+        if (message.textPart === null) yield* store.setMessageBody(result.id, null);
+      }
       if (!outgoing && inInbox && !message.seen) arrived++;
       if (message.textPart !== null) newMessageIds.push({ id: result.id, uid: message.uid });
       const entry = touched.get(threadId)!;

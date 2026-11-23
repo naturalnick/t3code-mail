@@ -6063,7 +6063,6 @@
   "a06e9bfa588dfa12": "Show simplified",
   "d86ca10f8c1bf2ac": "Hide earlier messages",
   "bb2497d180b71e36": "Show earlier messages",
-  "60fdb1f95f43eac7": "No mail auto-settled via rules yet.",
   "f9108090db82de08": "Undone",
   "ab47f58386924b4f": "Previous",
   "7f8cb8174c6d288f": "Next",
@@ -6091,7 +6090,6 @@
   "6e67ab167cd02e15": "Settled",
   "75c453382d18333b": "Settle {count}",
   "bf2040844a269e5c": "Settle {subject}",
-  "70681e745dede343": "Auto-settled",
   "4c1bb2b7f39a614a": "No connected server has Mail.",
   "e27b5bc79c61b49f": "Loading mail…",
   "5d4063cd15d7cc1e": "Loading email…",
@@ -9290,7 +9288,6 @@
   "3eab81a3f4e043c9": "{count, plural, one {# matching thread} other {# matching threads}}",
   "3b344b5ddaf1178e": "Dry run",
   "a7b1acd546820064": "Add rule",
-  "563216737906c7c0": "No rules",
   "d8632c3ee4db09ea": "Only when: {when}",
   "f8d405c47fc93011": "Added by {agent}",
   "666b6f323f7f3274": "Enable rule",
@@ -13093,5 +13090,13 @@
   "eba00638c6719508": "Selected",
   "95c5094bd9ce2f0a": "All mail",
   "1da710e85cc2abd4": "Clear label filter",
-  "b1d0b06451637aa2": "Filter by label"
+  "b1d0b06451637aa2": "Filter by label",
+  "fdf5475c653bfb04": "No automatic actions yet.",
+  "a1a5802c9fbed9a5": "Automatic actions",
+  "6962f5f812e06f4e": "Sign-in code",
+  "0e75f619aada9705": "Sign-in code moved to Trash",
+  "297d5ce4c4a3d943": "Automatically trash sign-in codes",
+  "5ce7cd08a5109013": "Move new code emails to Trash at the earliest of these times or the code’s stated expiry.",
+  "f38f53b7c49b1a07": "Minutes after delivery",
+  "2b2554fe4126fe5c": "Minutes after reading"
 }

@@ -99,6 +99,7 @@ import {
   EMAIL_MD_TEMPLATE,
   type TriageItem,
 } from "./mailPrompts.ts";
+import { makeCodeCleanup } from "./mailCodeCleanup.ts";
 import * as MailStore from "./MailStore.ts";
 import * as MailSync from "./MailSync.ts";
 import {
@@ -379,6 +380,7 @@ const make = Effect.gen(function* () {
   const accountLock = yield* TxReentrantLock.make();
   const changeAccounts = <A, E, R>(operation: Effect.Effect<A, E, R>) =>
     TxReentrantLock.withWriteLock(accountLock, operation);
+  const setCodeCleanupRunning = yield* makeCodeCleanup();
   const stateLock = yield* Semaphore.make(1);
   const commit = stateLock.withPermits(1);
   // Model calls run under this one, never under stateLock, so user actions never wait on a model.
@@ -938,6 +940,7 @@ const make = Effect.gen(function* () {
       const page = yield* store.listActions({
         beforeId: input.beforeId,
         actor: input.actor,
+        automatic: input.automatic,
         threadId: undefined,
         limit: input.limit ?? 50,
       });
@@ -1259,6 +1262,7 @@ const make = Effect.gen(function* () {
       : newest;
     // Sync fetches every pending body (or marks it unavailable) and then wakes triage again.
     if (latest.bodyState === "pending") return "wait" as const;
+    if (settings.codeCleanupEnabled && latest.codeCleanupPending) return null;
     const account = yield* store.getAccount(thread.accountId);
     const me = account?.email.toLowerCase() ?? "";
     // Guardrails read the whole message; only the model's copy is cut short.
@@ -2556,10 +2560,23 @@ const make = Effect.gen(function* () {
             ...current,
             ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
           };
+          if (next.codeCleanupEnabled !== current.codeCleanupEnabled) {
+            yield* store.setKv(
+              "code-cleanup-since",
+              next.codeCleanupEnabled ? String(Date.parse(yield* nowIso)) : "",
+            );
+            if (!next.codeCleanupEnabled)
+              yield* store.sql`UPDATE mail_messages SET code_received_at = NULL WHERE code_received_at IS NOT NULL`;
+          }
           yield* engine.putSettings(next);
           return [current, next] as const;
         }),
       );
+      if (
+        current.codeCleanupEnabled !== next.codeCleanupEnabled ||
+        current.syncEnabled !== next.syncEnabled
+      )
+        yield* setCodeCleanupRunning(next.codeCleanupEnabled && next.syncEnabled);
       if (current.syncEnabled !== next.syncEnabled) {
         for (const account of yield* store.listAccounts) {
           if (account.credentialPending) continue;
@@ -2781,6 +2798,8 @@ const make = Effect.gen(function* () {
   }
   yield* triageWorker.pipe(Effect.forkScoped);
   yield* Queue.offer(engine.triageSignal, undefined);
+  const cleanupSettings = yield* engine.settings;
+  yield* setCodeCleanupRunning(cleanupSettings.codeCleanupEnabled && cleanupSettings.syncEnabled);
   yield* tick.pipe(Effect.repeat(Schedule.spaced("1 minute")), Effect.forkScoped);
 
   return MailService.of({

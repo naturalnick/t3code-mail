@@ -602,19 +602,21 @@ function MailTrashRow(props: {
   const { undo, disabled } = useMailActions(props.environmentId);
   const [restoring, setRestoring] = useState(false);
   const { entry } = props;
+  const subject =
+    entry.reason === "sign_in_code" ? gt("Sign-in code") : entry.subject || gt("(No subject)");
   return (
     <li className="group/sidebar-row flex list-none items-center gap-1.5 rounded-md px-(--sidebar-row-content-inset) py-1.5 text-sidebar-muted-foreground hover:bg-sidebar-row-hover">
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs text-secondary-label">
           {entry.from ?? gt("Unknown sender")}
         </p>
-        <p className="truncate text-sm">{entry.subject || gt("(No subject)")}</p>
+        <p className="truncate text-sm">{subject}</p>
       </div>
       <Button
         size="xs"
         variant="ghost"
         disabled={disabled || restoring}
-        aria-label={gt("Restore {subject}", { subject: entry.subject || gt("(No subject)") })}
+        aria-label={gt("Restore {subject}", { subject })}
         onClick={async () => {
           setRestoring(true);
           const restored = await undo([entry.id]);

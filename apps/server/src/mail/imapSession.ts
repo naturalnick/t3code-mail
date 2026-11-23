@@ -72,6 +72,7 @@ export function classifyImapError(error: unknown): ImapFailure {
 }
 
 export interface ParsedMessage {
+  readonly deliveredAt?: number;
   readonly uid: number;
   readonly messageId: string | null;
   readonly gmailThreadId: string | null;
@@ -235,6 +236,7 @@ function parseFetched(message: FetchMessageObject, labels: ParsedMessage["labels
   return {
     uid: message.uid,
     messageId: envelope.messageId?.trim() || null,
+    ...(message.internalDate ? { deliveredAt: new Date(message.internalDate).getTime() } : {}),
     gmailThreadId: message.threadId ?? null,
     labels,
     from: toAddress(envelope.from?.[0] ?? envelope.sender?.[0]),

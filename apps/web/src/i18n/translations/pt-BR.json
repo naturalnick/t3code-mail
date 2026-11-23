@@ -6061,7 +6061,6 @@
   "a06e9bfa588dfa12": "Mostrar simplificado",
   "d86ca10f8c1bf2ac": "Ocultar mensagens anteriores",
   "bb2497d180b71e36": "Mostrar mensagens anteriores",
-  "60fdb1f95f43eac7": "Nenhum e-mail concluído automaticamente por regras ainda.",
   "f9108090db82de08": "Desfeito",
   "ab47f58386924b4f": "Anterior",
   "7f8cb8174c6d288f": "Próxima",
@@ -6089,7 +6088,6 @@
   "6e67ab167cd02e15": "Concluída",
   "75c453382d18333b": "Concluir {count}",
   "bf2040844a269e5c": "Concluir {subject}",
-  "70681e745dede343": "Concluídas automaticamente",
   "4c1bb2b7f39a614a": "Nenhum servidor conectado oferece E-mail.",
   "e27b5bc79c61b49f": "Carregando e-mails…",
   "5d4063cd15d7cc1e": "Carregando e-mail…",
@@ -9281,7 +9279,6 @@
   "3eab81a3f4e043c9": "{count, plural, one {# thread correspondente} other {# threads correspondentes}}",
   "3b344b5ddaf1178e": "Simular",
   "a7b1acd546820064": "Adicionar regra",
-  "563216737906c7c0": "Nenhuma regra",
   "d8632c3ee4db09ea": "Somente quando: {when}",
   "f8d405c47fc93011": "Adicionada por {agent}",
   "666b6f323f7f3274": "Ativar regra",
@@ -13084,5 +13081,13 @@
   "eba00638c6719508": "Selecionado",
   "95c5094bd9ce2f0a": "Todos os e-mails",
   "1da710e85cc2abd4": "Limpar filtro de marcador",
-  "b1d0b06451637aa2": "Filtrar por marcador"
+  "b1d0b06451637aa2": "Filtrar por marcador",
+  "fdf5475c653bfb04": "Nenhuma ação automática ainda.",
+  "a1a5802c9fbed9a5": "Ações automáticas",
+  "6962f5f812e06f4e": "Código de acesso",
+  "0e75f619aada9705": "Código de acesso movido para a lixeira",
+  "297d5ce4c4a3d943": "Mover códigos de acesso para a lixeira automaticamente",
+  "5ce7cd08a5109013": "Os novos e-mails com códigos vão para a lixeira no primeiro destes prazos ou quando o código expirar, o que ocorrer antes.",
+  "f38f53b7c49b1a07": "Minutos após a entrega",
+  "2b2554fe4126fe5c": "Minutos após a leitura"
 }

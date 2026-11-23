@@ -6062,7 +6062,6 @@
   "a06e9bfa588dfa12": "Vereinfacht anzeigen",
   "d86ca10f8c1bf2ac": "Frühere Nachrichten ausblenden",
   "bb2497d180b71e36": "Frühere Nachrichten anzeigen",
-  "60fdb1f95f43eac7": "Noch keine E-Mails durch Regeln automatisch erledigt.",
   "f9108090db82de08": "Rückgängig gemacht",
   "ab47f58386924b4f": "Zurück",
   "7f8cb8174c6d288f": "Weiter",
@@ -6090,7 +6089,6 @@
   "6e67ab167cd02e15": "Erledigt",
   "75c453382d18333b": "{count} erledigen",
   "bf2040844a269e5c": "{subject} erledigen",
-  "70681e745dede343": "Automatisch erledigt",
   "4c1bb2b7f39a614a": "Keiner der verbundenen Server unterstützt E-Mail.",
   "e27b5bc79c61b49f": "E-Mails werden geladen…",
   "5d4063cd15d7cc1e": "E-Mail wird geladen…",
@@ -9282,7 +9280,6 @@
   "3eab81a3f4e043c9": "{count, plural, one {# passender Thread} other {# passende Threads}}",
   "3b344b5ddaf1178e": "Probelauf",
   "a7b1acd546820064": "Regel hinzufügen",
-  "563216737906c7c0": "Keine Regeln",
   "d8632c3ee4db09ea": "Nur wenn: {when}",
   "f8d405c47fc93011": "Hinzugefügt von {agent}",
   "666b6f323f7f3274": "Regel aktivieren",
@@ -13084,5 +13081,13 @@
   "eba00638c6719508": "Ausgewählt",
   "95c5094bd9ce2f0a": "Alle E-Mails",
   "1da710e85cc2abd4": "Labelfilter löschen",
-  "b1d0b06451637aa2": "Nach Label filtern"
+  "b1d0b06451637aa2": "Nach Label filtern",
+  "fdf5475c653bfb04": "Noch keine automatischen Aktionen.",
+  "a1a5802c9fbed9a5": "Automatische Aktionen",
+  "6962f5f812e06f4e": "Anmeldecode",
+  "0e75f619aada9705": "Anmeldecode in den Papierkorb verschoben",
+  "297d5ce4c4a3d943": "Anmeldecodes automatisch in den Papierkorb verschieben",
+  "5ce7cd08a5109013": "Neue Code-E-Mails werden beim ersten dieser Zeitpunkte oder beim angegebenen Ablauf des Codes in den Papierkorb verschoben.",
+  "f38f53b7c49b1a07": "Minuten nach Zustellung",
+  "2b2554fe4126fe5c": "Minuten nach dem Lesen"
 }

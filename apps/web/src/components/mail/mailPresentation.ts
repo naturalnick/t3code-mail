@@ -49,6 +49,7 @@ export function actionLabel(action: MailActionEntry, resolve: MessageResolver = 
     case "mark_unread":
       return resolve(msg("Marked as unread"));
     case "delete":
+      if (action.reason === "sign_in_code") return resolve(msg("Sign-in code moved to Trash"));
       return resolve(msg("Moved to Trash"));
     case "wait_for_reply":
       return resolve(msg("Waiting for reply"));

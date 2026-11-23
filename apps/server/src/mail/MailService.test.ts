@@ -7,6 +7,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as TestClock from "effect/testing/TestClock";
+import * as Clock from "effect/Clock";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -398,6 +400,12 @@ describe("MailService rules and feedback", () => {
         yield* store.sql`DROP TABLE mail_message_labels`;
         yield* store.sql`ALTER TABLE mail_accounts DROP COLUMN labels`;
         yield* store.sql`ALTER TABLE mail_accounts DROP COLUMN folders`;
+        yield* store.sql`DROP TRIGGER mail_code_read`;
+        yield* store.sql`DROP INDEX mail_code_candidates`;
+        yield* store.sql`DROP INDEX mail_code_handled`;
+        yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_lifetime`;
+        yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_received_at`;
+        yield* store.sql`ALTER TABLE mail_messages DROP COLUMN code_read_at`;
         yield* store.sql`PRAGMA user_version = 15`;
         yield* store.migrate;
         expect(yield* engine.settings).toEqual({
@@ -2170,6 +2178,107 @@ it.effect("undo mirrors only messages that settle found in the inbox", () =>
       yield* replay(true);
       yield* replayOp(accountId, `{"kind":"archive","threadId":"${threadId}"}`, roles, session);
       expect(calls).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("trashes each new sign-in code on its own deadline and restores it from Review", () =>
+  withMail(
+    Effect.gen(function* () {
+      const store = yield* MailStore.MailStore;
+      const engine = yield* MailEngine.MailEngine;
+      const mail = yield* MailService.MailService;
+      const ctx = {
+        accountId,
+        accountEmail: me,
+        gmail: true,
+        mailbox: "All Mail",
+        role: "primary" as const,
+        initial: false,
+        backfill: false,
+      };
+      yield* store.putMailbox({
+        accountId,
+        path: ctx.mailbox,
+        role: ctx.role,
+        uidValidity: "11",
+        maxUid: 0,
+        minUid: null,
+        highestModseq: null,
+        backfillDone: true,
+      });
+      const incoming = (seen: boolean, deliveredAt: number) => ({
+        ...message({ subject: "Your sign-in code", at }),
+        gmailThreadId: "123",
+        labels: ["\\Inbox"],
+        seen,
+        deliveredAt,
+      });
+      const receive = (msg: ParsedMessage, body: string) =>
+        Effect.gen(function* () {
+          const inserted = yield* engine.ingest(ctx, [msg]);
+          yield* store.setMessageBody(inserted.newMessageIds[0]!.id, body);
+          return inserted.threads[0]!;
+        });
+      const now = yield* Clock.currentTimeMillis;
+      yield* receive(incoming(false, now), "Your sign-in code: 123456");
+      const settings = yield* mail.updateSettings({ codeCleanupEnabled: true });
+      expect([settings.codeInboxMinutes, settings.codeReadMinutes]).toEqual([5, 1]);
+      const read = incoming(true, now);
+      const threadId = yield* receive(read, "Your sign-in code is 456-091.");
+      const unread = incoming(false, now);
+      yield* receive(unread, "Your sign-in code is 123456.");
+      yield* receive(incoming(false, now), "Your sign-in code: 998877. Expires in 30 seconds.");
+      yield* receive(incoming(false, now - 1000), "Your sign-in code: 224488.");
+      yield* TestClock.adjust("30 seconds");
+      expect((yield* mail.listTrash({})).actions).toHaveLength(1);
+      yield* TestClock.adjust("30 seconds");
+      const actions = (yield* mail.listActions({ automatic: true })).actions;
+      expect(actions).toHaveLength(2);
+      expect(actions[0]).toMatchObject({
+        actor: "mail",
+        kind: "delete",
+        reason: "sign_in_code",
+        subject: null,
+        undoable: true,
+      });
+      expect((yield* store.threadMessages(threadId)).map((m) => m.uid)).toContain(unread.uid);
+      yield* mail.undo(actions[0]!.id);
+      yield* receive(
+        { ...read, uid: nextUid++, deliveredAt: yield* Clock.currentTimeMillis },
+        "Your sign-in code is 456-091.",
+      );
+      yield* mail.updateSettings({ codeInboxMinutes: 2 });
+      yield* TestClock.adjust("1 minute");
+      expect((yield* mail.listTrash({})).actions).toHaveLength(2);
+      expect((yield* store.threadMessages(threadId)).map((m) => m.messageId)).toContain(
+        read.messageId,
+      );
+      expect((yield* store.threadMessages(threadId)).map((m) => m.messageId)).not.toContain(
+        unread.messageId,
+      );
+      const ops = yield* store.pendingOps(accountId);
+      expect(
+        ops
+          .filter((op) => op.kind === "trash")
+          .map((op) => JSON.parse(op.payload).locations.length),
+      ).toEqual([1, 1, 1]);
+      expect(ops.filter((op) => op.kind === "untrash")).toHaveLength(1);
+      const onPhone = incoming(false, yield* Clock.currentTimeMillis);
+      yield* receive(onPhone, "Your sign-in code: 345678.");
+      yield* engine.applyFlags(ctx, [{ uid: onPhone.uid, seen: true, labels: ["\\Inbox"] }]);
+      const [observed] = yield* store.sql<{
+        code_read_at: number | null;
+      }>`SELECT code_read_at FROM mail_messages WHERE uid = ${onPhone.uid}`;
+      expect(observed?.code_read_at).toEqual(expect.any(Number));
+      yield* engine.applyFlags(ctx, [{ uid: onPhone.uid, seen: false, labels: ["\\Inbox"] }]);
+      yield* engine.applyFlags(ctx, [{ uid: onPhone.uid, seen: true, labels: ["\\Inbox"] }]);
+      expect(
+        yield* store.sql`SELECT code_read_at FROM mail_messages WHERE uid = ${onPhone.uid}`,
+      ).toEqual([observed]);
+      yield* mail.updateSettings({ codeCleanupEnabled: false });
+      yield* TestClock.adjust("5 minutes");
+      expect((yield* mail.listTrash({})).actions).toHaveLength(2);
     }),
   ),
 );

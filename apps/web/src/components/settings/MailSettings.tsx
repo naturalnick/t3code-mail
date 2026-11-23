@@ -322,6 +322,59 @@ function Behavior({ environmentId, settings }: SettingsProps) {
   );
 }
 
+function CodeCleanup({ environmentId, settings }: SettingsProps) {
+  const gt = useGT();
+  const save = useMailCommand(
+    environmentId,
+    mailEnvironment.updateSettings,
+    gt("Could not save mail settings"),
+  );
+  const title = gt("Automatically trash sign-in codes");
+  return (
+    <>
+      <SettingsRow
+        title={title}
+        description={gt(
+          "Move new code emails to Trash at the earliest of these times or the code’s stated expiry.",
+        )}
+        control={
+          <Switch
+            aria-label={title}
+            checked={settings.codeCleanupEnabled}
+            disabled={save.disabled}
+            onCheckedChange={(codeCleanupEnabled) => void save.run({ codeCleanupEnabled })}
+          />
+        }
+      />
+      {settings.codeCleanupEnabled &&
+        (
+          [
+            ["codeInboxMinutes", gt("Minutes after delivery")],
+            ["codeReadMinutes", gt("Minutes after reading")],
+          ] as const
+        ).map(([key, label]) => (
+          <SettingsRow
+            key={key}
+            title={label}
+            control={
+              <NumericSetting
+                key={settings[key]}
+                label={label}
+                value={settings[key]}
+                min={1}
+                max={1440}
+                disabled={save.disabled}
+                onSave={(value) => {
+                  if (value !== null) void save.run({ [key]: value });
+                }}
+              />
+            }
+          />
+        ))}
+    </>
+  );
+}
+
 function Memory({ environmentId, path }: { environmentId: EnvironmentId; path: string }) {
   const gt = useGT();
   const searchable = useSearchableSetting();
@@ -426,7 +479,9 @@ const MailSections = memo(function MailSections({
       <MailAccounts environmentId={environmentId} accounts={status.accounts} />
       <MailModels environmentId={environmentId} settings={settings} />
 
-      <MailRules environmentId={environmentId} rules={settings.rules} />
+      <MailRules environmentId={environmentId} rules={settings.rules}>
+        <CodeCleanup environmentId={environmentId} settings={settings} />
+      </MailRules>
       <MailAiOff environmentId={environmentId} senders={settings.aiExcludedSenders} />
       <Usage environmentId={environmentId} usage={status.usage} />
       <Behavior environmentId={environmentId} settings={settings} />

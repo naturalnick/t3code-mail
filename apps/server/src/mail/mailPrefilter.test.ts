@@ -3,6 +3,29 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { prefilter, type PrefilterInput } from "./mailPrefilter.ts";
 
+import { signInCodeLifetime } from "./signInCode.ts";
+
+it.each([
+  ["Your verification code", "456-091\nThis code expires in 45 seconds.", 45000],
+  ["Sign in", "456 091 is your login code.", 0],
+  [
+    "Access your account",
+    "Use 456-091 to sign in. This code is valid for the next 2 minutes.",
+    120000,
+  ],
+  ["Verification code: 458965", "Valid for 2 minutes.", 120000],
+  ["Sign-in code", "Use the following code:\n456091", 0],
+  ["Receipt", "Your verification code is 456091", null],
+  ["Unrecognized login", "Your verification code is 456091", null],
+  ["Backup codes", "Your login code is 456091", null],
+  ["Re: Your sign-in code", "Your sign-in code is 456091", null],
+  ["Verification code", "123456\n234567", null],
+  ["Order number 456-091", "Your order is ready.", null],
+  ["Hello", "> Your sign-in code is 456091", null],
+] as const)("recognizes disposable code mail: %s / %s", (subject, body, expected) => {
+  expect(signInCodeLifetime(subject, body)).toBe(expected);
+});
+
 const base: PrefilterInput = {
   fromAddress: "sam@example.org",
   fromName: "Sam",

@@ -201,11 +201,13 @@ export function RuleDialog({
 }
 
 export function MailRules({
+  children,
   environmentId,
   rules,
 }: {
   environmentId: EnvironmentId;
   rules: readonly MailRule[];
+  children: React.ReactNode;
 }) {
   const gt = useGT();
   const searchable = useSearchableSetting();
@@ -226,7 +228,7 @@ export function MailRules({
         </Button>
       }
     >
-      {rules.length === 0 && <SettingsRow title={gt("No rules")} />}
+      {children}
       {rules.map((rule) => {
         return (
           <SettingsRow

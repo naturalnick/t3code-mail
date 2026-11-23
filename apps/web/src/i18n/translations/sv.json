@@ -6062,7 +6062,6 @@
   "a06e9bfa588dfa12": "Visa förenklad",
   "d86ca10f8c1bf2ac": "Dölj tidigare meddelanden",
   "bb2497d180b71e36": "Visa tidigare meddelanden",
-  "60fdb1f95f43eac7": "Ingen e-post har klarmarkerats automatiskt av regler än.",
   "f9108090db82de08": "Ångrat",
   "ab47f58386924b4f": "Föregående",
   "7f8cb8174c6d288f": "Nästa",
@@ -6090,7 +6089,6 @@
   "6e67ab167cd02e15": "Klar",
   "75c453382d18333b": "Markera {count} som klara",
   "bf2040844a269e5c": "Markera {subject} som klar",
-  "70681e745dede343": "Automatiskt klarmarkerade",
   "4c1bb2b7f39a614a": "Ingen ansluten server har stöd för e-post.",
   "e27b5bc79c61b49f": "Läser in e-post…",
   "5d4063cd15d7cc1e": "Läser in mejlet…",
@@ -9288,7 +9286,6 @@
   "3eab81a3f4e043c9": "{count, plural, one {# matchande tråd} other {# matchande trådar}}",
   "3b344b5ddaf1178e": "Provkör",
   "a7b1acd546820064": "Lägg till regel",
-  "563216737906c7c0": "Inga regler",
   "d8632c3ee4db09ea": "Bara när: {when}",
   "f8d405c47fc93011": "Tillagd av {agent}",
   "666b6f323f7f3274": "Aktivera regel",
@@ -13091,5 +13088,13 @@
   "eba00638c6719508": "Vald",
   "95c5094bd9ce2f0a": "All e-post",
   "1da710e85cc2abd4": "Rensa etikettfilter",
-  "b1d0b06451637aa2": "Filtrera efter etikett"
+  "b1d0b06451637aa2": "Filtrera efter etikett",
+  "fdf5475c653bfb04": "Inga automatiska åtgärder ännu.",
+  "a1a5802c9fbed9a5": "Automatiska åtgärder",
+  "6962f5f812e06f4e": "Inloggningskod",
+  "0e75f619aada9705": "Inloggningskoden flyttades till papperskorgen",
+  "297d5ce4c4a3d943": "Flytta inloggningskoder till papperskorgen automatiskt",
+  "5ce7cd08a5109013": "Nya kodmeddelanden flyttas till papperskorgen när den första tidsgränsen nås eller tidigare om koden förfaller.",
+  "f38f53b7c49b1a07": "Minuter efter leverans",
+  "2b2554fe4126fe5c": "Minuter efter läsning"
 }
