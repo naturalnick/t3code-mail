@@ -27,6 +27,7 @@ import * as NodeCrypto from "node:crypto";
 
 import type { ParsedMessage } from "./imapSession.ts";
 import { asksQuestion, stripQuoted } from "./mailText.ts";
+import { ensureMailUsageIndex } from "./mailUsageIndex.ts";
 import * as MailStore from "./MailStore.ts";
 
 /** The recap lists this many settled emails and counts the rest. */
@@ -121,6 +122,7 @@ const make = Effect.gen(function* () {
   const arrivals = yield* PubSub.sliding<{ readonly count: number }>(1);
   const triageSignal = yield* Queue.sliding<void>(1);
   const orchestration = yield* SqlClient.SqlClient;
+  yield* ensureMailUsageIndex;
 
   const localNow = DateTime.now.pipe(
     Effect.map((now) => DateTime.setZone(now, DateTime.zoneMakeLocal())),

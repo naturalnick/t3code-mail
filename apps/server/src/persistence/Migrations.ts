@@ -116,7 +116,7 @@ import Migration0105 from "./Migrations/105_TaskFolders.ts";
 import Migration0106 from "./Migrations/106_WorktreePathKeyIndex.ts";
 import Migration0107 from "./Migrations/107_DeferredSlashCommandIndex.ts";
 import Migration0108 from "./Migrations/108_AgentFeedback.ts";
-import Migration0109 from "./Migrations/109_ProviderTurnCompletionIndex.ts";
+import Migration0109 from "./Migrations/109_IssueTrackerAccounts.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -228,7 +228,7 @@ const migrationEntries = [
   [106, "WorktreePathKeyIndex", Migration0106],
   [107, "DeferredSlashCommandIndex", Migration0107],
   [108, "AgentFeedback", Migration0108],
-  [109, "ProviderTurnCompletionIndex", Migration0109],
+  [109, "IssueTrackerAccounts", Migration0109],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -246,7 +246,7 @@ const FIRST_V2_MIGRATION_ID = 55;
 
 // Published Mail builds used these upstream ids for an idempotent index, always at the ledger head.
 const isFormerMailIndex = (id: number, name: string | undefined) =>
-  (id === 106 || id === 108) && name === "ProviderTurnCompletionIndex";
+  (id === 106 || id === 108 || id === 109) && name === "ProviderTurnCompletionIndex";
 
 export function skippedV2Migrations(
   recorded: ReadonlyArray<{ readonly id: number; readonly name: string }>,
@@ -311,14 +311,23 @@ export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* 
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
   `;
   if (tables.length === 0) return true;
-  const rows = yield* sql<{ readonly latestId: number | null; readonly previewRows: number }>`
+  const rows = yield* sql<{
+    readonly latestId: number | null;
+    readonly latestName: string | null;
+    readonly previewRows: number;
+  }>`
     SELECT
       MAX(migration_id) AS latestId,
+      (SELECT name FROM effect_sql_migrations ORDER BY migration_id DESC LIMIT 1) AS latestName,
       SUM(name = 'OrchestrationV2' AND migration_id IN (53, 54)) AS previewRows
     FROM effect_sql_migrations
   `;
   const row = rows[0];
-  return (row?.latestId ?? 0) < latestMigrationId || (row?.previewRows ?? 0) > 0;
+  return (
+    (row?.latestId ?? 0) < latestMigrationId ||
+    (row?.previewRows ?? 0) > 0 ||
+    isFormerMailIndex(row?.latestId ?? 0, row?.latestName ?? undefined)
+  );
 });
 
 const run = Migrator.make({});

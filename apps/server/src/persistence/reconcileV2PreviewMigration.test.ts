@@ -5,8 +5,8 @@ import * as Exit from "effect/Exit";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { migrationManifest, runMigrations } from "./Migrations.ts";
-import ProviderTurnCompletionIndex from "./Migrations/109_ProviderTurnCompletionIndex.ts";
+import { hasPendingMigrations, migrationManifest, runMigrations } from "./Migrations.ts";
+import { ensureMailUsageIndex } from "../mail/mailUsageIndex.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
@@ -89,7 +89,7 @@ describe("V2 preview upgrade", () => {
         [106, "WorktreePathKeyIndex"],
         [107, "DeferredSlashCommandIndex"],
         [108, "AgentFeedback"],
-        [109, "ProviderTurnCompletionIndex"],
+        [109, "IssueTrackerAccounts"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -221,21 +221,23 @@ describe("V2 preview upgrade", () => {
         [106, "WorktreePathKeyIndex"],
         [107, "DeferredSlashCommandIndex"],
         [108, "AgentFeedback"],
-        [109, "ProviderTurnCompletionIndex"],
+        [109, "IssueTrackerAccounts"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect.each([106, 108])("upgrades Mail's provider-turn index from migration %s", (id) =>
+  it.effect.each([106, 108, 109])("upgrades Mail's provider-turn index from migration %s", (id) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: id - 1 });
       yield* Migrator.make({})({
         loader: Migrator.fromRecord({
-          [`${id}_ProviderTurnCompletionIndex`]: ProviderTurnCompletionIndex,
+          [`${id}_ProviderTurnCompletionIndex`]: ensureMailUsageIndex,
         }),
       });
+      assert.isTrue(yield* hasPendingMigrations());
       yield* runMigrations();
+      assert.isFalse(yield* hasPendingMigrations());
       const ledger = yield* sql<{
         migration_id: number;
         name: string;
@@ -245,9 +247,10 @@ describe("V2 preview upgrade", () => {
         migrationManifest,
       );
       assert.deepStrictEqual(
-        yield* sql`SELECT name FROM sqlite_schema WHERE name IN ('agent_feedback', 'orchestration_v2_projection_provider_turns_thread_completed_idx') ORDER BY name`,
+        yield* sql`SELECT name FROM sqlite_schema WHERE name IN ('agent_feedback', 'issue_tracker_accounts', 'orchestration_v2_projection_provider_turns_thread_completed_idx') ORDER BY name`,
         [
           { name: "agent_feedback" },
+          { name: "issue_tracker_accounts" },
           { name: "orchestration_v2_projection_provider_turns_thread_completed_idx" },
         ],
       );

@@ -1,0 +1,25 @@
+name: Mail upstream check
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'naturalnick/t3code-mail'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check whether upstream merges into Mail
+        shell: bash
+        run: |
+          git clone --bare --single-branch --branch mail --filter=blob:none --no-tags https://github.com/naturalnick/t3code-mail.git comparison.git
+          cd comparison.git
+          git remote add official https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags --filter=blob:none official refs/heads/main:refs/heads/upstream
+          count=$(git rev-list --count mail..upstream)
+          echo "Upstream has $count commits outside the Mail branch." >> "$GITHUB_STEP_SUMMARY"
+          git merge-tree --write-tree --name-only mail upstream
