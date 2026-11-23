@@ -21,6 +21,7 @@ import {
   type MailStreamEvent,
   type MailThreadAction,
   type MailMessageBodyInput,
+  type MailAttachmentInput,
   type MailFormattedBody,
   type MailThreadDetail,
   MailThreadId,
@@ -283,6 +284,7 @@ export class MailService extends Context.Service<
   {
     readonly arrivals: MailEngine.MailEngine["Service"]["arrivals"];
     readonly subscribe: Stream.Stream<MailStreamEventType, MailError>;
+    readonly getAttachment: (input: MailAttachmentInput) => Effect.Effect<Uint8Array, MailError>;
     readonly getMessageBody: (
       input: MailMessageBodyInput,
     ) => Effect.Effect<MailFormattedBody | null, MailError>;
@@ -2784,6 +2786,20 @@ const make = Effect.gen(function* () {
   return MailService.of({
     arrivals: engine.arrivals,
     subscribe: engine.subscribe.pipe(Stream.mapError(() => storeError())),
+    getAttachment: Effect.fn("MailService.getAttachment")(function* (input: MailAttachmentInput) {
+      const result = yield* sync.getAttachments(input, 50 * 1024 * 1024, input.index);
+      if (!result)
+        return yield* new MailError({
+          code: "unavailable",
+          message:
+            "Could not reach the original message. Check the mail account connection and try again.",
+        });
+      if (!result.complete)
+        return yield* invalid("This attachment exceeds the 50 MiB download limit.");
+      const file = result.files[0];
+      if (!file) return yield* notFound("attachment");
+      return file.content;
+    }, sqlSafe),
     getMessageBody: Effect.fn("MailService.getMessageBody")(sync.getMessageBody, sqlSafe),
     getThread,
     listSettled,

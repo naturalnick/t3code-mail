@@ -11,7 +11,7 @@ import { useGT } from "gt-react";
 import { ForwardIcon, PaperclipIcon, ReplyAllIcon, ReplyIcon } from "lucide-react";
 import { Fragment, useState, type ReactNode } from "react";
 
-import { formatBytes } from "../../lib/formatBytes";
+import { MailAttachmentItem } from "./MailAttachmentItem";
 import { observeIntersection } from "../../lib/observeIntersection";
 import { cn } from "../../lib/utils";
 import { mailEnvironment } from "../../state/mail";
@@ -263,16 +263,13 @@ function ThreadMessage({
       {message.attachments.length > 0 && (
         <ul aria-label={gt("Attachments")} className="mt-3 flex flex-wrap gap-1.5 text-xs">
           {message.attachments.map((file, index) => (
-            <li
+            <MailAttachmentItem
               // oxlint-disable-next-line react/no-array-index-key -- MIME parts have fixed order and can share identical metadata.
               key={index}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/70 px-2 py-1 text-muted-foreground"
-            >
-              <PaperclipIcon aria-hidden className="size-3 shrink-0" />
-              <span className="wrap-anywhere">
-                {file.filename || file.contentType} · {formatBytes(file.size)}
-              </span>
-            </li>
+              file={file}
+              environmentId={environmentId}
+              input={{ threadId, messageId: Number(message.id), index }}
+            />
           ))}
         </ul>
       )}

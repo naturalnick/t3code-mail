@@ -31,6 +31,8 @@ Choose **Chat** on an email to open its chat beside the email, with the saved tr
 
 A thread reads oldest first. The newest and unread messages are open; select a collapsed message to read it, and **•••** shows the earlier conversation quoted inside a message. Each open message has **Reply**, **Reply all** (when others were on it) and **Forward**; the toolbar buttons answer the newest message someone else sent. The editor opens under the message it answers and names it. A reply quotes that message below your text, as other mail apps do, and a forward includes its attachments. **Send** sends it; **Save draft** or closing the editor keeps it under that message, including drafts an agent left. If the mail server accepts only some recipients, the draft lists who received it and keeps only the rejected recipients for your next send.
 
+Select an attachment beneath an open message to preview a PDF, Office document (.docx, .xlsx, .pptx), image, text, audio, or video file. Use the download button to save a copy. Other file types download when selected. Mail retrieves the file from your connected mailbox when you open or save it, with a limit of 50 MiB per file.
+
 Right-click an email in the sidebar, or open the **…** menu on an open email, for **Mark as unread**, **Pin**, **Snooze**, **Turn off AI for this sender**, mail rules and **Delete**. **Delete** moves the whole thread to your provider's Trash, even when server archiving is off. Choose **Undo** in the confirmation, or **Restore** under **Trash** in the sidebar, to bring it back to your inbox. Trash lists what you deleted in Mail during the last 30 days.
 
 ## Write a new email

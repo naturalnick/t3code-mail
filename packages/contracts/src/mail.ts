@@ -148,6 +148,12 @@ export const MailMessageBodyInput = Schema.Struct({
 });
 export type MailMessageBodyInput = typeof MailMessageBodyInput.Type;
 
+export const MailAttachmentInput = Schema.Struct({
+  ...MailMessageBodyInput.fields,
+  index: NonNegativeInt,
+});
+export type MailAttachmentInput = typeof MailAttachmentInput.Type;
+
 export const MailMessage = Schema.Struct({
   listId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   id: Schema.String,

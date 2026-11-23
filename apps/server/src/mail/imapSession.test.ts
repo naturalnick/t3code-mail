@@ -84,3 +84,33 @@ it("uses Gmail label operations for a custom mailbox name and preserves provider
   await expect(session.setLabel([2], "\\Inbox", false)).rejects.toThrow("no longer available");
   expect(remove).toHaveBeenCalledTimes(1);
 });
+
+it("downloads only the selected MIME attachment even when filenames match", async () => {
+  const session = new ImapSession(
+    { host: "localhost", port: 1, secure: false, user: "fixture", password: "fixture" },
+    { onExists: () => {}, onFlags: () => {}, onExpunge: () => {}, onClose: () => {} },
+  );
+  const file = {
+    type: "application/pdf",
+    disposition: "attachment",
+    dispositionParameters: { filename: "invoice.pdf" },
+  };
+  using _structure = vi.spyOn(session.client, "fetchOne").mockResolvedValue({
+    seq: 1,
+    uid: 3,
+    bodyStructure: { type: "multipart/mixed", childNodes: [{ type: "text/plain" }, file, file] },
+  });
+  using download = vi.spyOn(session.client, "download").mockImplementation(async () => ({
+    meta: {},
+    content: NodeStream.Readable.from([Buffer.from("paid")]),
+  }));
+  expect(await session.fetchAttachments(3, 4, 1)).toEqual({
+    complete: true,
+    files: [
+      { filename: "invoice.pdf", contentType: "application/pdf", content: Buffer.from("paid") },
+    ],
+  });
+  expect(await session.fetchAttachments(3, 3, 1)).toEqual({ files: [], complete: false });
+  expect(await session.fetchAttachments(3, 4, 2)).toEqual({ files: [], complete: true });
+  expect(download.mock.calls.map(([, part]) => part)).toEqual(["3", "3"]);
+});

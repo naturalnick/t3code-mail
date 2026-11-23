@@ -177,7 +177,7 @@ function walkStructure(
 }
 
 function describeStructure(structure: MessageStructureObject | undefined) {
-  const attachments: Array<MailAttachment> = [];
+  const parts: Array<{ part: string; file: MailAttachment; cid?: string }> = [];
   let plain: string | null = null;
   let html: string | null = null;
   let calendar = false;
@@ -188,10 +188,11 @@ function describeStructure(structure: MessageStructureObject | undefined) {
     const isAttachment =
       node.disposition === "attachment" || (filename !== null && !type.startsWith("text/"));
     if (isAttachment) {
-      attachments.push({
-        filename: filename ?? "attachment",
-        contentType: type,
-        size: node.size ?? 0,
+      const cid = node.id?.replace(/^<|>$/g, "");
+      parts.push({
+        part,
+        file: { filename: filename ?? "attachment", contentType: type, size: node.size ?? 0 },
+        ...(cid ? { cid } : {}),
       });
       return;
     }
@@ -204,7 +205,7 @@ function describeStructure(structure: MessageStructureObject | undefined) {
       : html !== null
         ? { part: html, html: true }
         : null;
-  return { attachments, textPart, calendar };
+  return { parts, textPart, calendar };
 }
 
 function isKeyword(flag: string) {
@@ -246,7 +247,7 @@ function parseFetched(message: FetchMessageObject, labels: ParsedMessage["labels
     references,
     seen: message.flags?.has("\\Seen") ?? false,
     size: message.size ?? 0,
-    attachments: structure.attachments,
+    attachments: structure.parts.map(({ file }) => file),
     textPart: structure.textPart,
     listUnsubscribe: headers.has("list-unsubscribe"),
     listId: headers.get("list-id") ?? null,
@@ -558,30 +559,19 @@ export class ImapSession {
   }
 
   /**
-   * The message's attachments as files, for forwarding; stops at `maxBytes` decoded bytes in total.
+   * Reads the selected attachment, or all attachments for a forward, within a decoded byte budget.
    * Inline parts keep their Content-ID so forwarded HTML still shows them.
    */
-  async fetchAttachments(uid: number, maxBytes: number) {
+  async fetchAttachments(uid: number, maxBytes: number, index?: number) {
     const message = await this.client.fetchOne(String(uid), { bodyStructure: true }, { uid: true });
     if (!message || !message.bodyStructure) throw new Error("Message structure unavailable");
-    const parts: Array<{ part: string; filename: string; contentType: string; cid?: string }> = [];
-    walkStructure(message.bodyStructure, (node, part) => {
-      const type = node.type.toLowerCase();
-      const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
-      const cid = node.id?.replace(/^<|>$/g, "");
-      if (node.disposition === "attachment" || (filename !== null && !type.startsWith("text/")))
-        parts.push({
-          part,
-          filename: filename ?? "attachment",
-          contentType: type,
-          ...(cid ? { cid } : {}),
-        });
-    });
+    const { parts } = describeStructure(message.bodyStructure);
+    const selected = index === undefined ? parts : parts.slice(index, index + 1);
     const files: Array<{ filename: string; contentType: string; content: Buffer; cid?: string }> =
       [];
     let remaining = maxBytes;
-    for (const part of parts) {
-      const download = await this.client.download(String(uid), part.part, { uid: true });
+    for (const { part, file, cid } of selected) {
+      const download = await this.client.download(String(uid), part, { uid: true });
       if (!download.content) throw new Error("Attachment unavailable");
       const chunks: Array<Buffer> = [];
       // Structure sizes are transfer-encoded, so the budget counts the decoded bytes as they arrive.
@@ -594,8 +584,12 @@ export class ImapSession {
         }
         chunks.push(buffer);
       }
-      const { part: _part, ...file } = part;
-      files.push({ ...file, content: Buffer.concat(chunks) });
+      files.push({
+        filename: file.filename,
+        contentType: file.contentType,
+        ...(cid ? { cid } : {}),
+        content: Buffer.concat(chunks),
+      });
     }
     return { files, complete: true };
   }

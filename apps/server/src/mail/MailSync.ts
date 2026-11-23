@@ -95,10 +95,11 @@ export class MailSync extends Context.Service<
     readonly getMessageBody: (
       input: MailMessageBodyInput,
     ) => Effect.Effect<MailFormattedBody | null, SqlError>;
-    /** The message's attachments, for a forward; null when the server cannot be reached. */
+    /** Reads one attachment by index, or all of them for a forward. */
     readonly getAttachments: (
       input: MailMessageBodyInput,
       maxBytes: number,
+      index?: number,
     ) => Effect.Effect<Awaited<ReturnType<ImapSession["fetchAttachments"]>> | null, SqlError>;
     readonly openFolder: (
       accountId: MailAccountId,
@@ -733,13 +734,15 @@ const make = Effect.gen(function* () {
     loadMessageBody(input).pipe(Effect.map((body) => body ?? null));
   const getAttachments: MailSync["Service"]["getAttachments"] = Effect.fn(
     "MailSync.getAttachments",
-  )(function* (input, maxBytes) {
+  )(function* (input, maxBytes, index) {
     const [target] = yield* store.messageTargets(input.threadId, [input.messageId]);
     const imap = target ? live.get(target.accountId)?.imap : undefined;
     if (!target || !imap) return null;
     return yield* promise(() =>
       imap.withMailbox(target.mailbox, null, async (box) =>
-        box.uidValidity === target.uidValidity ? imap.fetchAttachments(target.uid, maxBytes) : null,
+        box.uidValidity === target.uidValidity
+          ? imap.fetchAttachments(target.uid, maxBytes, index)
+          : null,
       ),
     ).pipe(Effect.orElseSucceed(() => null));
   });
