@@ -8,6 +8,7 @@ import type {
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import {
+  ChevronDownIcon,
   InboxIcon,
   ListFilterIcon,
   SearchIcon,
@@ -15,12 +16,13 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { isElectron } from "../../env";
 import { useThreadRouteTarget } from "../../hooks/useThreadRouteTarget";
 import { shortcutLabelForCommand } from "../../keybindings";
-import { cn, randomUUID } from "../../lib/utils";
+import { observeResize } from "../../lib/observeResize";
+import { randomUUID } from "../../lib/utils";
 import {
   mailEnvironment,
   useMailEnvironmentId,
@@ -33,7 +35,6 @@ import { primaryServerKeybindingsAtom } from "../../state/server";
 import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
 import { SidebarHeaderIconButton } from "../sidebar/SidebarThreadHeader";
 import { Button } from "../ui/button";
-import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import {
   Menu,
   MenuPopup,
@@ -50,6 +51,8 @@ import { useMailActions } from "./useMailActions";
 import { useMailIntentPrefetch } from "./useMailIntentPrefetch";
 import { useMailRowMenu } from "./useMailRowMenu";
 
+const mailboxes = ["inbox", "working", "snoozed", "drafts", "settled", "sent", "trash"] as const;
+type Mailbox = (typeof mailboxes)[number];
 type SettledFilter = "all" | "rule" | "user";
 const SETTLED_PAGE = 30;
 const SENT_PAGE = 30;
@@ -69,7 +72,7 @@ export default function MailSidebar() {
           </SidebarGroup>
         </SidebarContent>
       ) : (
-        <MailSidebarBody environmentId={environmentId} />
+        <MailSidebarBody key={environmentId} environmentId={environmentId} />
       )}
       <SidebarChromeFooter />
     </>
@@ -92,12 +95,56 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   const [query, setQuery] = useState("");
   const [serverSearch, setServerSearch] = useState(false);
   const debouncedQuery = useDebouncedValue(query.trim(), 200);
-  const [workingOpen, setWorkingOpen] = useState(false);
-  const [snoozedOpen, setSnoozedOpen] = useState(false);
-  const [settledOpen, setSettledOpen] = useState(false);
-  const [draftsOpen, setDraftsOpen] = useState(true);
-  const [sentOpen, setSentOpen] = useState(false);
-  const [trashOpen, setTrashOpen] = useState(false);
+  const [mailbox, setMailbox] = useState<Mailbox>("inbox");
+  const searching = query.trim() !== "" && debouncedQuery !== "";
+  const view = searching ? "search" : mailbox;
+  const content = useRef<HTMLDivElement>(null);
+  const inboxScroll = useRef(0);
+  const status = useMailStatus(environmentId);
+  const mailboxLabels = {
+    inbox: gt("Inbox"),
+    working: gt("Working", { $context: "sidebar section" }),
+    snoozed: gt("Snoozed", { $context: "sidebar section" }),
+    drafts: gt("Drafts", { $context: "sidebar section" }),
+    settled: gt("Settled", { $context: "sidebar section" }),
+    sent: gt("Sent", { $context: "sidebar section" }),
+    trash: gt("Trash", { $context: "sidebar section" }),
+  };
+  const counts: Partial<Record<Mailbox, number | undefined>> = {
+    working: sections?.working.length,
+    snoozed: sections?.snoozed.length,
+    drafts: sections?.drafts.length,
+    settled: status?.settledCount ?? sections?.settled.length,
+  };
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Restore the scroll viewport after switching lists and track the inbox position.
+  useLayoutEffect(() => {
+    const viewport = content.current?.closest<HTMLElement>("[data-slot=scroll-area-viewport]");
+    if (!viewport) return;
+    if (view !== "inbox") {
+      viewport.scrollTop = 0;
+      return;
+    }
+    const saved = inboxScroll.current;
+    viewport.scrollTop = saved;
+    // Offscreen rows initially occupy estimated heights. Restore again after the browser lays them out.
+    const stopObserving =
+      viewport.scrollTop < saved && content.current
+        ? observeResize(content.current, () => {
+            viewport.scrollTop = saved;
+            stopObserving?.();
+          })
+        : undefined;
+    const remember = () => {
+      inboxScroll.current = viewport.scrollTop;
+    };
+    viewport.addEventListener("scroll", remember);
+    return () => {
+      stopObserving?.();
+      viewport.removeEventListener("scroll", remember);
+    };
+  }, [view]);
+
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const newEmailShortcut = shortcutLabelForCommand(keybindings, "chat.new");
 
@@ -112,6 +159,9 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
       isActive={isActive(thread)}
       readerOpen={thread.id === routeMailThreadId}
       actions={actions}
+      timestamp={
+        view === "sent" && thread.lastOutgoingAt ? thread.lastOutgoingAt : thread.lastMessageAt
+      }
       onIntent={prefetch}
       onContextMenu={openRowMenu}
     />
@@ -119,6 +169,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
 
   return (
     <SidebarContent
+      ref={content}
       className="min-h-full"
       fixedHeader={
         <SidebarGroup className="z-[1]">
@@ -172,11 +223,45 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
               <InboxIcon />
             </SidebarHeaderIconButton>
           </div>
+          <div className="mt-1 flex items-center">
+            <Menu>
+              <MenuTrigger render={<Button variant="ghost" size="sm" />}>
+                {searching ? gt("Search results") : mailboxLabels[mailbox]}
+                <ChevronDownIcon className="size-3.5 text-muted-foreground" />
+              </MenuTrigger>
+              <MenuPopup align="start">
+                <MenuRadioGroup
+                  value={view}
+                  onValueChange={(next: Mailbox) => {
+                    setQuery("");
+                    setServerSearch(false);
+                    setMailbox(next);
+                  }}
+                >
+                  {mailboxes.map((item) => (
+                    <MenuRadioItem key={item} value={item} closeOnClick>
+                      <span className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-x-2">
+                        <span>
+                          <MenuRadioItemIndicator />
+                        </span>
+                        <span>{mailboxLabels[item]}</span>
+                        {counts[item] ? (
+                          <span className="text-end text-xs tabular-nums text-muted-foreground">
+                            {counts[item]}
+                          </span>
+                        ) : null}
+                      </span>
+                    </MenuRadioItem>
+                  ))}
+                </MenuRadioGroup>
+              </MenuPopup>
+            </Menu>
+          </div>
         </SidebarGroup>
       }
     >
       <SidebarGroup className="flex-1" role="presentation">
-        {debouncedQuery.length > 0 ? (
+        {searching ? (
           <MailSearchResults
             environmentId={environmentId}
             query={debouncedQuery}
@@ -187,70 +272,34 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
           <div className="flex justify-center py-4">
             <Spinner className="size-4" />
           </div>
-        ) : (
-          <ul role="presentation" className="flex min-h-full flex-1 flex-col gap-px">
-            {sections.pinned.map(row)}
-            {sections.active.length === 0 && sections.pinned.length === 0 ? (
-              <li className="list-none px-2.5 py-2 text-sm text-muted-foreground">
-                <T>Nothing needs you.</T>
-              </li>
-            ) : null}
-            {sections.active.map(row)}
-            <MailShelf
-              className="mt-auto"
-              label={gt("Working", { $context: "sidebar section" })}
-              count={sections.working.length}
-              expanded={workingOpen}
-              onToggle={() => setWorkingOpen((open) => !open)}
-            >
-              {sections.working.map(row)}
-            </MailShelf>
-            <MailShelf
-              label={gt("Snoozed", { $context: "sidebar section" })}
-              count={sections.snoozed.length}
-              expanded={snoozedOpen}
-              onToggle={() => setSnoozedOpen((open) => !open)}
-            >
-              {sections.snoozed.map(row)}
-            </MailShelf>
-            <MailShelf
-              label={gt("Drafts", { $context: "sidebar section" })}
-              count={sections.drafts.length}
-              expanded={draftsOpen}
-              onToggle={() => setDraftsOpen((open) => !open)}
-            >
-              {sections.drafts.map(row)}
-            </MailShelf>
-            <SettledShelf
+        ) : null}
+        {sections && (
+          <ul
+            hidden={searching}
+            role="presentation"
+            className="flex min-h-full flex-1 flex-col gap-px [&[hidden]]:hidden"
+          >
+            {view === "inbox" && (
+              <>
+                {sections.pinned.map(row)}
+                {sections.active.map(row)}
+                {sections.active.length === 0 && sections.pinned.length === 0 && (
+                  <li className="px-2.5 py-2 text-sm text-muted-foreground">
+                    <T>Nothing needs you.</T>
+                  </li>
+                )}
+              </>
+            )}
+            {(view === "working" || view === "snoozed" || view === "drafts") &&
+              (sections[view].length > 0 ? sections[view].map(row) : <EmptyMailbox />)}
+            <SettledList
+              active={view === "settled"}
               environmentId={environmentId}
-              expanded={settledOpen}
-              onToggle={() => setSettledOpen((open) => !open)}
               recent={sections.settled}
               renderRow={row}
             />
-            <SentShelf
-              environmentId={environmentId}
-              expanded={sentOpen}
-              onToggle={() => setSentOpen((open) => !open)}
-              renderRow={(thread) => (
-                <MailSidebarRow
-                  key={thread.id}
-                  environmentId={environmentId}
-                  thread={thread}
-                  isActive={isActive(thread)}
-                  readerOpen={thread.id === routeMailThreadId}
-                  actions={actions}
-                  timestamp={thread.lastOutgoingAt ?? thread.lastMessageAt}
-                  onIntent={prefetch}
-                  onContextMenu={openRowMenu}
-                />
-              )}
-            />
-            <TrashShelf
-              environmentId={environmentId}
-              expanded={trashOpen}
-              onToggle={() => setTrashOpen((open) => !open)}
-            />
+            <SentList active={view === "sent"} environmentId={environmentId} renderRow={row} />
+            <TrashList active={view === "trash"} environmentId={environmentId} />
           </ul>
         )}
       </SidebarGroup>
@@ -258,42 +307,17 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
   );
 }
 
-function MailShelf(props: {
-  label: string;
-  /** Left out where a total would cost a query, such as Sent. */
-  count?: number;
-  expanded: boolean;
-  onToggle: () => void;
-  className?: string;
-  accessory?: ReactNode;
-  children: ReactNode;
-}) {
-  if (props.count === 0 && props.accessory === undefined) return null;
+function EmptyMailbox({ children }: { children?: ReactNode }) {
   return (
-    <>
-      <li className={cn("relative mx-0.5 flex h-8 list-none items-center", props.className)}>
-        <CollapsibleSectionHeader
-          onClick={props.onToggle}
-          expanded={props.expanded}
-          accessory={
-            props.count === undefined ? undefined : (
-              <span className="font-normal tabular-nums">{props.count}</span>
-            )
-          }
-        >
-          {props.label}
-        </CollapsibleSectionHeader>
-        {props.accessory}
-      </li>
-      {props.expanded ? props.children : null}
-    </>
+    <li className="px-2.5 py-2 text-sm text-muted-foreground">
+      {children ?? <T>This mailbox is empty.</T>}
+    </li>
   );
 }
 
-function SettledShelf(props: {
+function SettledList(props: {
+  active: boolean;
   environmentId: EnvironmentId;
-  expanded: boolean;
-  onToggle: () => void;
   recent: ReadonlyArray<MailThreadRow>;
   renderRow: (thread: MailThreadRow) => ReactNode;
 }) {
@@ -301,9 +325,8 @@ function SettledShelf(props: {
   const [filter, setFilter] = useState<SettledFilter>("all");
   const [cursors, setCursors] = useState<Array<{ at: string; id: MailThreadId }>>([]);
   const before = cursors.at(-1);
-  const status = useMailStatus(props.environmentId);
   const page = useEnvironmentQuery(
-    props.expanded
+    props.active
       ? mailEnvironment.settled({
           environmentId: props.environmentId,
           input: {
@@ -314,35 +337,26 @@ function SettledShelf(props: {
         })
       : null,
   );
+  if (!props.active) return null;
   const threads =
     page.data?.threads ??
     (filter === "all" ? (before ? [] : props.recent.slice(0, SETTLED_PAGE)) : []);
   const filterLabel =
     filter === "all"
-      ? gt("Settled", { $context: "sidebar section" })
+      ? gt("All settled")
       : filter === "rule"
         ? gt("Settled by your rules")
         : gt("Settled by you");
 
   return (
-    <MailShelf
-      label={filterLabel}
-      count={filter === "all" ? (status?.settledCount ?? props.recent.length) : threads.length}
-      expanded={props.expanded}
-      onToggle={props.onToggle}
-      accessory={
+    <>
+      <li>
         <Menu>
           <MenuTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                aria-label={gt("Filter settled mail")}
-                className="ms-1 shrink-0"
-              />
-            }
+            render={<Button size="xs" variant="ghost-muted" title={gt("Filter settled mail")} />}
           >
             <ListFilterIcon className="size-3.5" />
+            {filterLabel}
           </MenuTrigger>
           <MenuPopup align="end">
             <MenuRadioGroup
@@ -350,54 +364,52 @@ function SettledShelf(props: {
               onValueChange={(value: SettledFilter) => {
                 setFilter(value);
                 setCursors([]);
-                if (!props.expanded) props.onToggle();
               }}
             >
-              <MenuRadioItem value="all">
-                <MenuRadioItemIndicator />
-                <T>All settled</T>
+              <MenuRadioItem closeOnClick value="all">
+                <span className="flex items-center gap-2">
+                  <MenuRadioItemIndicator />
+                  <T>All settled</T>
+                </span>
               </MenuRadioItem>
-              <MenuRadioItem value="rule">
-                <MenuRadioItemIndicator />
-                <T>Settled by your rules</T>
+              <MenuRadioItem closeOnClick value="rule">
+                <span className="flex items-center gap-2">
+                  <MenuRadioItemIndicator />
+                  <T>Settled by your rules</T>
+                </span>
               </MenuRadioItem>
-              <MenuRadioItem value="user">
-                <MenuRadioItemIndicator />
-                <T>Settled by you</T>
+              <MenuRadioItem closeOnClick value="user">
+                <span className="flex items-center gap-2">
+                  <MenuRadioItemIndicator />
+                  <T>Settled by you</T>
+                </span>
               </MenuRadioItem>
             </MenuRadioGroup>
           </MenuPopup>
         </Menu>
-      }
-    >
+      </li>
+      {page.data && threads.length === 0 && <EmptyMailbox />}
       {threads.map(props.renderRow)}
+      {!page.data && !page.error && threads.length === 0 && (
+        <li className="flex justify-center py-4">
+          <Spinner className="size-4" />
+        </li>
+      )}
       {page.error && (
         <li role="alert" className="px-2 text-xs text-destructive-foreground">
           {page.error}
         </li>
       )}
-      {(before || page.data?.hasMore) && (
-        <li className="flex list-none gap-2 px-1">
-          {before && (
-            <Button size="xs" variant="ghost" onClick={() => setCursors(cursors.slice(0, -1))}>
-              {gt("Previous")}
-            </Button>
-          )}
-          {page.data?.hasMore && (
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => {
-                const last = threads.at(-1);
-                if (last) setCursors([...cursors, { at: last.lastMessageAt, id: last.id }]);
-              }}
-            >
-              {gt("Next")}
-            </Button>
-          )}
-        </li>
-      )}
-    </MailShelf>
+      <PageButtons
+        hasPrevious={before !== undefined}
+        hasMore={page.data?.hasMore ?? false}
+        onPrevious={() => setCursors(cursors.slice(0, -1))}
+        onNext={() => {
+          const last = threads.at(-1);
+          if (last) setCursors([...cursors, { at: last.lastMessageAt, id: last.id }]);
+        }}
+      />
+    </>
   );
 }
 
@@ -425,36 +437,36 @@ function PageButtons(props: {
   );
 }
 
-function SentShelf(props: {
+function SentList(props: {
+  active: boolean;
   environmentId: EnvironmentId;
-  expanded: boolean;
-  onToggle: () => void;
   renderRow: (thread: MailThreadRow) => ReactNode;
 }) {
-  const gt = useGT();
   const [cursors, setCursors] = useState<Array<{ at: string; id: MailThreadId }>>([]);
   const before = cursors.at(-1);
   const page = useEnvironmentQuery(
-    props.expanded
+    props.active
       ? mailEnvironment.sent({
           environmentId: props.environmentId,
           input: { limit: SENT_PAGE, ...(before ? { before } : {}) },
         })
       : null,
   );
+  if (!props.active) return null;
   const threads = page.data?.threads ?? [];
   return (
-    <MailShelf
-      label={gt("Sent", { $context: "sidebar section" })}
-      expanded={props.expanded}
-      onToggle={props.onToggle}
-    >
+    <>
       {threads.map(props.renderRow)}
       {page.data && threads.length === 0 ? (
-        <li className="list-none px-2.5 py-1 text-xs text-muted-foreground">
+        <EmptyMailbox>
           <T>No sent mail.</T>
-        </li>
+        </EmptyMailbox>
       ) : null}
+      {!page.data && !page.error && (
+        <li className="flex justify-center py-4">
+          <Spinner className="size-4" />
+        </li>
+      )}
       {page.error && (
         <li role="alert" className="px-2 text-xs text-destructive-foreground">
           {page.error}
@@ -470,33 +482,25 @@ function SentShelf(props: {
             setCursors([...cursors, { at: last.lastOutgoingAt, id: last.id }]);
         }}
       />
-    </MailShelf>
+    </>
   );
 }
 
-function TrashShelf(props: {
-  environmentId: EnvironmentId;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const gt = useGT();
+function TrashList(props: { active: boolean; environmentId: EnvironmentId }) {
   const [cursors, setCursors] = useState<Array<number>>([]);
   const beforeId = cursors.at(-1);
   const page = useEnvironmentQuery(
-    props.expanded
+    props.active
       ? mailEnvironment.trash({
           environmentId: props.environmentId,
           input: { limit: TRASH_PAGE, ...(beforeId === undefined ? {} : { beforeId }) },
         })
       : null,
   );
+  if (!props.active) return null;
   const entries = page.data?.actions ?? [];
   return (
-    <MailShelf
-      label={gt("Trash", { $context: "sidebar section" })}
-      expanded={props.expanded}
-      onToggle={props.onToggle}
-    >
+    <>
       {entries.map((entry) => (
         <MailTrashRow
           key={entry.id}
@@ -506,10 +510,15 @@ function TrashShelf(props: {
         />
       ))}
       {page.data && entries.length === 0 ? (
-        <li className="list-none px-2.5 py-1 text-xs text-muted-foreground">
+        <EmptyMailbox>
           <T>Nothing deleted in the last 30 days.</T>
-        </li>
+        </EmptyMailbox>
       ) : null}
+      {!page.data && !page.error && (
+        <li className="flex justify-center py-4">
+          <Spinner className="size-4" />
+        </li>
+      )}
       {page.error && (
         <li role="alert" className="px-2 text-xs text-destructive-foreground">
           {page.error}
@@ -524,7 +533,7 @@ function TrashShelf(props: {
           if (last) setCursors([...cursors, last.id]);
         }}
       />
-    </MailShelf>
+    </>
   );
 }
 
