@@ -8,7 +8,7 @@ import type {
 } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { useGT } from "gt-react";
-import { ForwardIcon, PaperclipIcon, ReplyAllIcon, ReplyIcon } from "lucide-react";
+import { ChevronUpIcon, ForwardIcon, PaperclipIcon, ReplyAllIcon, ReplyIcon } from "lucide-react";
 import { Fragment, useState, type ReactNode } from "react";
 
 import { MailAttachmentItem } from "./MailAttachmentItem";
@@ -205,18 +205,20 @@ function ThreadMessage({
 
   return (
     <article aria-label={gt("Message from {sender}", { sender })} className="min-w-0 py-4">
-      <header className="mb-3 flex items-start gap-2">
-        <button
-          type="button"
-          aria-expanded
-          disabled={onToggle === null}
-          onClick={onToggle ?? undefined}
-          className="min-w-0 flex-1 cursor-pointer text-left disabled:cursor-default"
-        >
+      <header
+        className={cn("mb-3 flex items-start gap-2", onToggle && "cursor-pointer")}
+        onClick={(event) => {
+          if (!onToggle || !(event.target instanceof Element)) return;
+          if (!event.currentTarget.contains(event.target) || event.target.closest("button")) return;
+          if (window.getSelection()?.isCollapsed === false) return;
+          onToggle();
+        }}
+      >
+        <div className="min-w-0 flex-1 select-text">
           <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-            <span className="text-sm font-semibold">{sender}</span>
+            <span className="cursor-text text-sm font-semibold">{sender}</span>
             {message.outgoing ? null : (
-              <span className="min-w-0 truncate text-xs text-muted-foreground">
+              <span className="min-w-0 cursor-text truncate text-xs text-muted-foreground">
                 {message.from.address}
               </span>
             )}
@@ -227,14 +229,28 @@ function ThreadMessage({
           {recipients ? (
             <Tooltip>
               <TooltipTrigger
-                render={<span className="block truncate text-xs text-muted-foreground" />}
+                render={
+                  <span className="block w-fit max-w-full cursor-text truncate text-xs text-muted-foreground" />
+                }
               >
                 {recipients}
               </TooltipTrigger>
               <TooltipPopup side="bottom">{everyone}</TooltipPopup>
             </Tooltip>
           ) : null}
-        </button>
+        </div>
+        {onToggle && (
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            aria-expanded
+            aria-label={gt("Message from {sender}", { sender })}
+            title={gt("Hide details")}
+            onClick={onToggle}
+          >
+            <ChevronUpIcon />
+          </Button>
+        )}
         <time dateTime={message.date} className="shrink-0 pt-0.5 text-xs text-muted-foreground">
           {formatDateTimeTimestamp(message.date, timestampFormat)}
         </time>
