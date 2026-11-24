@@ -39,6 +39,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
 import { SidebarHeaderIconButton } from "../sidebar/SidebarThreadHeader";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Menu,
@@ -181,7 +182,20 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
     spam: gt("Spam", { $context: "sidebar section" }),
     trash: gt("Trash", { $context: "sidebar section" }),
   };
+  const inboxUnread =
+    sections === null
+      ? 0
+      : sections.pinned.filter((t) => t.unread).length +
+        sections.active.filter((t) => t.unread).length;
+  const unreadBadge = (count: number) =>
+    count > 0 ? (
+      <Badge size="sm">
+        <span aria-hidden>{count}</span>
+        <span className="sr-only">{gt("{count} unread", { count })}</span>
+      </Badge>
+    ) : null;
   const counts: Partial<Record<Mailbox, number | undefined>> = {
+    inbox: sections ? sections.pinned.length + sections.active.length : undefined,
     working: sections?.working.length,
     snoozed: sections?.snoozed.length,
     drafts: sections?.drafts.length,
@@ -334,6 +348,7 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                       : searching
                         ? gt("Search results")
                         : mailboxLabels[mailbox]}
+                    {!labelScope && !searching && mailbox === "inbox" && unreadBadge(inboxUnread)}
                     <ChevronDownIcon className="size-3.5 text-muted-foreground" />
                   </MenuTrigger>
                   <MenuPopup align="start">
@@ -368,7 +383,8 @@ function MailSidebarBody({ environmentId }: { environmentId: EnvironmentId }) {
                               </span>
                               <span>{mailboxLabels[item]}</span>
                               {!labelScope && counts[item] ? (
-                                <span className="text-end text-xs tabular-nums text-muted-foreground">
+                                <span className="flex items-center justify-end gap-1.5 text-xs tabular-nums text-muted-foreground">
+                                  {item === "inbox" && unreadBadge(inboxUnread)}
                                   {counts[item]}
                                 </span>
                               ) : null}

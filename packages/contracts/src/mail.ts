@@ -420,6 +420,7 @@ export type MailRecapItem = typeof MailRecapItem.Type;
 export const MailRecap = Schema.Struct({
   date: TrimmedNonEmptyString,
   arrived: NonNegativeInt,
+  /** Kept for clients that still show the Active count in the recap. */
   needsYou: NonNegativeInt,
   /** Kept for clients that predate `settled`. */
   settledByAi: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
@@ -451,6 +452,10 @@ export const MailStatus = Schema.Struct({
   unreviewed: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
   /** Existing mail the user sent to AI that it hasn't sorted yet. */
   reviewing: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  /** The Mail home chat, which is about all mail rather than one email. */
+  hubChatThreadId: Schema.NullOr(ThreadId).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
 });
 export type MailStatus = typeof MailStatus.Type;
 

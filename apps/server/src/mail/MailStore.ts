@@ -63,6 +63,9 @@ const SENDER_COLUMNS = `CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NUL
   CASE WHEN outgoing = 1 AND ${FIRST_RECIPIENT} IS NOT NULL
     THEN json_extract(${FIRST_RECIPIENT}, '$[0].address') ELSE from_address END AS from_address`;
 
+/** The kv entry naming the Mail home chat thread. */
+export const HUB_CHAT_KEY = "hub-chat";
+
 export const DEFAULT_SETTINGS: MailSettings = {
   defaultModelSelection: null,
   escalationModelSelection: null,

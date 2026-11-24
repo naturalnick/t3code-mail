@@ -9,6 +9,7 @@ import {
   MailSettings as MailSettingsSchema,
   MailThreadId,
   MAIL_SESSION_PROJECT_ID,
+  ThreadId,
   UsageDay,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -247,6 +248,9 @@ const make = Effect.gen(function* () {
       emailMdPath: `${store.workspaceDir}/EMAIL.md`,
       settledCount: yield* store.countSettled,
       ...(yield* store.reviewCounts),
+      hubChatThreadId: yield* store
+        .getKv(MailStore.HUB_CHAT_KEY)
+        .pipe(Effect.map((id) => (id === null ? null : ThreadId.make(id)))),
     } satisfies MailStatus;
   });
 

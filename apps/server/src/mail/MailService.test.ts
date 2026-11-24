@@ -4,7 +4,9 @@ import { it } from "@effect/vitest";
 import {
   MAIL_OUTGOING_FILE_BYTES,
   MailAccountId,
+  MAIL_SESSION_PROJECT_ID,
   MailError,
+  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type MailThreadId,
@@ -190,6 +192,8 @@ const spamSession: SpamSession = {
 const offline = () => new MailError({ code: "unavailable", message: "Connect this account." });
 
 let randomCounter = 0;
+/** Threads the mocked launcher started, by project, so a test can delete one. */
+const launchedThreads = new Map<ThreadId, ProjectId>();
 const testLayer = (
   mailDir: string,
   reply: ModelReply,
@@ -253,6 +257,7 @@ const testLayer = (
         launch: (input) =>
           Effect.sync(() => {
             const threadId = input.threadId ?? ThreadId.make(input.commandId);
+            launchedThreads.set(threadId, input.projectId);
             return {
               threadId,
               projection: idleThreadProjection(liveThreadShell(threadId)),
@@ -261,7 +266,15 @@ const testLayer = (
           }),
       }),
     ),
-    Layer.provide(Layer.mock(ThreadManagementService.ThreadManagementService)({})),
+    Layer.provide(
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadShell: (threadId) =>
+          Effect.sync(() => {
+            const projectId = launchedThreads.get(threadId);
+            return projectId === undefined ? null : { ...liveThreadShell(threadId), projectId };
+          }),
+      }),
+    ),
     Layer.provide(
       Layer.mock(ProjectService.ProjectService)({
         getById: (id) =>
@@ -3026,6 +3039,35 @@ it.effect("notifies once for new unread inbox mail and skips backfill and repeat
         message({ subject: "Second new arrival", at }),
       ]);
       expect(yield* Fiber.join(arriving)).toEqual(Option.some({ count: 2 }));
+    }),
+  ),
+);
+
+it.effect("keeps one Mail home chat and replaces it once deleted", () =>
+  withMail(
+    Effect.gen(function* () {
+      const engine = yield* MailEngine.MailEngine;
+      const mail = yield* MailService.MailService;
+      const chat = yield* MailChatContext.MailChatContext;
+      yield* mail.updateSettings({
+        defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
+      });
+      expect((yield* engine.status).hubChatThreadId).toBeNull();
+
+      const first = yield* mail.openHubChat;
+      expect(first).toMatchObject({ projectId: MAIL_SESSION_PROJECT_ID, created: true });
+      expect((yield* engine.status).hubChatThreadId).toBe(first.threadId);
+      expect(yield* chat.forTurn(first.threadId, true)).toContain("No single email is open");
+      expect(yield* chat.forTurn(first.threadId, false)).toBe("");
+
+      expect(yield* mail.openHubChat).toEqual({ ...first, created: false });
+
+      launchedThreads.delete(first.threadId);
+      const replaced = yield* mail.openHubChat;
+      expect(replaced.created).toBe(true);
+      expect(replaced.threadId).not.toBe(first.threadId);
+      expect((yield* engine.status).hubChatThreadId).toBe(replaced.threadId);
+      expect(yield* chat.forTurn(first.threadId, true)).toBe("");
     }),
   ),
 );

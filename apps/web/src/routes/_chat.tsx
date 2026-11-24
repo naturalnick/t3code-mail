@@ -8,16 +8,17 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import { retainThreadFindForRoute } from "../components/chat/threadFindStore";
 import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { useShownThreadRouteTarget } from "../hooks/useShownThreadRouteTarget";
-import { useMailThreadForChat } from "../state/mail";
+import { useIsMailHubChat, useMailThreadForChat } from "../state/mail";
 
 function ChatRouteLayout() {
   // Render both routes here so draft promotion keeps the same ChatView mounted.
   const { shownTarget, modalOpen } = useShownThreadRouteTarget();
   // A mail chat opens beside its email, so every link to one lands there.
-  const mailThreadId = useMailThreadForChat(
-    shownTarget?.kind === "server" && !modalOpen ? shownTarget.threadRef : null,
-  );
+  const chatRef = shownTarget?.kind === "server" && !modalOpen ? shownTarget.threadRef : null;
+  const mailThreadId = useMailThreadForChat(chatRef);
+  const mailHubChat = useIsMailHubChat(chatRef);
   if (mailThreadId === undefined) return null;
+  if (mailHubChat) return <Navigate to="/mail" search={{ chat: true }} replace />;
   if (mailThreadId !== null) {
     return (
       <Navigate

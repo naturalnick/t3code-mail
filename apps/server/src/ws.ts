@@ -2038,6 +2038,7 @@ export const layerWsRpc = (
           mail.discardDraft(input.draftId, input.expectedRevision),
         [WS_METHODS.mailSendDraft]: (input) => mail.sendDraft(input),
         [WS_METHODS.mailOpenSession]: (input) => mail.openSession(input),
+        [WS_METHODS.mailOpenHubChat]: () => mail.openHubChat,
         [WS_METHODS.mailAddAccount]: (input) => mail.addAccount(input),
         [WS_METHODS.mailUpdateAccount]: (input) => mail.updateAccount(input),
         [WS_METHODS.mailRemoveAccount]: (input) => mail.removeAccount(input.accountId),

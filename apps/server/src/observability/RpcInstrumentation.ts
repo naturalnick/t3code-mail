@@ -291,6 +291,7 @@ const RPC_AGGREGATES = {
   [MAIL_WS_METHODS.mailDiscardDraft]: "mail",
   [MAIL_WS_METHODS.mailSendDraft]: "mail",
   [MAIL_WS_METHODS.mailOpenSession]: "mail",
+  [MAIL_WS_METHODS.mailOpenHubChat]: "mail",
   [MAIL_WS_METHODS.mailAddAccount]: "mail",
   [MAIL_WS_METHODS.mailUpdateAccount]: "mail",
   [MAIL_WS_METHODS.mailRemoveAccount]: "mail",

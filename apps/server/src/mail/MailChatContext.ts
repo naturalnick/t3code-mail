@@ -7,7 +7,12 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { buildComposePrompt, buildSessionPrompt, relevantEmailMd } from "./mailPrompts.ts";
+import {
+  buildComposePrompt,
+  buildHubPrompt,
+  buildSessionPrompt,
+  relevantEmailMd,
+} from "./mailPrompts.ts";
 import * as MailStore from "./MailStore.ts";
 import { domainOf } from "@t3tools/shared/mailRule";
 import { cleanForModel } from "./mailText.ts";
@@ -39,7 +44,18 @@ export const layer = Layer.effect(
       full: boolean,
     ) {
       const thread = yield* store.getChatMail(chatId);
-      if (!thread) return "";
+      if (!thread) {
+        if (!full || (yield* store.getKv(MailStore.HUB_CHAT_KEY)) !== chatId) return "";
+        // Only the standing sections; the agent can read the rest of EMAIL.md from its folder.
+        return buildHubPrompt({
+          emailMd: relevantEmailMd(
+            yield* fs
+              .readFileString(path.join(store.workspaceDir, "EMAIL.md"))
+              .pipe(Effect.orElseSucceed(() => "")),
+            [],
+          ),
+        });
+      }
       const raw = yield* store.getKv("settings");
       const excluded =
         raw === null

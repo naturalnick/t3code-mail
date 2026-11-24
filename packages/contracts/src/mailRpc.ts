@@ -73,6 +73,7 @@ export const MAIL_WS_METHODS = {
   mailDiscardDraft: "mail.discardDraft",
   mailSendDraft: "mail.sendDraft",
   mailOpenSession: "mail.openSession",
+  mailOpenHubChat: "mail.openHubChat",
   mailAddAccount: "mail.addAccount",
   mailUpdateAccount: "mail.updateAccount",
   mailRemoveAccount: "mail.removeAccount",
@@ -175,6 +176,11 @@ export const MailRpcs = [
     success: MailOpenSessionResult,
     error,
   }),
+  Rpc.make(MAIL_WS_METHODS.mailOpenHubChat, {
+    payload: Schema.Struct({}),
+    success: MailOpenSessionResult,
+    error,
+  }),
   Rpc.make(MAIL_WS_METHODS.mailAddAccount, {
     payload: MailAddAccountInput,
     success: MailAccount,
@@ -253,6 +259,7 @@ export const MAIL_RPC_SCOPES = {
   [MAIL_WS_METHODS.mailDiscardDraft]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailSendDraft]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailOpenSession]: AuthOrchestrationOperateScope,
+  [MAIL_WS_METHODS.mailOpenHubChat]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailSyncNow]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailDismissRecap]: AuthOrchestrationOperateScope,
   [MAIL_WS_METHODS.mailSeedVoice]: AuthOrchestrationOperateScope,

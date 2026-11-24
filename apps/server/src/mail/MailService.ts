@@ -368,6 +368,8 @@ export class MailService extends Context.Service<
     readonly openSession: (
       input: MailOpenSessionInput,
     ) => Effect.Effect<MailOpenSessionResult, MailError>;
+    /** The Mail home chat about all mail, created on first open. */
+    readonly openHubChat: Effect.Effect<MailOpenSessionResult, MailError>;
     readonly addAccount: (input: MailAddAccountInput) => Effect.Effect<MailAccount, MailError>;
     readonly updateAccount: (
       input: MailUpdateAccountInput,
@@ -2585,6 +2587,58 @@ const make = Effect.gen(function* () {
     sqlSafe,
   );
 
+  const hubLock = yield* Semaphore.make(1);
+  const openHubChat = Effect.gen(function* () {
+    yield* ensureSessionProject.pipe(
+      Effect.mapError(
+        () => new MailError({ code: "unavailable", message: "Could not open the Mail project." }),
+      ),
+    );
+    const projectId = MAIL_SESSION_PROJECT_ID;
+    const linked = yield* store.getKv(MailStore.HUB_CHAT_KEY);
+    const shell =
+      linked === null
+        ? null
+        : yield* threadManagement
+            .getThreadShell(ThreadId.make(linked))
+            .pipe(Effect.mapError(chatUnavailable));
+    if (shell && shell.projectId === projectId)
+      return { projectId, threadId: shell.id, created: false };
+    // A deleted chat starts a new one under a new id, so its old history never returns.
+    const threadId = ThreadId.make(`mail-hub-${sessionDigest("hub", linked)}`);
+    const current = yield* engine.settings;
+    // The home chat reasons across many emails, so it prefers the stronger mail model.
+    const modelSelection =
+      current.escalationModelSelection ??
+      current.defaultModelSelection ??
+      (yield* serverSettings.getSettings.pipe(Effect.mapError(chatUnavailable)))
+        .defaultModelSelection;
+    if (!modelSelection) return yield* invalid("Pick a mail model in Settings → Mail first.");
+    const launched = yield* launcher
+      .launch({
+        commandId: CommandId.make(`mail:hub:${threadId}`),
+        threadId,
+        projectId,
+        title: "Mail",
+        titleRenamed: true,
+        modelSelection,
+        // Mail text can try to steer the agent; commands and edits wait for the user.
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        workspaceStrategy: { type: "root" },
+        createdBy: "user",
+        creationSource: "server",
+      })
+      .pipe(
+        Effect.mapError(
+          () => new MailError({ code: "unavailable", message: "Could not start the mail chat." }),
+        ),
+      );
+    yield* store.setKv(MailStore.HUB_CHAT_KEY, threadId);
+    yield* engine.publishStatus;
+    return { projectId, threadId, created: !launched.resumed };
+  }).pipe(Effect.withSpan("MailService.openHubChat"), hubLock.withPermits(1), sqlSafe);
+
   const accountView = (accountId: MailAccountId) =>
     engine.status.pipe(
       Effect.flatMap((status) => {
@@ -3230,6 +3284,7 @@ const make = Effect.gen(function* () {
     sendDraft,
     uploadDraftFile,
     openSession,
+    openHubChat,
     addAccount,
     updateAccount,
     removeAccount,

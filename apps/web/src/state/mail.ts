@@ -69,6 +69,15 @@ export function useMailThreadForChat(ref: ScopedThreadRef | null): MailThreadId 
   return null;
 }
 
+/** True for the Mail home chat, which opens beside Mail home rather than an email. */
+export function useIsMailHubChat(ref: ScopedThreadRef | null): boolean {
+  const mailChat = useIsMailChatThread(ref);
+  const view = useAtomValue(
+    mailChat && ref !== null ? mailEnvironment.view(ref.environmentId) : EMPTY_VIEW,
+  );
+  return mailChat && ref !== null && view?.status.hubChatThreadId === ref.threadId;
+}
+
 export function useMailEnvironmentId(): EnvironmentId | null {
   return useAtomValue(mailEnvironmentIdAtom);
 }

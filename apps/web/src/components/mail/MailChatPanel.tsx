@@ -11,7 +11,7 @@ import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 
-/** An email's chat beside the email, so reading and asking about it share one screen. */
+/** A mail chat beside its email or Mail home, so reading and asking share one screen. */
 function MailChatPanel({
   environmentId,
   chatThreadId,
@@ -54,7 +54,7 @@ function MailChatPanel({
   );
 }
 
-/** The chat beside an email: a column on wide screens, a sheet over the email otherwise. */
+/** A column on wide screens, a sheet over the page otherwise. */
 export function MailChatAside({
   environmentId,
   chatThreadId,

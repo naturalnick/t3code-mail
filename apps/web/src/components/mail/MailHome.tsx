@@ -1,7 +1,7 @@
-import type { EnvironmentId, MailStatus } from "@t3tools/contracts";
+import type { EnvironmentId, MailStatus, ThreadId } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
-import { useGT, useMessages } from "gt-react";
-import { ChevronRightIcon } from "lucide-react";
+import { T, useGT, useMessages } from "gt-react";
+import { ChevronRightIcon, MessageSquareIcon } from "lucide-react";
 import { useState } from "react";
 import {
   mailEnvironment,
@@ -9,9 +9,12 @@ import {
   useMailSections,
   useMailStatus,
 } from "../../state/mail";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useEnvironmentQuery } from "../../state/query";
 import { useMailCommand } from "../settings/MailSettings.commands";
 import { Button } from "../ui/button";
+import { Toggle } from "../ui/toggle";
+import { MailChatAside } from "./MailChatPanel";
 import { MailPage } from "./MailPage";
 import { MailDecider } from "./MailDecider";
 import { Checkbox } from "../ui/checkbox";
@@ -196,10 +199,7 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
             </Button>
           </div>
           <p className="text-sm text-muted-foreground">
-            {gt("{arrived} arrived · {active} need you", {
-              arrived: recap.arrived,
-              active: recap.needsYou,
-            })}
+            {gt("{arrived} arrived", { arrived: recap.arrived })}
           </p>
           {recap.settled.length > 0 ? (
             <ul aria-label={gt("Settled for you")} className="mt-1 grid min-w-0 grid-cols-1">
@@ -307,20 +307,81 @@ function Inbox({ environmentId, status }: { environmentId: EnvironmentId; status
   );
 }
 
-export function MailHome() {
+interface ChatProps {
+  chatOpen: boolean;
+  onChatOpenChange: (open: boolean) => void;
+}
+
+function MailHub({
+  environmentId,
+  status,
+  chatOpen,
+  onChatOpenChange,
+}: ChatProps & { environmentId: EnvironmentId; status: MailStatus }) {
+  const gt = useGT();
+  const wide = useMediaQuery("lg");
+  // The status learns the chat id on its next push; the reply to opening one knows it now.
+  const [openedChatId, setOpenedChatId] = useState<ThreadId | null>(null);
+  const openHubChat = useMailCommand(
+    environmentId,
+    mailEnvironment.openHubChat,
+    gt("Could not open mail chat"),
+  );
+  const chatThreadId = openedChatId ?? status.hubChatThreadId;
+  const showChat = chatOpen && chatThreadId !== null;
+  const setChatOpen = async (open: boolean) => {
+    if (!open) return onChatOpenChange(false);
+    // Opening always asks the server, which replaces a chat the user deleted.
+    const result = await openHubChat.run({});
+    if (!result) return;
+    setOpenedChatId(result.value.threadId);
+    onChatOpenChange(true);
+  };
+  return (
+    <MailPage
+      toolbar={
+        <Toggle
+          variant="ghost"
+          size="sm"
+          pressed={showChat}
+          disabled={!showChat && openHubChat.disabled}
+          onPressedChange={(open) => void setChatOpen(open)}
+        >
+          <MessageSquareIcon />
+          <T>Chat</T>
+        </Toggle>
+      }
+      scroll={false}
+    >
+      <div className="relative flex h-full min-h-0 gap-3 pe-3 pb-3">
+        <div className="scrollbar-gutter-both min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+          <div className="mx-auto grid w-full min-w-0 grid-cols-1 max-w-3xl gap-6 p-5">
+            <Inbox environmentId={environmentId} status={status} />
+          </div>
+        </div>
+        {showChat ? (
+          <MailChatAside
+            environmentId={environmentId}
+            chatThreadId={chatThreadId}
+            wide={wide}
+            onClose={() => onChatOpenChange(false)}
+          />
+        ) : null}
+      </div>
+    </MailPage>
+  );
+}
+
+export function MailHome(props: ChatProps) {
   const gt = useGT();
   const environmentId = useMailEnvironmentId();
   const status = useMailStatus(environmentId);
+  if (environmentId !== null && status !== null)
+    return <MailHub key={environmentId} environmentId={environmentId} status={status} {...props} />;
   return (
     <MailPage>
       <div className="mx-auto grid w-full min-w-0 grid-cols-1 max-w-3xl gap-6 p-5">
-        {environmentId === null ? (
-          gt("No connected server has Mail.")
-        ) : status === null ? (
-          gt("Loading mail…")
-        ) : (
-          <Inbox key={environmentId} environmentId={environmentId} status={status} />
-        )}
+        {environmentId === null ? gt("No connected server has Mail.") : gt("Loading mail…")}
       </div>
     </MailPage>
   );

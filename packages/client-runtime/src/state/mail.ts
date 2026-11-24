@@ -203,6 +203,10 @@ export function createMailEnvironmentAtoms<R, E>(
       label: "environment-command:mail:open-session",
       tag: WS_METHODS.mailOpenSession,
     }),
+    openHubChat: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mail:open-hub-chat",
+      tag: WS_METHODS.mailOpenHubChat,
+    }),
     addAccount: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:mail:add-account",
       tag: WS_METHODS.mailAddAccount,
