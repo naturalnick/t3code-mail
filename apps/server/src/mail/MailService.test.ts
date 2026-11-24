@@ -6,7 +6,6 @@ import {
   MailAccountId,
   MAIL_SESSION_PROJECT_ID,
   MailError,
-  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type MailThreadId,
@@ -35,6 +34,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ImapSession from "./imapSession.ts";
 import type { ParsedMessage } from "./imapSession.ts";
 import { enqueueOp, moveToSpam, replayOp, restoreFromSpam } from "./mailServerOp.ts";
+import { MailToolkit } from "../mcp/toolkits/mail/tools.ts";
 import * as MailChatContext from "./MailChatContext.ts";
 import * as MailCredentials from "./MailCredentials.ts";
 import * as MailEngine from "./MailEngine.ts";
@@ -192,8 +192,8 @@ const spamSession: SpamSession = {
 const offline = () => new MailError({ code: "unavailable", message: "Connect this account." });
 
 let randomCounter = 0;
-/** Threads the mocked launcher started, by project, so a test can delete one. */
-const launchedThreads = new Map<ThreadId, ProjectId>();
+/** What the mocked launcher started, so a test can check a launch or delete its thread. */
+const launchedThreads = new Map<ThreadId, ThreadLaunchService.ThreadLaunchInput>();
 const testLayer = (
   mailDir: string,
   reply: ModelReply,
@@ -257,7 +257,7 @@ const testLayer = (
         launch: (input) =>
           Effect.sync(() => {
             const threadId = input.threadId ?? ThreadId.make(input.commandId);
-            launchedThreads.set(threadId, input.projectId);
+            launchedThreads.set(threadId, input);
             return {
               threadId,
               projection: idleThreadProjection(liveThreadShell(threadId)),
@@ -270,8 +270,10 @@ const testLayer = (
       Layer.mock(ThreadManagementService.ThreadManagementService)({
         getThreadShell: (threadId) =>
           Effect.sync(() => {
-            const projectId = launchedThreads.get(threadId);
-            return projectId === undefined ? null : { ...liveThreadShell(threadId), projectId };
+            const launched = launchedThreads.get(threadId);
+            return launched === undefined
+              ? null
+              : { ...liveThreadShell(threadId), projectId: launched.projectId };
           }),
       }),
     ),
@@ -3043,21 +3045,46 @@ it.effect("notifies once for new unread inbox mail and skips backfill and repeat
   ),
 );
 
-it.effect("keeps one Mail home chat and replaces it once deleted", () =>
+it.effect("starts Mail home chat on the last coding model and replaces it once deleted", () =>
   withMail(
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       const engine = yield* MailEngine.MailEngine;
       const mail = yield* MailService.MailService;
       const chat = yield* MailChatContext.MailChatContext;
       yield* mail.updateSettings({
         defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "luna" },
       });
+      const coding = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "opus" };
+      const thread = (id: string, project: string, at: string, payload: object) =>
+        sql`INSERT INTO orchestration_v2_projection_threads
+          (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+          VALUES (${id}, ${project}, 'Test', 'codex', 'default', 'default', ${at}, ${at}, ${JSON.stringify(payload)})`;
+      yield* thread("coding", "project-app", "2026-11-05T09:00:00.000Z", {
+        createdBy: "user",
+        modelSelection: coding,
+        lineage: { relationshipToParent: null },
+      });
+      // Newer, but a subagent and a mail chat are not the user's coding sessions.
+      yield* thread("subagent", "project-app", "2026-11-05T10:00:00.000Z", {
+        createdBy: "user",
+        modelSelection: { instanceId: "codex", model: "terra" },
+        lineage: { relationshipToParent: "subagent" },
+      });
+      yield* thread("email-chat", MAIL_SESSION_PROJECT_ID, "2026-11-05T11:00:00.000Z", {
+        createdBy: "user",
+        modelSelection: { instanceId: "codex", model: "luna" },
+      });
       expect((yield* engine.status).hubChatThreadId).toBeNull();
 
       const first = yield* mail.openHubChat;
       expect(first).toMatchObject({ projectId: MAIL_SESSION_PROJECT_ID, created: true });
+      expect(launchedThreads.get(first.threadId)?.modelSelection).toEqual(coding);
       expect((yield* engine.status).hubChatThreadId).toBe(first.threadId);
-      expect(yield* chat.forTurn(first.threadId, true)).toContain("No single email is open");
+      const prompt = yield* chat.forTurn(first.threadId, true);
+      const named = [...prompt.matchAll(/`(t3_[a-z_]+)`/g)].map((match) => match[1]!);
+      expect(named).toContain("t3_mail_activity");
+      for (const tool of named) expect(MailToolkit.tools).toHaveProperty(tool);
       expect(yield* chat.forTurn(first.threadId, false)).toBe("");
 
       expect(yield* mail.openHubChat).toEqual({ ...first, created: false });

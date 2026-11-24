@@ -263,6 +263,9 @@ export const MailActionEntry = Schema.Struct({
   threadId: Schema.NullOr(MailThreadId),
   subject: Schema.NullOr(Schema.String),
   from: Schema.NullOr(Schema.String),
+  fromAddress: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
   reason: Schema.NullOr(Schema.String),
   undoable: Schema.Boolean,
   undoneAt: Schema.NullOr(IsoDateTime),

@@ -2606,13 +2606,12 @@ const make = Effect.gen(function* () {
       return { projectId, threadId: shell.id, created: false };
     // A deleted chat starts a new one under a new id, so its old history never returns.
     const threadId = ThreadId.make(`mail-hub-${sessionDigest("hub", linked)}`);
-    const current = yield* engine.settings;
-    // The home chat reasons across many emails, so it prefers the stronger mail model.
+    // It starts on the model the user codes with; the chat keeps its own model after that.
     const modelSelection =
-      current.escalationModelSelection ??
-      current.defaultModelSelection ??
+      (yield* engine.lastCodingModel) ??
       (yield* serverSettings.getSettings.pipe(Effect.mapError(chatUnavailable)))
-        .defaultModelSelection;
+        .defaultModelSelection ??
+      (yield* engine.settings).defaultModelSelection;
     if (!modelSelection) return yield* invalid("Pick a mail model in Settings → Mail first.");
     const launched = yield* launcher
       .launch({

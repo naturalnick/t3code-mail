@@ -899,6 +899,7 @@ export function actionEntry(
     threadId: action.threadId,
     subject: thread?.subject ?? action.undo?.trash?.subject ?? null,
     from: thread ? thread.fromName || thread.fromAddress : (action.undo?.trash?.from ?? null),
+    fromAddress: thread?.fromAddress ?? null,
     reason: action.reason,
     undoable: action.undo !== null && action.undoneAt === null,
     undoneAt: action.undoneAt,

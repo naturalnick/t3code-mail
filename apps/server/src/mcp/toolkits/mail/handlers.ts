@@ -92,6 +92,7 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
       return {
         subject: detail.thread.subject,
         state: detail.thread.state,
+        why: detail.thread.why,
         messages: detail.messages.map((message) => ({
           messageId: message.id,
           from: address(message.from),
@@ -119,6 +120,43 @@ export const layer = McpToolAccess.toLayer(MailToolkit, {
             status: draft.status,
           })),
         related: related.map((entry) => row(entry.thread, excluded)),
+      };
+    }),
+  ),
+  t3_mail_activity: McpToolAccess.reads(({ automatic, actor, beforeId, limit }) =>
+    Effect.gen(function* () {
+      const mail = yield* MailService.MailService;
+      const excluded = yield* failure(mail.aiExcluded);
+      const page = yield* failure(
+        mail.listActions({
+          includeSpamAndUnsubscribe: true,
+          limit: limit ?? 30,
+          ...(automatic === undefined ? {} : { automatic }),
+          ...(actor === undefined ? {} : { actor }),
+          ...(beforeId === undefined ? {} : { beforeId }),
+        }),
+      );
+      return {
+        entries: page.actions.map((entry) => ({
+          actionId: entry.id,
+          at: entry.at,
+          actor: entry.actor,
+          action: entry.kind,
+          undone: entry.undoneAt !== null,
+          ...(entry.actorLabel ? { by: entry.actorLabel } : {}),
+          ...(entry.reason ? { reason: entry.reason } : {}),
+          ...(entry.threadId ? { threadId: entry.threadId } : {}),
+          ...(entry.from ? { from: entry.from } : {}),
+          ...(entry.subject
+            ? {
+                subject:
+                  entry.fromAddress !== null && excluded(entry.fromAddress)
+                    ? HIDDEN
+                    : entry.subject,
+              }
+            : {}),
+        })),
+        hasMore: page.hasMore,
       };
     }),
   ),

@@ -9,6 +9,7 @@ import {
   MailSettings as MailSettingsSchema,
   MailThreadId,
   MAIL_SESSION_PROJECT_ID,
+  ModelSelection,
   ThreadId,
   UsageDay,
 } from "@t3tools/contracts";
@@ -17,6 +18,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -38,6 +40,7 @@ const SETTLED_IN_SNAPSHOT = 60;
 /** Backfilled mail older than this lands settled without a model call. */
 
 const decodeSettings = Schema.decodeUnknownOption(Schema.fromJsonString(MailSettingsSchema));
+const decodeModelSelection = Schema.decodeUnknownOption(Schema.fromJsonString(ModelSelection));
 
 export interface IngestContext {
   readonly accountId: MailAccountId;
@@ -102,6 +105,8 @@ export class MailEngine extends Context.Service<
     readonly publishRemoved: (ids: ReadonlyArray<MailThreadId>) => Effect.Effect<void>;
     readonly publishStatus: Effect.Effect<void, SqlError.SqlError>;
     readonly refreshChatUsage: Effect.Effect<void, SqlError.SqlError>;
+    /** The model of the coding thread the user most recently ran, for a new Mail home chat. */
+    readonly lastCodingModel: Effect.Effect<ModelSelection | null, SqlError.SqlError>;
     readonly status: Effect.Effect<MailStatus, SqlError.SqlError>;
     readonly rows: (
       ids: ReadonlyArray<MailThreadId>,
@@ -290,6 +295,20 @@ const make = Effect.gen(function* () {
       yield* publishStatus;
     }
     lastUsageCheck = { day, updatedAt };
+  });
+
+  const lastCodingModel = Effect.gen(function* () {
+    // Every provider turn touches its thread, so the newest user-started coding thread ran last.
+    const [thread] = yield* orchestration<{ selection: string | null }>`
+      SELECT json_extract(payload_json, '$.modelSelection') AS selection
+      FROM orchestration_v2_projection_threads
+      WHERE deleted_at IS NULL AND archived_at IS NULL
+        AND project_id != ${MAIL_SESSION_PROJECT_ID}
+        AND json_extract(payload_json, '$.createdBy') = 'user'
+        AND json_extract(payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+      ORDER BY updated_at DESC LIMIT 1
+    `.pipe(NodeSqliteClient.readOnly);
+    return thread?.selection ? Option.getOrNull(decodeModelSelection(thread.selection)) : null;
   });
 
   const snapshot = Effect.gen(function* () {
@@ -692,6 +711,7 @@ const make = Effect.gen(function* () {
   );
 
   return MailEngine.of({
+    lastCodingModel,
     ingest,
     applyFlags,
     markRemoved,
