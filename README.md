@@ -1,8 +1,10 @@
-# T3 Code Mail
+# Code + Mailbox
 
-T3 Code Mail is an independent fork of [T3 Code](https://github.com/pingdotgg/t3code) that adds an email inbox to its web and desktop clients. Read and reply to mail, ask your configured coding agent about a conversation, or let a rule settle recurring receipts and notifications. You can move any settled thread back to the inbox.
+Code + Mailbox is an unofficial fork based on the [T3 Code](https://github.com/pingdotgg/t3code) source code. It is not affiliated with, endorsed by, or maintained by T3 Tools, Inc.
 
-![An itch.io game jam announcement open in T3 Code Mail, with the inbox on the left and auto-settle controls on the right](./.github/readme/mail-reader.png)
+Code + Mailbox adds an email inbox to the web and desktop clients. Read and reply to mail, ask your configured coding agent about a conversation, or let a rule settle recurring receipts and notifications. You can move any settled thread back to the inbox.
+
+![An itch.io game jam announcement open in Code + Mailbox, with the inbox on the left and auto-settle controls on the right](./.github/readme/mail-reader.png)
 
 ## Run Mail from source
 

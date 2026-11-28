@@ -1,4 +1,4 @@
-# T3 Code Mail decisions
+# Code + Mailbox decisions
 
 One line each. Made during the unattended v1 build; revisit any of them.
 

@@ -1,4 +1,4 @@
-# T3 Code Mail — Spec
+# Code + Mailbox — Spec
 
 Design scope for the Mail fork. For setup and current behavior, see the [Mail guide](../user/mail.md).
 

@@ -46,7 +46,7 @@ export function beginMacMailActivity(): () => void {
       "stringWithUTF8String:",
       pointer,
       [DataType.String],
-      ["T3 Code Mail sync"],
+      ["Code + Mailbox sync"],
     );
     const activity = message(
       info,

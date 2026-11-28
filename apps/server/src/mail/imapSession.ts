@@ -328,7 +328,7 @@ export class ImapSession {
       emitLogs: false,
       disableAutoIdle: true,
       qresync: true,
-      clientInfo: { name: "T3 Code Mail" },
+      clientInfo: { name: "Code + Mailbox" },
       ...transportSecurity(config),
     });
     this.client.on("exists", () => events.onExists());

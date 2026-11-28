@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
+// Saved passwords are keyed by this name; renaming it orphans every stored account password.
 const KEYCHAIN_SERVICE = "T3 Code Mail";
 
 export class MailCredentialError extends Schema.TaggedError<MailCredentialError>()(
